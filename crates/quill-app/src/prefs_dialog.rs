@@ -85,10 +85,17 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
                 s.smart_quotes,
             );
             d.check(
+                "autolinks",
+                "Make Typed Web and Mail Addresses Links",
+                12.0,
+                143.0,
+                s.auto_links,
+            );
+            d.check(
                 "fmtclip",
                 "Include Formatted Text in Clipboard",
                 12.0,
-                143.0,
+                160.0,
                 s.formatted_clipboard,
             );
             d.text("Default Paper:", 11.0, 184.0);
@@ -186,7 +193,7 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
                 .iter()
                 .position(|r| *r == s.reopen)
                 .unwrap_or(2);
-            d.popup("reopen", &choices, at, 232.0, 154.0, 100.0);
+            d.popup("reopen", &choices, at, 232.0, 154.0, 130.0);
         }
         SPELLING_PANEL => {
             d.text("Custom Dictionary:", 9.0, 41.0);
@@ -442,6 +449,7 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
                         if landscape { (h, w) } else { (w, h) };
                 }
                 s.smart_quotes = on("smart");
+                s.auto_links = on("autolinks");
                 s.formatted_clipboard = on("fmtclip");
             });
         }

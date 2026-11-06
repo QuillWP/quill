@@ -652,6 +652,9 @@ fn default_lookup(key: &Key, physical_char: Option<char>, mods: Mods) -> Option<
         (K::Ch('o'), true, false, false) => Open,
         (K::Ch('w'), true, false, false) => Close,
         (K::Ch('s'), true, false, false) => Save,
+        // Decided 2026-10-30 (Lucas): ⌘⇧S is Save As, as in other Mac apps.
+        // ⌘⌥S stays Split Window.
+        (K::Ch('s'), true, true, false) => SaveAs,
         (K::Ch('q'), true, false, false) => Quit,
         (K::Ch('z'), true, false, false) => Undo,
         (K::Ch('y'), true, false, false) => Repeat,
@@ -807,6 +810,7 @@ pub fn shortcut_label(cmd: Cmd) -> &'static str {
         Open => "⌘O",
         Close => "⌘W",
         Save => "⌘S",
+        SaveAs => "⌘⇧S",
         Quit => "⌘Q",
         Undo => "⌘Z",
         Repeat => "⌘Y",
@@ -899,6 +903,8 @@ mod tests {
             Some(Cmd::PlainText)
         );
         assert_eq!(lookup(&ch("z"), None, cmd()), Some(Cmd::Undo));
+        assert_eq!(lookup(&ch("s"), None, cmd()), Some(Cmd::Save));
+        assert_eq!(lookup(&ch("S"), Some('s'), cmd_shift()), Some(Cmd::SaveAs));
         assert_eq!(lookup(&ch("J"), Some('j'), cmd_shift()), Some(Cmd::Justify));
         assert_eq!(lookup(&ch("j"), None, cmd()), Some(Cmd::ShowMarks));
         assert_eq!(lookup(&ch("]"), None, cmd()), Some(Cmd::FontSizeUp));

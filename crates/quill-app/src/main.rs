@@ -18,6 +18,7 @@ mod customize;
 mod dialog;
 mod docview;
 mod find_dialog;
+mod font_names;
 mod frame_dialog;
 mod glossary;
 mod glossary_file;

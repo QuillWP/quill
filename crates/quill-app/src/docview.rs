@@ -926,10 +926,13 @@ impl DocView {
         } else if cmd {
             (DragUnit::Word, story.sentence_at(pos))
         } else {
+            // Decided 2026-10-30 (Lucas): dragging after a double or triple
+            // click grows the selection a character at a time, not a word or
+            // paragraph at a time; the word or paragraph stays selected.
             match count {
                 1 => (DragUnit::Char, (pos, pos)),
-                2 => (DragUnit::Word, story.word_at(pos)),
-                _ => (DragUnit::Para, story.paragraph_range(pos.para)),
+                2 => (DragUnit::Char, story.word_at(pos)),
+                _ => (DragUnit::Char, story.paragraph_range(pos.para)),
             }
         };
         if shift {
@@ -1645,6 +1648,31 @@ mod tests {
         let b = &v.blocks[0];
         let inner = &b.row.as_ref().unwrap().nested[0];
         assert!(b.top + b.height - (inner.top + inner.height) > 8.0);
+    }
+
+    #[test]
+    fn dragging_after_a_double_click_grows_by_character() {
+        let mut fonts = quill_layout::Fonts::new(quill_layout::Catalog::scan_system());
+        if fonts.family_names().is_empty() {
+            return;
+        }
+        let mut v = DocView::new(Document::new(), "Drag".into());
+        v.area = Rect::new(0.0, 0.0, 800.0, 600.0);
+        v.type_text("alpha bravo charlie");
+        v.update_layout(&mut fonts);
+        let at = |v: &DocView, offset: usize| {
+            let (x, top, h) = v.caret_geometry(Position::new(0, offset), false);
+            v.to_window(x + 1.0, top + h / 2.0)
+        };
+        // Double-click inside "alpha", then drag into the middle of "bravo".
+        let (wx, wy) = at(&v, 2);
+        v.mouse_down(wx, wy, false, false);
+        v.mouse_down(wx, wy, false, false);
+        assert_eq!(v.sel.range(), (Position::new(0, 0), Position::new(0, 6)));
+        let (dx, dy) = at(&v, 8);
+        v.mouse_drag(dx, dy);
+        v.mouse_up();
+        assert_eq!(v.sel.range(), (Position::new(0, 0), Position::new(0, 8)));
     }
 
     #[test]

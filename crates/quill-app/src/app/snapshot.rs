@@ -15,7 +15,9 @@ pub fn snapshot(
     doc: Option<Document>,
     script: &str,
 ) {
-    let mut fonts = Fonts::new(Catalog::scan_system());
+    let catalog = Catalog::scan_system();
+    crate::font_names::set(&catalog);
+    let mut fonts = Fonts::new(catalog);
     let font_names: Vec<String> = fonts.family_names().iter().map(|s| s.to_string()).collect();
     let font_families = fonts.family_info();
     let windows = vec![("Untitled1".to_string(), true)];
@@ -26,7 +28,9 @@ pub fn snapshot(
         windows: &windows,
     };
     let mut cache = GlyphCache::new();
-    let doc = doc.unwrap_or_else(|| crate::settings::get().new_document());
+    let mut doc = doc.unwrap_or_else(|| crate::settings::get().new_document());
+    // As when the app opens a file.
+    crate::font_names::use_family_names(&mut doc);
     let mut st = WinState::new(DocView::new(doc, "Untitled1".into()));
     st.ui = ui_scale(scale);
     let mut clip = Clipboard::new();

@@ -44,6 +44,7 @@ impl App {
             };
             crate::image::prepare_document_previews(&mut doc);
             self.ensure_fonts();
+            crate::font_names::use_family_names(&mut doc);
             let missing = self
                 .fonts
                 .as_ref()
@@ -160,7 +161,7 @@ impl App {
                         .as_ref()
                         .and_then(|path| path.parent());
                 #[cfg(target_os = "macos")]
-                let selected = crate::mac_save::save_file(&filename, directory);
+                let selected = crate::mac_save::save_file(&w.window, &filename, directory);
                 #[cfg(not(target_os = "macos"))]
                 let selected = {
                     let mut dialog = rfd::FileDialog::new()

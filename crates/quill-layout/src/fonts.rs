@@ -40,6 +40,9 @@ struct FaceSource {
     index: u32,
     weight: u16,
     italic: bool,
+    /// The face's PostScript name, such as "HelveticaNeue-Bold". Empty
+    /// for faces given by hand.
+    postscript: String,
 }
 
 #[derive(Clone, Debug)]
@@ -131,6 +134,7 @@ impl Catalog {
                 index: face.index,
                 weight: face.weight.0,
                 italic: face.style != fontdb::Style::Normal,
+                postscript: face.post_script_name.clone(),
             });
         }
         self.families.sort_by_key(|f| f.name.to_lowercase());
@@ -145,6 +149,7 @@ impl Catalog {
                 index: *index,
                 weight: *weight,
                 italic: *italic,
+                postscript: String::new(),
             };
             match catalog.families.iter_mut().find(|f| f.name == *name) {
                 Some(f) => f.faces.push(source),
@@ -156,6 +161,35 @@ impl Catalog {
             }
         }
         catalog
+    }
+
+    /// The family and style each installed face's PostScript name stands
+    /// for, keyed in lower case: "helveticaneue-bold" is Helvetica Neue in
+    /// bold. Rich text copied from other Mac apps names its fonts this way.
+    /// Names that are also a family's own name are left out, as are the
+    /// system's hidden interface fonts.
+    pub fn postscript_names(&self) -> HashMap<String, (String, FontVariant)> {
+        let families: std::collections::HashSet<String> = self
+            .families
+            .iter()
+            .map(|f| f.name.to_lowercase())
+            .collect();
+        let mut out = HashMap::new();
+        for family in self.families.iter().filter(|f| !f.hidden) {
+            for face in &family.faces {
+                let key = face.postscript.to_lowercase();
+                if key.is_empty() || families.contains(&key) {
+                    continue;
+                }
+                let variant = FontVariant {
+                    bold: face.weight >= 600,
+                    italic: face.italic,
+                };
+                out.entry(key)
+                    .or_insert_with(|| (family.name.clone(), variant));
+            }
+        }
+        out
     }
 
     fn find(&self, name: &str) -> Option<&Family> {

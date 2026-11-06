@@ -49,6 +49,8 @@ impl App {
         if let Some(i) = self.front.and_then(|id| self.index(id)) {
             self.take_doc(i);
         }
+        // Runs after anything that opens, saves or closes a document.
+        self.note_session();
         #[cfg(target_os = "macos")]
         {
             self.ensure_fonts();
@@ -131,7 +133,10 @@ impl App {
             }
             (Action::Cmd(Cmd::Open), None) => self.open_dialog(el, None),
             (Action::Cmd(Cmd::Quit), None) => {
-                crate::settings::update(|s| s.last_session.clear());
+                crate::settings::update(|s| {
+                    s.last_session.clear();
+                    s.quit_cleanly = true;
+                });
                 el.exit()
             }
             (_, None) => {}

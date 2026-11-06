@@ -30,10 +30,50 @@ impl DocView {
         let end = self.doc.insert_text(MAIN, at, &text, chp);
         self.caret_formats.clear();
         self.finish_edit(Selection::caret(end));
+        if text == " " {
+            self.auto_link(at);
+        }
         match &mut self.repeat {
             Some(Repeatable::Text(t)) => t.push_str(&text),
             _ => self.repeat = Some(Repeatable::Text(text)),
         }
+    }
+
+    /// After a space, tab or Return: if the word ending at `end` is a web
+    /// or mail address the person typed, make it a link. It is an undo
+    /// step of its own, so Command-Z takes the link off and keeps the text.
+    pub(super) fn auto_link(&mut self, end: Position) {
+        if !crate::settings::with(|s| s.auto_links) {
+            return;
+        }
+        let p = &self.doc.main.paras[end.para];
+        let before = &p.text[..end.offset];
+        let start = before
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        let Some((range, url)) = typed_address(&before[start..]) else {
+            return;
+        };
+        let (s, e) = (start + range.start, start + range.end);
+        if p.run_bounds()
+            .any(|(a, b, c)| c.link != 0 && a < e && b > s)
+        {
+            return;
+        }
+        let id = quill_core::link::intern(quill_core::Link::new(&url));
+        let sel = self.sel;
+        self.doc.begin("Link", sel);
+        self.doc.set_link(
+            MAIN,
+            Position::new(end.para, s),
+            Position::new(end.para, e),
+            id,
+            quill_core::link::BROWSER_BLUE,
+        );
+        self.typing_chp = None;
+        self.finish_edit(sel);
     }
 
     /// Whether the document has room for `extra` more within Quill's size
@@ -578,6 +618,7 @@ impl DocView {
                 let typing = self
                     .typing_chp
                     .unwrap_or_else(|| self.doc.main.paras[at.para].chp_at(at.offset));
+                let word_end = at;
                 let at = self.doc.split_paragraph_typing(MAIN, at, Some(typing));
                 // In Outline view a new paragraph after a heading is a
                 // heading of the same level.
@@ -588,6 +629,7 @@ impl DocView {
                     self.doc.apply_style(MAIN, at.para, at.para, style);
                 }
                 self.finish_edit(Selection::caret(at));
+                self.auto_link(word_end);
             }
             LineBreak => self.type_special(chars::LINE_BREAK),
             // A break can't go inside a table cell: say so rather than
@@ -793,11 +835,15 @@ impl DocView {
     }
 
     pub(super) fn type_special(&mut self, c: char) {
-        self.type_text_raw(&c.to_string());
+        let at = self.type_text_raw(&c.to_string());
+        if c == chars::TAB || c == chars::LINE_BREAK {
+            self.auto_link(at);
+        }
     }
 
     /// Like `type_text` but keeps control characters such as line breaks.
-    pub(super) fn type_text_raw(&mut self, text: &str) {
+    /// Returns where the text went in.
+    pub(super) fn type_text_raw(&mut self, text: &str) -> Position {
         self.doc.begin_typing(self.sel);
         let at = self.delete_selection();
         let chp = self
@@ -805,6 +851,7 @@ impl DocView {
             .unwrap_or_else(|| self.doc.main.paras[at.para].chp_at(at.offset));
         let end = self.doc.insert_text(MAIN, at, text, chp);
         self.finish_edit(Selection::caret(end));
+        at
     }
 
     pub(super) fn repeat_last(&mut self, clip: &mut Clipboard) {
@@ -1133,6 +1180,64 @@ impl DocView {
 }
 
 /// Curl straight quotes, as Preferences > "Smart" Quotes does.
+/// If `word` is a web or mail address someone typed, the part of it the
+/// link covers (as a byte range) and the address to link to. It starts
+/// with http://, https://, www. or mailto: (with an @). Opening brackets
+/// and quotes before it stay out of the link, as do punctuation that ends
+/// a sentence and a closing bracket the address did not open.
+pub(super) fn typed_address(word: &str) -> Option<(std::ops::Range<usize>, String)> {
+    let start = word.len()
+        - word
+            .trim_start_matches(['(', '[', '<', '"', '\'', '\u{201C}', '\u{2018}'])
+            .len();
+    let word = &word[start..];
+    let mut end = word.len();
+    loop {
+        let last = word[..end].chars().next_back()?;
+        // A closing bracket with no opening one left for it.
+        let unopened = |open: char| {
+            let count = |c| word[..end].chars().filter(|&x| x == c).count();
+            count(last) > count(open)
+        };
+        let trim = match last {
+            '.' | ',' | ';' | ':' | '!' | '?' | '\'' | '"' | '\u{2019}' | '\u{201D}' => true,
+            ')' => unopened('('),
+            ']' => unopened('['),
+            '>' => unopened('<'),
+            _ => false,
+        };
+        if !trim {
+            break;
+        }
+        end -= last.len_utf8();
+    }
+    let text = &word[..end];
+    // Quill's own marks (pictures, fields, notes, optional hyphens) can't
+    // be part of an address.
+    let mark = |c: char| {
+        c.is_control()
+            || c.is_whitespace()
+            || c == chars::OBJECT
+            || c == chars::OPTIONAL_HYPHEN
+            || ('\u{E000}'..='\u{F8FF}').contains(&c)
+    };
+    if text.chars().any(mark) {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+    let rest = |prefix: &str| lower.strip_prefix(prefix).filter(|r| !r.is_empty());
+    let url = if rest("http://").or(rest("https://")).is_some() {
+        text.to_string()
+    } else if rest("www.").is_some_and(|r| r.contains('.')) {
+        format!("https://{text}")
+    } else if rest("mailto:").is_some_and(|r| r.contains('@')) {
+        text.to_string()
+    } else {
+        return None;
+    };
+    Some((start..start + end, url))
+}
+
 pub(super) fn smart_quotes(text: &str, mut before: Option<char>) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {

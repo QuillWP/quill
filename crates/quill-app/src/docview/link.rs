@@ -260,6 +260,110 @@ mod tests {
     }
 
     #[test]
+    fn typed_addresses_are_recognised_without_trailing_punctuation() {
+        use super::super::editing::typed_address;
+        let link = |w: &str| typed_address(w).map(|(range, url)| (w[range].to_string(), url));
+        assert_eq!(
+            link("https://example.com/a?b=1."),
+            Some((
+                "https://example.com/a?b=1".into(),
+                "https://example.com/a?b=1".into()
+            ))
+        );
+        assert_eq!(
+            link("(http://example.com)."),
+            Some(("http://example.com".into(), "http://example.com".into()))
+        );
+        assert_eq!(
+            link("http://en.wikipedia.org/wiki/Quill_(app))"),
+            Some((
+                "http://en.wikipedia.org/wiki/Quill_(app)".into(),
+                "http://en.wikipedia.org/wiki/Quill_(app)".into()
+            ))
+        );
+        assert_eq!(
+            link("www.example.com,"),
+            Some(("www.example.com".into(), "https://www.example.com".into()))
+        );
+        assert_eq!(
+            link("MAILTO:ada@example.com"),
+            Some((
+                "MAILTO:ada@example.com".into(),
+                "MAILTO:ada@example.com".into()
+            ))
+        );
+        assert_eq!(link("mailto:nobody"), None);
+        assert_eq!(link("http://"), None);
+        assert_eq!(link("www."), None);
+        assert_eq!(link("example.com"), None);
+        assert_eq!(link("https://a\u{FFFC}b"), None);
+    }
+
+    #[test]
+    fn a_typed_address_becomes_a_link_that_undo_takes_off() {
+        let mut clip = Clipboard::without_system();
+        let mut v = view("");
+        v.type_text("See https://example.com.");
+        v.type_text(" ");
+        let p = &v.doc.main.paras[0];
+        assert_eq!(p.text, "See https://example.com. ");
+        let c = p.chp_of_char(4);
+        assert_eq!(quill_core::link::url(c.link), "https://example.com");
+        assert_eq!(c.underline, Underline::Single);
+        assert_eq!(p.chp_of_char(3).link, 0);
+        assert_eq!(p.chp_of_char(23).link, 0, "the full stop stays out");
+        assert_eq!(v.sel, Selection::caret(Position::new(0, 25)));
+        // Typing on is plain text.
+        v.type_text("ok");
+        assert_eq!(v.doc.main.paras[0].chp_of_char(25).link, 0);
+        // One Undo takes "ok" back, the next the link, keeping the text.
+        v.exec(Cmd::Undo, false, &mut clip);
+        v.exec(Cmd::Undo, false, &mut clip);
+        let p = &v.doc.main.paras[0];
+        assert_eq!(p.text, "See https://example.com. ");
+        assert_eq!(p.chp_of_char(4).link, 0);
+        assert_eq!(p.chp_of_char(4).underline, Underline::None);
+    }
+
+    #[test]
+    fn return_and_tab_also_make_links_and_existing_links_are_left_alone() {
+        let mut clip = Clipboard::without_system();
+        let mut v = view("");
+        v.type_text("www.example.com");
+        v.exec(Cmd::NewParagraph, false, &mut clip);
+        let c = v.doc.main.paras[0].chp_of_char(0);
+        assert_eq!(quill_core::link::url(c.link), "https://www.example.com");
+        v.type_text("mailto:ada@example.com");
+        v.exec(Cmd::Tab, false, &mut clip);
+        let c = v.doc.main.paras[1].chp_of_char(0);
+        assert_eq!(quill_core::link::url(c.link), "mailto:ada@example.com");
+
+        // A link made by hand keeps its own address.
+        let mut v = view("https://shown.example");
+        v.sel = Selection::new(Position::new(0, 0), Position::new(0, 21));
+        let t = v.link_target();
+        v.apply_link(
+            &t,
+            "https://shown.example",
+            Link::new("https://real.example"),
+            quill_core::link::BROWSER_BLUE,
+        );
+        v.type_text(" ");
+        let c = v.doc.main.paras[0].chp_of_char(0);
+        assert_eq!(quill_core::link::url(c.link), "https://real.example");
+    }
+
+    #[test]
+    fn typed_addresses_stay_text_when_the_setting_is_off() {
+        crate::settings::update(|s| s.auto_links = false);
+        let mut v = view("");
+        v.type_text("https://example.com");
+        v.type_text(" ");
+        crate::settings::update(|s| s.auto_links = true);
+        assert_eq!(v.doc.main.paras[0].chp_of_char(0).link, 0);
+    }
+
+    #[test]
     fn only_web_and_mail_addresses_are_followed_blindly() {
         assert!(!follow("file:///Applications/Calculator.app"));
         assert!(!follow("javascript:alert(1)"));

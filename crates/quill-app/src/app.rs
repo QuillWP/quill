@@ -1596,6 +1596,7 @@ impl App {
                 .unwrap_or_default();
             let folders = FontFolders::current();
             let catalog = folders.apply(&system);
+            crate::font_names::set(&catalog);
             self.system_catalog = Some(system);
             self.font_folders_loaded = folders;
             self.font_catalog = Some(catalog.clone());
@@ -1620,6 +1621,7 @@ impl App {
             return;
         };
         let catalog = folders.apply(system);
+        crate::font_names::set(&catalog);
         self.font_folders_loaded = folders;
         let fonts = Fonts::new(catalog.clone());
         self.font_names = fonts.family_names().iter().map(|s| s.to_string()).collect();
@@ -1827,6 +1829,20 @@ impl App {
             }
         }
         paths
+    }
+
+    /// Keeps the settings file's list of open documents current, so that
+    /// after a crash Quill knows what was open. Not before startup has read
+    /// the old list, and not after Quit has written the final one (its
+    /// windows are gone by then).
+    fn note_session(&self) {
+        if !self.reopened || crate::settings::with(|s| s.quit_cleanly) {
+            return;
+        }
+        let session = self.open_paths();
+        if crate::settings::with(|s| s.last_session != session) {
+            crate::settings::update(|s| s.last_session = session);
+        }
     }
 
     fn close_window(&mut self, id: WindowId) -> bool {
@@ -2544,7 +2560,10 @@ impl App {
                 // window closing quits.
                 let session = self.open_paths();
                 if self.close_window(id) && self.windows.is_empty() && !cfg!(target_os = "macos") {
-                    crate::settings::update(|s| s.last_session = session);
+                    crate::settings::update(|s| {
+                        s.last_session = session;
+                        s.quit_cleanly = true;
+                    });
                     el.exit();
                 }
             }
@@ -2556,7 +2575,10 @@ impl App {
                         return;
                     }
                 }
-                crate::settings::update(|s| s.last_session = session);
+                crate::settings::update(|s| {
+                    s.last_session = session;
+                    s.quit_cleanly = true;
+                });
                 el.exit();
             }
         }
@@ -2963,9 +2985,12 @@ fn strip_ext(title: &str) -> &str {
     }
 }
 
-/// The documents open when Quill last quit that are still there, if
-/// Preferences says to open them again (asking first when set to Prompt).
-fn reopen_last_session() -> Vec<PathBuf> {
+/// The documents open when Quill last ended that are still there, if
+/// Preferences says to open them again. Set to "After a crash" (Prompt), it
+/// asks only when Quill did not end through Quit: after a Quit the person
+/// closed them on purpose and has them in Open Recent. Unsaved changes come
+/// back separately, as Recovered windows.
+fn reopen_last_session(quit_cleanly: bool) -> Vec<PathBuf> {
     use crate::settings::Reopen;
     let (reopen, paths) = crate::settings::with(|s| (s.reopen, s.last_session.clone()));
     let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.is_file()).collect();
@@ -2975,6 +3000,7 @@ fn reopen_last_session() -> Vec<PathBuf> {
     let yes = match reopen {
         Reopen::Always => true,
         Reopen::Never => false,
+        Reopen::Prompt if quit_cleanly => false,
         Reopen::Prompt => {
             let names: Vec<String> = paths
                 .iter()
@@ -2991,7 +3017,8 @@ fn reopen_last_session() -> Vec<PathBuf> {
                 .set_level(rfd::MessageLevel::Info)
                 .set_title("Quill")
                 .set_description(format!(
-                    "Reopen the documents that were open when Quill last quit?\n\n{list}"
+                    "Quill did not quit normally last time. Reopen the documents that \
+                     were open?\n\n{list}"
                 ))
                 .set_buttons(rfd::MessageButtons::OkCancelCustom(
                     "Reopen".into(),
@@ -3139,8 +3166,13 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         let mut files = std::mem::take(&mut self.pending);
-        if files.is_empty() && !self.reopened {
-            files = reopen_last_session();
+        if !self.reopened {
+            // Until Quit sets it again, a restart is taken as a crash.
+            let quit_cleanly = crate::settings::with(|s| s.quit_cleanly);
+            crate::settings::update(|s| s.quit_cleanly = false);
+            if files.is_empty() {
+                files = reopen_last_session(quit_cleanly);
+            }
         }
         self.reopened = true;
         self.open_files(el, &files);

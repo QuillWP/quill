@@ -75,7 +75,7 @@ impl Reopen {
         match self {
             Reopen::Always => "Always",
             Reopen::Never => "Never",
-            Reopen::Prompt => "Prompt",
+            Reopen::Prompt => "After a crash",
         }
     }
 
@@ -149,6 +149,8 @@ pub struct Settings {
     /// Custom paper size, or 0 for none.
     pub unit: Unit,
     pub smart_quotes: bool,
+    /// Make web and mail addresses links as they are typed.
+    pub auto_links: bool,
     // Spelling
     pub always_suggest: bool,
     pub spelling_as_you_type: bool,
@@ -188,8 +190,13 @@ pub struct Settings {
     pub make_backup: bool,
     pub foreign_as_quill: bool,
     pub reopen: Reopen,
-    /// The saved documents open when Quill last quit.
+    /// The saved documents open now, or when Quill last quit. Kept up to
+    /// date while Quill runs, so a crash leaves the list behind.
     pub last_session: Vec<PathBuf>,
+    /// Whether Quill last ended through Quit, rather than crashing or being
+    /// stopped. Set false while it runs. Prompt asks to reopen the last
+    /// session's documents only when this is false.
+    pub quit_cleanly: bool,
     // Default Font
     pub font: String,
     /// Half-points.
@@ -340,6 +347,7 @@ impl Default for Settings {
             keys_add: Vec::new(),
             keys_remove: Vec::new(),
             smart_quotes: true,
+            auto_links: true,
             always_suggest: true,
             spelling_as_you_type: true,
             custom_dictionary: None,
@@ -369,6 +377,7 @@ impl Default for Settings {
             foreign_as_quill: true,
             reopen: Reopen::Prompt,
             last_session: Vec::new(),
+            quit_cleanly: true,
             font: "Georgia".into(),
             size: 24,
             document: DocumentProps::default(),
@@ -398,6 +407,7 @@ impl Settings {
         put(&mut out, "initials", self.initials.clone());
         put(&mut out, "unit", self.unit.abbrev().into());
         put(&mut out, "smart_quotes", b(self.smart_quotes));
+        put(&mut out, "auto_links", b(self.auto_links));
         put(&mut out, "formatted_clipboard", b(self.formatted_clipboard));
 
         section(&mut out, "View", Some("Preferences > View"));
@@ -525,6 +535,7 @@ impl Settings {
         put(&mut out, "make_backup", b(self.make_backup));
         put(&mut out, "foreign_as_quill", b(self.foreign_as_quill));
         put(&mut out, "reopen_documents", self.reopen.key().into());
+        put(&mut out, "quit_cleanly", b(self.quit_cleanly));
 
         section(
             &mut out,
@@ -823,6 +834,7 @@ impl Settings {
                 // Older builds wrote the old off-by-default value automatically.
                 // Migrate once; version 4 preserves an explicit opt-out.
                 "smart_quotes" => s.smart_quotes = version < 4 || flag,
+                "auto_links" => s.auto_links = flag,
                 "always_suggest" => s.always_suggest = flag,
                 "spelling_as_you_type" => s.spelling_as_you_type = flag,
                 "ignore_uppercase" => s.ignore_uppercase = flag,
@@ -883,6 +895,7 @@ impl Settings {
                     }
                 }
                 "foreign_as_quill" => s.foreign_as_quill = flag,
+                "quit_cleanly" => s.quit_cleanly = flag,
                 "words_to_system" => s.words_to_system = flag,
                 "custom_dictionary" if !v.is_empty() => {
                     s.custom_dictionary = Some(unescape_path(v))
@@ -1162,10 +1175,12 @@ mod tests {
         assert!(Settings::from_text("settings_version = 3\nsmart_quotes = 0\n").smart_quotes);
         let s = Settings {
             smart_quotes: false,
+            auto_links: false,
             recent_count: 25,
             foreign_as_quill: false,
             custom_dictionary: Some(PathBuf::from("/Custom/100%\nwords.txt")),
             words_to_system: true,
+            quit_cleanly: false,
             ..Default::default()
         };
         assert_eq!(Settings::from_text(&s.to_text()), s);

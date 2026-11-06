@@ -11,7 +11,7 @@ use quill_core::DocumentProps;
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::rc::Rc;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use winit::event_loop::EventLoopProxy;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Window, WindowId};
@@ -83,6 +83,72 @@ extern "C" fn panel_became_key(this: *mut AnyObject, _: Sel, notification: *mut 
         }
         context.titled.set(true);
         title_panel(&*panel, &*this, context.title);
+        if context.title == "Print" {
+            // Kept invisible until its size settles, so the change is not
+            // seen.
+            let _: () = msg_send![panel, setAlphaValue: 0.0f64];
+            *SHORTEN_WAIT.lock().unwrap_or_else(|e| e.into_inner()) = (NSSize::new(0., 0.), 0, 0);
+            schedule_shorten(this, panel);
+        }
+    }
+}
+
+/// Tallest the Print panel opens, in points: the height of the Save panel.
+const PRINT_PANEL_HEIGHT: f64 = 640.0;
+
+// The size shorten_panel saw last, how many checks it has held, and how
+// many checks there have been.
+static SHORTEN_WAIT: Mutex<(NSSize, u32, u32)> = Mutex::new((NSSize::new(0., 0.), 0, 0));
+
+/// Calls shorten_panel through `delegate` shortly, in every run loop mode,
+/// so it also runs while the panel is modal.
+unsafe fn schedule_shorten(delegate: *mut AnyObject, panel: *mut AnyObject) {
+    unsafe {
+        let mode = NSString::from_str("kCFRunLoopCommonModes");
+        let modes: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: &*mode];
+        let _: () = msg_send![delegate,
+            performSelector: sel!(quillShortenPrintPanel:)
+            withObject: panel
+            afterDelay: 0.05f64
+            inModes: modes];
+    }
+}
+
+/// macOS opens the Print panel about 900 points tall, taller than other
+/// apps' print panels. Shorter, its options column scrolls, so Quill brings
+/// it down to PRINT_PANEL_HEIGHT, keeping its top where it is. macOS is
+/// still sizing the panel when it first becomes key, so this waits until
+/// its size has held for a few checks, and gives up after about two
+/// seconds. Either way it then shows the panel, which was made invisible
+/// while it waited.
+extern "C" fn shorten_panel(this: *mut AnyObject, _: Sel, panel: *mut AnyObject) {
+    // SAFETY: called through performSelector with the live print panel,
+    // which the print operation keeps open while it runs.
+    unsafe {
+        let visible: bool = msg_send![panel, isVisible];
+        if !visible {
+            return;
+        }
+        let mut frame: NSRect = msg_send![panel, frame];
+        let (steady, waiting) = {
+            let mut wait = SHORTEN_WAIT.lock().unwrap_or_else(|e| e.into_inner());
+            wait.1 = if wait.0 == frame.size { wait.1 + 1 } else { 0 };
+            wait.0 = frame.size;
+            wait.2 += 1;
+            let waiting = wait.1 < 3 && wait.2 < 40;
+            if waiting {
+                schedule_shorten(this, panel);
+            }
+            (wait.1 >= 3, waiting)
+        };
+        if steady && frame.size.height > PRINT_PANEL_HEIGHT {
+            frame.origin.y += frame.size.height - PRINT_PANEL_HEIGHT;
+            frame.size.height = PRINT_PANEL_HEIGHT;
+            let _: () = msg_send![panel, setFrame: frame display: true];
+        }
+        if !waiting {
+            let _: () = msg_send![panel, setAlphaValue: 1.0f64];
+        }
     }
 }
 
@@ -301,6 +367,10 @@ fn delegate() -> Result<Retained<AnyObject>, String> {
             builder.add_method(
                 sel!(quillClosePrintPanel:),
                 close_panel as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
+            );
+            builder.add_method(
+                sel!(quillShortenPrintPanel:),
+                shorten_panel as extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
             );
             builder.add_method(
                 sel!(quillPrintPanelBecameKey:),

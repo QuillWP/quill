@@ -196,6 +196,7 @@ impl Clipboard {
             && let Ok(mut doc) = quill_formats::rtf::read(&bytes)
         {
             doc.keep_in_bounds();
+            crate::font_names::use_family_names(&mut doc);
             return Some(Clip::Rich(RichContent::from_document(doc, text.as_deref())));
         }
         if let Some(html) = html
@@ -203,6 +204,7 @@ impl Clipboard {
             && doc.main.paras.iter().any(|p| !p.text.is_empty())
         {
             doc.keep_in_bounds();
+            crate::font_names::use_family_names(&mut doc);
             return Some(Clip::Rich(RichContent::from_document(doc, text.as_deref())));
         }
         if picture_wins(text.as_deref())
