@@ -176,6 +176,8 @@ impl WinState {
                 Which::Preferences {
                     panel: 0,
                     fonts: env.font_names.to_vec(),
+                    original: Box::new(crate::settings::get()),
+                    draft: Box::new(crate::settings::get()),
                 },
             ),
             DialogId::DefaultFont => (
@@ -186,6 +188,8 @@ impl WinState {
                 Which::Preferences {
                     panel: crate::prefs_dialog::DEFAULT_FONT_PANEL,
                     fonts: env.font_names.to_vec(),
+                    original: Box::new(crate::settings::get()),
+                    draft: Box::new(crate::settings::get()),
                 },
             ),
             DialogId::ToolbarPreferences => (
@@ -196,6 +200,8 @@ impl WinState {
                 Which::Preferences {
                     panel: crate::prefs_dialog::TOOLBAR_PANEL,
                     fonts: env.font_names.to_vec(),
+                    original: Box::new(crate::settings::get()),
+                    draft: Box::new(crate::settings::get()),
                 },
             ),
             DialogId::CharacterStyles => (
@@ -296,8 +302,39 @@ impl WinState {
         if let Some((_, d)) = self.dialogs.last_mut() {
             d.popout = None;
         }
+        self.edit_color(start, target);
+    }
+
+    /// Edit a color: the macOS Colors panel in a real window on the Mac,
+    /// Quill's own Edit Color dialog elsewhere and in tests.
+    fn edit_color(&mut self, start: quill_core::props::Rgb, target: crate::palette::Target) {
+        #[cfg(all(target_os = "macos", not(test)))]
+        if self.on_screen {
+            if let Some(color) = crate::mac_color_panel::pick(start) {
+                self.color_edited(target, color);
+            }
+            return;
+        }
         let (editor, es) = crate::palette::editor(start, target);
         self.dialogs.push((Which::EditColor(es), editor));
+    }
+
+    /// Edit Color's OK: the color goes back to whatever asked for it.
+    fn color_edited(&mut self, target: crate::palette::Target, color: quill_core::props::Rgb) {
+        match self.dialogs.last_mut() {
+            Some((Which::Palette(ps), pd)) => {
+                crate::palette::edited(ps, pd, target, color);
+            }
+            // From the pop-out beside a color: it becomes the
+            // dialog's, and is remembered if the dialog's OK is.
+            Some((_, cd)) if cd.swatch_rgb("color").is_some() => {
+                crate::palette::hold_edit(target, color);
+                cd.set_swatch("color", color.0);
+                cd.set_label("color_hex", &crate::palette::hex(color));
+            }
+            _ => {}
+        }
+        self.color_pop = None;
     }
 
     /// A slider in the open dialog moved under the pointer.
@@ -387,6 +424,114 @@ impl WinState {
             return false;
         };
         match which {
+            Which::StyleCharacter(base) => match o {
+                Outcome::Ok => {
+                    let base = *base;
+                    let n = self.dialogs.len();
+                    let Some((Which::Style(st), _)) = self.dialogs.get(n.wrapping_sub(2)) else {
+                        return true;
+                    };
+                    let mut pending = crate::style_dialog::character_view(st);
+                    let Some(chp) =
+                        format_dialogs::read_character(&self.dialogs[n - 1].1, &base, &mut pending)
+                    else {
+                        return true;
+                    };
+                    self.dialogs.pop();
+                    crate::palette::drop_edits();
+                    if let Some((Which::Style(st), parent)) = self.dialogs.last_mut() {
+                        st.chp = chp;
+                        st.fonts = pending.doc.fonts;
+                        crate::style_dialog::update_description(st, parent, &self.view);
+                    }
+                }
+                Outcome::Changed(id) => {
+                    if *id == "color" && format_dialogs::wants_palette(d) {
+                        // As in Format > Character: the system Colors panel on
+                        // the Mac, and Cancel keeps the style's color.
+                        #[cfg(all(target_os = "macos", not(test)))]
+                        if self.on_screen {
+                            let start = base.color;
+                            let color = crate::mac_color_panel::pick(start).unwrap_or(start);
+                            format_dialogs::show_color(d, Some(color));
+                            return true;
+                        }
+                        let (palette, st) = crate::palette::palette(None, &self.view.doc);
+                        self.dialogs.push((Which::Palette(st), palette));
+                    } else {
+                        format_dialogs::character_changed(d, id);
+                    }
+                }
+                Outcome::Cancel => {
+                    crate::palette::drop_edits();
+                    self.dialogs.pop();
+                }
+                _ => {}
+            },
+            Which::CharacterStyleEdit(id) => match o {
+                Outcome::Ok => {
+                    let id = *id;
+                    let n = self.dialogs.len();
+                    let (rest, last) = self.dialogs.split_at_mut(n - 1);
+                    let Some((Which::CharacterStyles, list)) = rest.last_mut() else {
+                        self.dialogs.pop();
+                        return true;
+                    };
+                    match crate::character_style_dialog::finish_editor(
+                        &last[0].1,
+                        list,
+                        &mut self.view,
+                        id,
+                    ) {
+                        Ok(_) => {
+                            self.dialogs.pop();
+                            crate::palette::drop_edits();
+                        }
+                        Err(why) => self.alert(why, format_dialogs::Alert::Info),
+                    }
+                }
+                Outcome::Changed(id) => {
+                    if *id == "color" && format_dialogs::wants_palette(d) {
+                        // The system Colors panel on the Mac; Cancel keeps
+                        // the style's color, or none.
+                        #[cfg(all(target_os = "macos", not(test)))]
+                        if self.on_screen {
+                            let start = format_dialogs::color_named(&d.selected_text("color"));
+                            let color = crate::mac_color_panel::pick(
+                                start.unwrap_or(quill_core::props::Rgb::BLACK),
+                            )
+                            .or(start);
+                            format_dialogs::show_color(d, color);
+                            return true;
+                        }
+                        let (palette, st) = crate::palette::palette(None, &self.view.doc);
+                        self.dialogs.push((Which::Palette(st), palette));
+                    } else {
+                        format_dialogs::character_changed(d, id);
+                    }
+                }
+                Outcome::Cancel => {
+                    crate::palette::drop_edits();
+                    self.dialogs.pop();
+                }
+                _ => {}
+            },
+            Which::StyleParagraph(base) => match o {
+                Outcome::Ok => {
+                    let Some(pap) = format_dialogs::read_paragraph(d, base) else {
+                        return true;
+                    };
+                    self.dialogs.pop();
+                    if let Some((Which::Style(st), parent)) = self.dialogs.last_mut() {
+                        st.pap = pap;
+                        crate::style_dialog::update_description(st, parent, &self.view);
+                    }
+                }
+                Outcome::Cancel => {
+                    self.dialogs.pop();
+                }
+                _ => {}
+            },
             Which::Find(st) => match o {
                 Outcome::Button("mode") => {
                     let replace = !st.replace;
@@ -475,6 +620,12 @@ impl WinState {
                 }
                 Outcome::Changed(id) if *kind == 0 => {
                     if *id == "color" && format_dialogs::wants_palette(d) {
+                        #[cfg(all(target_os = "macos", not(test)))]
+                        if self.on_screen {
+                            let color = crate::mac_color_panel::pick(quill_core::props::Rgb::BLACK);
+                            format_dialogs::show_color(d, color);
+                            return true;
+                        }
                         let (palette, st) = crate::palette::palette(None, &self.view.doc);
                         self.dialogs.push((Which::Palette(st), palette));
                     } else {
@@ -581,6 +732,8 @@ impl WinState {
                             Which::Preferences {
                                 panel: crate::prefs_dialog::SPELLING_PANEL,
                                 fonts: self.font_names.clone(),
+                                original: Box::new(crate::settings::get()),
+                                draft: Box::new(crate::settings::get()),
                             },
                             d,
                         ));
@@ -858,15 +1011,13 @@ impl WinState {
                         crate::palette::clicked(st, d, id, *x, *y)
                     {
                         let (start, target) = crate::palette::edit_of(st, Some(slot));
-                        let (editor, es) = crate::palette::editor(start, target);
-                        self.dialogs.push((Which::EditColor(es), editor));
+                        self.edit_color(start, target);
                     }
                 }
                 Outcome::Changed(id) => crate::palette::changed(st, d, id),
                 Outcome::Button("edit") => {
                     let (start, target) = crate::palette::edit_of(st, None);
-                    let (editor, es) = crate::palette::editor(start, target);
-                    self.dialogs.push((Which::EditColor(es), editor));
+                    self.edit_color(start, target);
                 }
                 Outcome::Ok | Outcome::Cancel => {
                     let (chosen, start) = if *o == Outcome::Ok {
@@ -888,20 +1039,7 @@ impl WinState {
                 Outcome::Ok => {
                     let (target, color) = (st.target, crate::palette::edit_color(d));
                     self.dialogs.pop();
-                    match self.dialogs.last_mut() {
-                        Some((Which::Palette(ps), pd)) => {
-                            crate::palette::edited(ps, pd, target, color);
-                        }
-                        // From the pop-out beside a color: it becomes the
-                        // dialog's, and is remembered if the dialog's OK is.
-                        Some((_, cd)) if cd.swatch_rgb("color").is_some() => {
-                            crate::palette::hold_edit(target, color);
-                            cd.set_swatch("color", color.0);
-                            cd.set_label("color_hex", &crate::palette::hex(color));
-                        }
-                        _ => {}
-                    }
-                    self.color_pop = None;
+                    self.color_edited(target, color);
                 }
                 Outcome::Cancel => {
                     self.dialogs.pop();
@@ -937,6 +1075,21 @@ impl WinState {
         let Some((which, d)) = self.dialogs.last_mut() else {
             return;
         };
+        if let Which::Preferences {
+            panel,
+            original,
+            draft,
+            ..
+        } = which
+            && matches!(o, Outcome::Ok | Outcome::Button("save"))
+        {
+            crate::prefs_dialog::changed_in(*panel, d, "save", draft);
+            crate::prefs_dialog::save(original, draft);
+            if o == Outcome::Ok {
+                self.dialogs.pop();
+            }
+            return;
+        }
         match o {
             Outcome::Ok | Outcome::Button("savepdf") if matches!(which, Which::Print) => {
                 let pdf = o == Outcome::Button("savepdf");
@@ -1011,6 +1164,14 @@ impl WinState {
                     Which::Character(base) => Some(base.color),
                     _ => None,
                 };
+                #[cfg(all(target_os = "macos", not(test)))]
+                if self.on_screen {
+                    if let Some(start) = start {
+                        let color = crate::mac_color_panel::pick(start).unwrap_or(start);
+                        format_dialogs::show_color(d, Some(color));
+                    }
+                    return;
+                }
                 let (palette, st) = crate::palette::palette(start, &self.view.doc);
                 self.dialogs.push((Which::Palette(st), palette));
             }
@@ -1027,27 +1188,99 @@ impl WinState {
                     let (d, st) = crate::customize::dialog();
                     self.dialogs.push((Which::Customize(st), d));
                 }
-                Which::Preferences { panel, fonts }
-                    if crate::prefs_dialog::is_folder_button(id) =>
-                {
-                    crate::prefs_dialog::folder_button(id);
+                Which::Preferences {
+                    panel,
+                    fonts,
+                    draft,
+                    ..
+                } if crate::prefs_dialog::is_folder_button(id) => {
+                    crate::prefs_dialog::changed_in(*panel, d, id, draft);
+                    crate::prefs_dialog::folder_button(id, draft);
                     let origin = d.origin;
-                    *d = crate::prefs_dialog::preferences(*panel, fonts);
+                    *d = crate::prefs_dialog::preferences_with(*panel, fonts, draft);
                     d.origin = origin;
                 }
-                Which::Preferences { panel, fonts }
-                    if matches!(id, "dictionary_new" | "dictionary_choose") =>
-                {
-                    if let Err(error) = crate::local_dictionary::choose_file(id == "dictionary_new")
-                    {
-                        crate::app::alert("Quill could not select the custom dictionary.", &error);
+                Which::Preferences {
+                    panel,
+                    fonts,
+                    draft,
+                    ..
+                } if matches!(id, "dictionary_new" | "dictionary_choose") => {
+                    crate::prefs_dialog::changed_in(*panel, d, id, draft);
+                    match crate::local_dictionary::choose_file(id == "dictionary_new") {
+                        Ok(Some(path)) => {
+                            draft.custom_dictionary = Some(path);
+                            draft.words_to_system = false;
+                        }
+                        Ok(None) => {}
+                        Err(error) => crate::app::alert(
+                            "Quill could not select the custom dictionary.",
+                            &error,
+                        ),
                     }
                     let origin = d.origin;
-                    *d = crate::prefs_dialog::preferences(*panel, fonts);
+                    *d = crate::prefs_dialog::preferences_with(*panel, fonts, draft);
                     d.origin = origin;
+                }
+                Which::CharacterStyles if matches!(id, "new" | "edit") => {
+                    let style = crate::character_style_dialog::selected_style(d);
+                    let edit = (id == "edit" && style != 0).then_some(style);
+                    if id == "edit" && edit.is_none() {
+                        return;
+                    }
+                    let editor = crate::character_style_dialog::editor(
+                        &self.view,
+                        &self.font_families,
+                        edit,
+                    );
+                    self.dialogs.push((Which::CharacterStyleEdit(edit), editor));
+                }
+                Which::CharacterStyles if id == "import" => {
+                    let Some(path) = rfd::FileDialog::new()
+                        .set_title("Import Character Styles")
+                        .add_filter("Documents", quill_formats::READABLE)
+                        .pick_file()
+                    else {
+                        return;
+                    };
+                    let status = match quill_formats::load(&path) {
+                        Ok(source) => {
+                            let (added, skipped) =
+                                crate::character_style_dialog::import(d, &mut self.view, &source);
+                            match (added, skipped) {
+                                (0, 0) => "That document has no character styles.".to_string(),
+                                (added, 0) => format!("Imported {added} character styles."),
+                                (added, skipped) => format!(
+                                    "Imported {added}; left out {skipped} whose names this document already uses."
+                                ),
+                            }
+                        }
+                        Err(why) => format!("Quill could not open that document: {why}"),
+                    };
+                    if let Some((Which::CharacterStyles, d)) = self.dialogs.last_mut() {
+                        d.set_label("status", &status);
+                    }
                 }
                 Which::CharacterStyles => {
                     crate::character_style_dialog::button(d, &mut self.view, id)
+                }
+                Which::Style(st) if id == "character" => {
+                    let pending = crate::style_dialog::character_view(st);
+                    let (mut editor, _) =
+                        format_dialogs::character_for_find(&pending, &self.font_families);
+                    editor.title = format!("Character: {}", d.field_text("name"));
+                    editor.items.retain(|item| item.id != "apply");
+                    let base = st.chp;
+                    self.dialogs.push((Which::StyleCharacter(base), editor));
+                }
+                Which::Style(st) if id == "paragraph" => {
+                    let base = st.pap.clone();
+                    let mut editor = format_dialogs::paragraph_properties(&base);
+                    editor.title = format!("Paragraph Style: {}", d.field_text("name"));
+                    editor
+                        .items
+                        .retain(|item| !matches!(item.id, "apply" | "tabs" | "border" | "frame"));
+                    self.dialogs.push((Which::StyleParagraph(base), editor));
                 }
                 Which::Style(st) if id == "define" => {
                     crate::style_dialog::define(st, d, &mut self.view);

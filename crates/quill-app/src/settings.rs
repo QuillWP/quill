@@ -14,8 +14,6 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-const SETTINGS_VERSION: u16 = 4;
-
 // Shared defaults also compile in the parser-only fuzzing library.
 /// Neutral light gray behind the pages, configurable in settings.
 pub const DEFAULT_PAGE_SURROUND: u32 = 0xE4E4E4;
@@ -272,11 +270,6 @@ pub struct Settings {
     pub keys_remove: Vec<(String, String)>,
 }
 
-/// Compatibility only: obsolete saved bindings must not restore deleted features.
-pub(crate) fn retired_command(name: &str) -> bool {
-    matches!(name, "CreateEnvelope" | "InsertAddresses" | "Symbol")
-}
-
 /// An HTML color code, "#DDDDDD" or "DDDDDD", as 0xRRGGBB.
 fn html_color(v: &str) -> Option<u32> {
     let hex = v.trim().trim_start_matches('#');
@@ -429,7 +422,6 @@ impl Settings {
     pub fn to_text(&self) -> String {
         let mut out = String::from("# Quill Settings\n");
         let b = |v: bool| if v { "1" } else { "0" }.to_string();
-        put(&mut out, "settings_version", SETTINGS_VERSION.to_string());
 
         section(&mut out, "General", Some("Preferences > General"));
         put(&mut out, "name", self.name.clone());
@@ -758,18 +750,12 @@ impl Settings {
     }
 
     /// Read settings written by `to_text`. Unknown or broken lines are
-    /// skipped, so an old or hand-edited file still loads.
+    /// skipped so hand-edited files can be read safely.
     pub fn from_text(text: &str) -> Settings {
         Self::from_text_with_defaults(text, Settings::default())
     }
 
     fn from_text_with_defaults(text: &str, mut s: Settings) -> Self {
-        let version = text
-            .lines()
-            .filter_map(|line| line.split_once('='))
-            .find(|(key, _)| key.trim() == "settings_version")
-            .and_then(|(_, value)| value.trim().parse::<u16>().ok())
-            .unwrap_or(1);
         for line in text.lines() {
             let line = line.trim();
             if line.starts_with('#') {
@@ -784,12 +770,9 @@ impl Settings {
             let d = &mut s.document;
             let sec = &mut s.section;
             match k {
-                "settings_version" => {}
                 "name" => s.name = v.into(),
                 "view_toolbar" => s.view_toolbar = flag,
                 "paragraph_toolbar_tabs" => s.paragraph_toolbar_tabs = flag,
-                // Ignore retired interface-font settings; UI text uses the host face.
-                "ui_font" | "bitmap_ui" => {}
                 "document_zoom" => {
                     let zoom = v
                         .parse::<f64>()
@@ -797,14 +780,7 @@ impl Settings {
                         .filter(|n| n.is_finite())
                         .unwrap_or(150.0)
                         .clamp(10.0, 800.0);
-                    // Version 2 introduced 125% and wrote it even when the
-                    // user had not chosen a zoom. Move that old default once;
-                    // version 3 files can deliberately keep 125%.
-                    s.document_zoom = if version < 3 && zoom == 125.0 {
-                        150.0
-                    } else {
-                        zoom
-                    };
+                    s.document_zoom = zoom;
                 }
                 "window_frame" => {
                     let n: Vec<i32> = v
@@ -817,12 +793,11 @@ impl Settings {
                     };
                 }
                 "interface_scale" => s.interface_scale = v.parse().unwrap_or(100u16).clamp(50, 300),
-                // The formatting toolbar was called the ribbon in older files.
-                "formatting_toolbar_scale" | "ribbon_scale" => {
+                "formatting_toolbar_scale" => {
                     s.formatting_toolbar_scale = v.parse().unwrap_or(110u16).clamp(50, 300)
                 }
                 "toolbar_spacing" => s.toolbar_spacing = v.parse().unwrap_or(24u16).clamp(16, 48),
-                "formatting_toolbar_spacing" | "ribbon_spacing" => {
+                "formatting_toolbar_spacing" => {
                     s.formatting_toolbar_spacing = v.parse().unwrap_or(3u16).min(20)
                 }
                 "bar_background" => s.bar_background = html_color(v).unwrap_or(s.bar_background),
@@ -890,9 +865,7 @@ impl Settings {
                         .find(|u| u.abbrev() == v)
                         .unwrap_or_default()
                 }
-                // Older builds wrote the old off-by-default value automatically.
-                // Migrate once; version 4 preserves an explicit opt-out.
-                "smart_quotes" => s.smart_quotes = version < 4 || flag,
+                "smart_quotes" => s.smart_quotes = flag,
                 "auto_links" => s.auto_links = flag,
                 "auto_lists" => s.auto_lists = flag,
                 "always_suggest" => s.always_suggest = flag,
@@ -931,13 +904,9 @@ impl Settings {
                         .find(|d| d.key() == v)
                         .unwrap_or_default()
                 }
-                // Older files had only a Page Layout switch.
-                "open_page_layout" if flag => s.default_view = DefaultView::PageLayout,
                 "open_with_ruler" => s.open_with_ruler = flag,
                 "open_with_paragraph_toolbar" => s.open_with_paragraph_toolbar = flag,
-                "open_with_formatting_toolbar" | "open_with_ribbon" => {
-                    s.open_with_formatting_toolbar = flag
-                }
+                "open_with_formatting_toolbar" => s.open_with_formatting_toolbar = flag,
                 "recent_files" => s.recent_files = flag,
                 "recent_count" => s.recent_count = v.parse().unwrap_or(10usize).clamp(1, 50),
                 "autosave_secs" => {
@@ -984,14 +953,7 @@ impl Settings {
                 }
                 "interpret_rtf" => s.interpret_rtf = flag,
                 "make_backup" => s.make_backup = flag,
-                // New York was written to every old settings file even when
-                // the user never chose it. Migrate that untouched default to
-                // Georgia; preserve every other old custom choice.
-                "font"
-                    if !v.is_empty() && (version >= 2 || !v.eq_ignore_ascii_case("New York")) =>
-                {
-                    s.font = v.into()
-                }
+                "font" if !v.is_empty() => s.font = v.into(),
                 "size" => s.size = v.parse().unwrap_or(24u16).clamp(2, 3276),
                 "doc.page_width" => d.page_width = num(d.page_width).clamp(1440, 31680),
                 "doc.page_height" => d.page_height = num(d.page_height).clamp(1440, 31680),
@@ -1063,16 +1025,6 @@ impl Settings {
                 _ => {}
             }
         }
-        s.toolbar_buttons
-            .retain(|(_, _, cmd)| !retired_command(cmd));
-        for entries in [
-            &mut s.menu_add,
-            &mut s.menu_remove,
-            &mut s.keys_add,
-            &mut s.keys_remove,
-        ] {
-            entries.retain(|(_, cmd)| !retired_command(cmd));
-        }
         s.document.keep_in_bounds();
         s.section.keep_in_bounds();
         s.recent_documents.truncate(MAX_RECENT_DOCUMENTS);
@@ -1095,12 +1047,12 @@ fn path() -> Option<PathBuf> {
     }
     if cfg!(windows) {
         let base = std::env::var_os("APPDATA").map(PathBuf::from)?;
-        return Some(base.join("Quill").join("Quill Settings.txt"));
+        return Some(base.join("Quill/Quill Settings.txt"));
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| home.map(|h| h.join(".config")))?;
-    Some(base.join("quill").join("settings"))
+    Some(base.join("quill/settings"))
 }
 
 /// Another file kept beside the settings (the glossary), when files are
@@ -1147,8 +1099,10 @@ pub fn load() {
         // settings or laid out by hand, so every setting shows with its
         // current value.
         let tidy = s.to_text();
-        if tidy != text {
-            let _ = write_user_file(&p, tidy.as_bytes());
+        if tidy != text
+            && let Some(destination) = path()
+        {
+            let _ = write_user_file(&destination, tidy.as_bytes());
         }
         CURRENT.with(|c| *c.borrow_mut() = s);
     }
@@ -1196,51 +1150,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retired_ui_fonts_migrate_without_changing_document_fonts() {
-        let settings = Settings::from_text("ui_font = classic\nbitmap_ui = 1\nfont = Geneva\n");
-        assert_eq!(settings.font, "Geneva");
-        let saved = settings.to_text();
-        assert!(!saved.contains("ui_font ="));
-        assert!(!saved.contains("bitmap_ui ="));
-        assert_eq!(Settings::from_text(&saved).font, "Geneva");
-    }
-
-    #[test]
-    fn retired_commands_are_removed_from_all_saved_customizations() {
-        let mut saved = Settings {
-            toolbar_buttons: vec![
-                (11, 11, "CreateEnvelope".into()),
-                (13, 20, "Symbol".into()),
-                (12, 2, "Save".into()),
-            ],
-            ..Default::default()
-        };
-        let bindings = vec![
-            ("old-envelope".into(), "CreateEnvelope".into()),
-            ("old-addresses".into(), "InsertAddresses".into()),
-            ("old-symbol".into(), "Symbol".into()),
-            ("keep".into(), "Save".into()),
-        ];
-        saved.menu_add = bindings.clone();
-        saved.menu_remove = bindings.clone();
-        saved.keys_add = bindings.clone();
-        saved.keys_remove = bindings;
-        let restored = Settings::from_text(&saved.to_text());
-        assert_eq!(restored.toolbar_buttons, vec![(12, 2, "Save".into())]);
-        for entries in [
-            restored.menu_add,
-            restored.menu_remove,
-            restored.keys_add,
-            restored.keys_remove,
-        ] {
-            assert_eq!(entries, vec![("keep".into(), "Save".into())]);
-        }
-    }
-
-    #[test]
-    fn new_preferences_persist_and_old_smart_quote_default_migrates_once() {
+    fn preferences_persist_explicit_choices() {
         assert!(Settings::default().smart_quotes);
-        assert!(Settings::from_text("settings_version = 3\nsmart_quotes = 0\n").smart_quotes);
+        assert!(!Settings::from_text("smart_quotes = 0\n").smart_quotes);
         let s = Settings {
             smart_quotes: false,
             auto_links: false,
@@ -1260,7 +1172,7 @@ mod tests {
     #[test]
     fn interface_sizes_read_back_and_stay_in_range() {
         let s = Settings::from_text(
-            "settings_version = 3\ninterface_scale = 90\nribbon_scale = 100\ntoolbar_spacing = 22\n",
+            "interface_scale = 90\nformatting_toolbar_scale = 100\ntoolbar_spacing = 22\n",
         );
         assert_eq!(
             (
@@ -1271,7 +1183,9 @@ mod tests {
             (90, 100, 22)
         );
         assert!(s.to_text().contains("\nformatting_toolbar_scale = 100\n"));
-        assert!(!Settings::from_text("open_with_ribbon = 0\n").open_with_formatting_toolbar);
+        assert!(
+            !Settings::from_text("open_with_formatting_toolbar = 0\n").open_with_formatting_toolbar
+        );
         let back = Settings::from_text(&s.to_text());
         assert_eq!(
             (
@@ -1282,7 +1196,7 @@ mod tests {
             (90, 100, 22)
         );
         let wild = Settings::from_text(
-            "settings_version = 3\ninterface_scale = 5\nformatting_toolbar_scale = 900\ntoolbar_spacing = x\n",
+            "interface_scale = 5\nformatting_toolbar_scale = 900\ntoolbar_spacing = x\n",
         );
         assert_eq!(
             (
@@ -1309,9 +1223,9 @@ mod tests {
     #[test]
     fn settings_file_is_grouped_in_sections() {
         let text = Settings::default().to_text();
-        assert!(text.starts_with(
-            "# Quill Settings\nsettings_version = 4\n\n# General\n## Preferences > General\nname = "
-        ));
+        assert!(
+            text.starts_with("# Quill Settings\n\n# General\n## Preferences > General\nname = ")
+        );
         let lines: Vec<&str> = text.lines().collect();
         for (i, line) in lines.iter().enumerate().skip(1) {
             if line.starts_with("# ") {
@@ -1361,29 +1275,17 @@ mod tests {
     }
 
     #[test]
-    fn old_untouched_zoom_default_migrates_but_other_zoom_choices_do_not() {
+    fn zoom_and_font_choices_are_read_as_saved() {
         assert_eq!(
-            Settings::from_text("settings_version = 2\ndocument_zoom = 125\n").document_zoom,
-            150.0
-        );
-        assert_eq!(
-            Settings::from_text("settings_version = 2\ndocument_zoom = 110\n").document_zoom,
-            110.0
-        );
-        assert_eq!(
-            Settings::from_text("settings_version = 3\ndocument_zoom = 125\n").document_zoom,
+            Settings::from_text("document_zoom = 125\n").document_zoom,
             125.0
         );
-    }
-
-    #[test]
-    fn old_untouched_font_default_migrates_but_custom_fonts_do_not() {
-        assert_eq!(Settings::from_text("font = New York\n").font, "Georgia");
-        assert_eq!(Settings::from_text("font = Palatino\n").font, "Palatino");
         assert_eq!(
-            Settings::from_text("settings_version = 2\nfont = New York\n").font,
-            "New York"
+            Settings::from_text("document_zoom = 110\n").document_zoom,
+            110.0
         );
+        assert_eq!(Settings::from_text("font = New York\n").font, "New York");
+        assert_eq!(Settings::from_text("font = Palatino\n").font, "Palatino");
     }
 
     #[test]
@@ -1519,7 +1421,7 @@ mod tests {
         );
     }
     #[test]
-    fn default_view_reads_new_and_old_settings() {
+    fn default_view_reads_back() {
         for d in DefaultView::ALL {
             let s = Settings {
                 default_view: d,
@@ -1527,12 +1429,6 @@ mod tests {
             };
             assert_eq!(Settings::from_text(&s.to_text()).default_view, d);
         }
-        let old = Settings::from_text("open_page_layout = 1\n");
-        assert_eq!(old.default_view, DefaultView::PageLayout);
-        assert_eq!(
-            Settings::from_text("open_page_layout = 0\n").default_view,
-            DefaultView::Normal
-        );
     }
     #[test]
     fn regional_seeds_preserve_saved_units_and_new_document_paper() {

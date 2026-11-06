@@ -2,9 +2,10 @@
 
 Quill Word Processor, shortened to Quill, is inspired by Lucas's favorite
 word processor from 1992. It is built in Rust for macOS, Windows and Linux.
-The planned website is `quillwp.com`, which has not been registered.
-Current builds still display the legacy Quill name in the interface and use
-the build commands, settings paths and `.qwp` extension documented here.
+The website is [quillwp.com](https://quillwp.com).
+Documents use `.qwp`.
+Alpha builds do not import earlier versions' settings, glossary, dictionary or
+document recovery files.
 
 The original offered styles, tables, frames, pictures, footnotes, headers and
 footers, outlines, tables of contents and indexes in a 914 KB program that
@@ -167,8 +168,11 @@ from each edge, and shows the final size as you type.
 
 ## Preferences
 
-Smart Quotes starts enabled; older off-by-default settings migrate once, and later
-explicit opt-outs are preserved. View lets you choose 1-50 recent documents (default 10).
+Changes remain in a draft while you switch panels. **Save** applies all edited settings and
+keeps Preferences open; **Save and Close** applies them and closes it. **Cancel** or the close
+button discards changes since the last save.
+
+Smart Quotes starts enabled and can be turned off in Preferences. View lets you choose 1-50 recent documents (default 10).
 Open And Save includes “Save foreign files in Quill format by default”, enabled and
 recommended. On the first Save of an imported document this opens Save As for a
 `.qwp` copy. Turning it off permits normal Save back to the imported format; an
@@ -209,6 +213,22 @@ A new table has real borders that print, thin and black unless `table_border_col
 the table keeps its borders, and Format > Border changes them. Gridlines are a separate screen
 guide for cells with no border, as in tables from other programs, and have their own
 `table_gridline_color` and `table_gridline_dotted`.
+
+**Format > Style...** manages paragraph styles. Select a style and choose
+**Paragraph...** to edit its indents, spacing and pagination, or **Character...**
+to edit its manual font, size, color and character formatting. Each editor's OK
+returns to the style dialog without changing the document. **Define** saves the
+definition in this document and updates paragraphs using that style, leaving the
+dialog open. **Apply** also applies the style to selected paragraphs; **OK** does
+that and closes the dialog. None of these writes the document file: use **Save**.
+Cancel discards edits not yet defined or applied. Page margins are document settings
+in **Format > Document Setup...**. **Use As Default** remains unavailable.
+
+The bottom **Character Style** menu is a link preview. **No Style** uses the manual
+character defaults. Selecting a named style strikes the manual summary through;
+returning to **No Style** restores its display without losing any manual values.
+Saving a linked definition is not implemented yet, so Define, Apply and OK are
+unavailable while previewing a named style. Choose No Style to save manual defaults.
 
 Character styles are available through a temporary **Character Styles** menu. To make
 one, format and select some text, choose **Manage Character Styles...**, enter a name
@@ -314,4 +334,4 @@ Quill is available under either the [MIT license](../LICENSE-MIT) or the
 [Apache License 2.0](../LICENSE-APACHE). Packaged builds also include
 [third-party notices](../THIRD-PARTY-NOTICES.txt) generated from the locked
 Cargo dependency set, listing what that platform's build uses. `Quill Licenses`, in the
-legacy `Quill` menu on the Mac, shows the MIT and Apache texts and links to those notices.
+`Quill` menu on the Mac, shows the MIT and Apache texts and links to those notices.

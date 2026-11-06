@@ -2394,17 +2394,56 @@ impl Document {
 
     /// Give a style new formatting. Paragraphs in the style, and styles
     /// based on it, follow, keeping whatever they set differently.
+    /// Give style `id` new formatting. `chp` is the style's own character
+    /// formatting; a linked character style stays linked and is laid over it.
     pub fn redefine_style(&mut self, story: StoryId, id: StyleId, pap: ParaProps, chp: CharProps) {
         self.record_sheet();
         self.redefine(story, id, pap, chp, 0);
     }
 
-    fn redefine(&mut self, story: StoryId, id: StyleId, pap: ParaProps, chp: CharProps, depth: u8) {
+    /// Redefine style `id` and link it to character style `character`, or
+    /// unlink it with zero. `own` is the style's own character formatting.
+    pub fn redefine_style_linked(
+        &mut self,
+        story: StoryId,
+        id: StyleId,
+        pap: ParaProps,
+        own: CharProps,
+        character: u16,
+    ) {
+        if id as usize >= self.styles.styles.len() {
+            return;
+        }
+        self.record_sheet();
+        let character = if self.styles.character(character).is_some() {
+            character
+        } else {
+            0
+        };
+        self.styles.styles[id as usize].character = character;
+        self.redefine(story, id, pap, own, 0);
+    }
+
+    /// Bring the paragraph styles linked to character style `character` up to
+    /// date after it changed.
+    pub(crate) fn relink_paragraph_styles(&mut self, character: u16) {
+        for k in 0..self.styles.styles.len() as StyleId {
+            let s = self.styles.get(k);
+            if s.character == character {
+                let (pap, own) = (s.pap.clone(), s.own());
+                self.redefine(StoryId::Main, k, pap, own, 0);
+            }
+        }
+    }
+
+    fn redefine(&mut self, story: StoryId, id: StyleId, pap: ParaProps, own: CharProps, depth: u8) {
         let old = self.styles.get(id).clone();
         let mut pap = pap;
         pap.style = id;
+        let chp = self.styles.linked_chp(own, old.character);
         let st = &mut self.styles.styles[id as usize];
         st.pap = pap.clone();
+        st.own_chp = own;
         st.chp = chp;
         // Restyle the paragraphs.
         for i in 0..self.story(story).paras.len() {
@@ -2438,7 +2477,8 @@ impl Document {
         for k in derived {
             let s = self.styles.get(k).clone();
             let dp = restyle_pap(&s.pap, &old.pap, &pap);
-            let dc = restyle_chp(s.chp, &old.chp, &chp);
+            // A based-on style follows what this one now looks like.
+            let dc = restyle_chp(s.own(), &old.chp, &chp);
             self.redefine(story, k, dp, dc, depth + 1);
         }
     }

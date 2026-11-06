@@ -403,11 +403,14 @@ pub fn character_spec(
     family_choices.extend_from_slice(fonts);
     let (mut d, _) = crate::format_dialogs::character_for_find(view, &family_choices);
     let names = d.options("font");
+    // With no font, the blank choice: the dialog may have put the document's
+    // own font ahead of it.
+    let blank = names.iter().position(|n| n.is_empty()).unwrap_or(0);
     let font = spec
         .font
         .map(|f| view.doc.font_name(f).to_string())
         .and_then(|n| names.iter().position(|x| x.eq_ignore_ascii_case(&n)))
-        .unwrap_or(0);
+        .unwrap_or(blank);
     d.set_selected("font", font);
     d.set_field(
         "size",

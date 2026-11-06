@@ -1,7 +1,5 @@
-//! Tools > Preferences: a native category chooser and the chosen panel's
-//! settings. As in the original there is no OK button:
-//! every change takes effect at once, and the close box puts it away.
-//! Layout measured from the original.
+//! Preferences keeps one draft across all panels until Save or Save and Close.
+//! Cancel and the close box discard changes since the last save.
 
 use crate::dialog::Dialog;
 use crate::settings::{self, Unit};
@@ -60,11 +58,14 @@ const SIZES: [&str; 11] = [
 
 /// The Preferences window showing `panel`, with `fonts` for Default Font.
 pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
-    let s = settings::get();
+    preferences_with(panel, fonts, &settings::get())
+}
+
+pub fn preferences_with(panel: usize, fonts: &[String], s: &settings::Settings) -> Dialog {
     let height = if panel == ADVANCED_PANEL {
-        436.0
+        480.0
     } else {
-        332.0
+        376.0
     };
     let mut d = Dialog::new("Preferences", 442.0, height);
     d.close_box = true;
@@ -210,7 +211,10 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
             d.text("Custom Dictionary:", 9.0, 41.0);
             d.button("dictionary_new", "New…", 9.0, 63.0, 80.0, false);
             d.button("dictionary_choose", "Choose…", 101.0, 63.0, 90.0, false);
-            let path = crate::local_dictionary::path();
+            let path = s
+                .custom_dictionary
+                .clone()
+                .or_else(crate::local_dictionary::path);
             let name = path
                 .as_ref()
                 .and_then(|p| p.file_name())
@@ -399,6 +403,9 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
             d.focus("size");
         }
     }
+    d.button("cancel", "Cancel", 135.0, height - 35.0, 80.0, false);
+    d.button("save", "Save", 223.0, height - 35.0, 70.0, false);
+    d.button("ok", "Save and Close", 301.0, height - 35.0, 130.0, true);
     d
 }
 
@@ -428,40 +435,46 @@ pub fn is_folder_button(id: &str) -> bool {
 
 /// Put `path` in font folder slot `slot` (the next free one if the slot is
 /// empty), switched on.
+#[cfg(test)]
 fn set_folder(slot: usize, path: std::path::PathBuf) {
-    settings::update(|s| {
-        let folder = settings::FontFolder {
-            path,
-            enabled: true,
-        };
-        if let Some(old) = s.font_folders.get_mut(slot) {
-            *old = folder;
-        } else if s.font_folders.len() < settings::MAX_FONT_FOLDERS {
-            s.font_folders.push(folder);
-        }
-    });
+    settings::update(|s| set_folder_in(s, slot, path));
 }
 
+fn set_folder_in(s: &mut settings::Settings, slot: usize, path: std::path::PathBuf) {
+    let folder = settings::FontFolder {
+        path,
+        enabled: true,
+    };
+    if let Some(old) = s.font_folders.get_mut(slot) {
+        *old = folder;
+    } else if s.font_folders.len() < settings::MAX_FONT_FOLDERS {
+        s.font_folders.push(folder);
+    }
+}
+
+#[cfg(test)]
 fn clear_folder(slot: usize) {
-    settings::update(|s| {
-        if slot < s.font_folders.len() {
-            s.font_folders.remove(slot);
-        }
-    });
+    settings::update(|s| clear_folder_in(s, slot));
+}
+
+fn clear_folder_in(s: &mut settings::Settings, slot: usize) {
+    if slot < s.font_folders.len() {
+        s.font_folders.remove(slot);
+    }
 }
 
 /// Carry out Choose… or Clear for a font folder slot. Choosing asks for a
 /// folder and warns that documents depend on it.
-pub fn folder_button(id: &str) {
+pub fn folder_button(id: &str, s: &mut settings::Settings) {
     if let Some(slot) = FOLDER_CLEAR.iter().position(|b| *b == id) {
-        clear_folder(slot);
+        clear_folder_in(s, slot);
     } else if let Some(slot) = FOLDER_CHOOSE.iter().position(|b| *b == id) {
         let mut dialog = rfd::FileDialog::new().set_title("Choose a Font Folder");
-        if let Some(old) = settings::with(|s| s.font_folders.get(slot).map(|f| f.path.clone())) {
+        if let Some(old) = s.font_folders.get(slot).map(|f| f.path.clone()) {
             dialog = dialog.set_directory(old);
         }
         if let Some(path) = dialog.pick_folder() {
-            set_folder(slot, path);
+            set_folder_in(s, slot, path);
             crate::app::warn(
                 "These fonts are not installed.",
                 "Quill loads them only while the folder is checked. A document that uses them \
@@ -472,8 +485,8 @@ pub fn folder_button(id: &str) {
     }
 }
 
-/// Something changed in the panel: put it into effect.
-pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
+/// Capture the current panel in the shared draft.
+pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Settings) {
     if id == "sizes" {
         let z = SIZES[d.selected("sizes").min(SIZES.len() - 1)];
         d.set_field("size", z);
@@ -482,7 +495,7 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
     match panel {
         0 => {
             let unit = Unit::ALL[d.selected("unit").min(Unit::ALL.len() - 1)];
-            settings::update(|s| {
+            {
                 s.name = d.field_text("name");
                 s.initials = d.field_text("initials");
                 s.unit = unit;
@@ -497,9 +510,9 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
                 s.auto_links = on("autolinks");
                 s.formatted_clipboard = on("fmtclip");
                 s.auto_lists = on("autolists");
-            });
+            }
         }
-        1 => settings::update(|s| {
+        1 => {
             s.show_hidden = on("hidden");
             s.text_boundaries = on("boundaries");
             s.table_gridlines = on("gridlines");
@@ -511,8 +524,8 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
             s.open_with_formatting_toolbar = on("formatting");
             s.open_with_paragraph_toolbar = on("paragraph");
             s.recent_files = on("recent");
-        }),
-        2 => settings::update(|s| {
+        }
+        2 => {
             s.interpret_rtf = on("rtf");
             s.make_backup = on("backup");
             s.foreign_as_quill = on("foreign_quill");
@@ -520,27 +533,27 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
                 .get(d.selected("reopen"))
                 .copied()
                 .unwrap_or_default();
-        }),
+        }
         TOOLBAR_PANEL => {
             let at = match d.radio_on(1) {
                 "tbleft" => 1,
                 "tbright" => 2,
                 _ => 0,
             };
-            settings::update(|s| {
+            {
                 s.view_toolbar = on("viewtb");
                 s.paragraph_toolbar_tabs = on("tabbuttons");
                 s.toolbar_position = at;
-            });
+            }
         }
-        SPELLING_PANEL => settings::update(|s| {
+        SPELLING_PANEL => {
             s.always_suggest = on("suggest");
             s.spelling_as_you_type = on("live_spelling");
             s.words_to_system = d.selected("add_words") == 1;
             s.ignore_uppercase = on("upper");
             s.ignore_numbers = on("numbers");
-        }),
-        COLORS_PANEL => settings::update(|s| {
+        }
+        COLORS_PANEL => {
             s.named_colors = COLOR_IDS
                 .iter()
                 .zip(COLOR_NAMES)
@@ -549,8 +562,8 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
                     Some((c.0, d.field_text(name).trim().to_string()))
                 })
                 .collect();
-        }),
-        ADVANCED_PANEL => settings::update(|s| {
+        }
+        ADVANCED_PANEL => {
             for (slot, folder) in s.font_folders.iter_mut().enumerate() {
                 folder.enabled = on(FOLDER_ON[slot]);
             }
@@ -573,20 +586,84 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
             {
                 s.recent_count = count;
             }
-        }),
+        }
         _ => {
             let font = d.selected_text("font");
             let size: Option<f32> = d.field_text("size").trim().parse().ok();
-            settings::update(|s| {
+            {
                 if !font.is_empty() {
                     s.font = font;
                 }
                 if let Some(z) = size.filter(|z| (1.0..=1638.0).contains(z)) {
                     s.size = (z * 2.0).round() as u16;
                 }
-            });
+            }
         }
     }
+}
+
+/// Apply only settings edited in Preferences, preserving unrelated changes made elsewhere.
+pub fn save(original: &mut settings::Settings, draft: &settings::Settings) {
+    settings::update(|current| {
+        macro_rules! copy_changes {
+            ($($field:ident),* $(,)?) => {$(
+                if draft.$field != original.$field {
+                    current.$field.clone_from(&draft.$field);
+                }
+            )*};
+        }
+        copy_changes!(
+            name,
+            initials,
+            unit,
+            auto_links,
+            formatted_clipboard,
+            auto_lists,
+            show_hidden,
+            text_boundaries,
+            table_gridlines,
+            default_view,
+            open_with_ruler,
+            open_with_formatting_toolbar,
+            open_with_paragraph_toolbar,
+            recent_files,
+            interpret_rtf,
+            make_backup,
+            foreign_as_quill,
+            reopen,
+            view_toolbar,
+            paragraph_toolbar_tabs,
+            toolbar_position,
+            always_suggest,
+            spelling_as_you_type,
+            words_to_system,
+            ignore_uppercase,
+            ignore_numbers,
+            named_colors,
+            font_folders,
+            font_folder_levels,
+            smart_quotes,
+            interface_scale,
+            autosave_secs,
+            recent_count,
+            font,
+            size,
+            custom_dictionary,
+        );
+        if draft.document.page_width != original.document.page_width {
+            current.document.page_width = draft.document.page_width;
+        }
+        if draft.document.page_height != original.document.page_height {
+            current.document.page_height = draft.document.page_height;
+        }
+    });
+    *original = draft.clone();
+    crate::language::reload_dictionary();
+}
+
+#[cfg(test)]
+pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
+    settings::update(|s| changed_in(panel, d, id, s));
 }
 
 #[cfg(test)]
@@ -690,6 +767,17 @@ mod tests {
                     .any(|item| matches!(item.kind, crate::dialog::Kind::Custom))
             );
             assert_eq!(d.selected("panel"), p);
+            for id in ["cancel", "save", "ok"] {
+                let button = d.items.iter().find(|i| i.id == id).unwrap();
+                assert!(button.rect.bottom() <= d.height);
+                assert!(button.rect.y >= d.height - 40.0);
+            }
+            assert!(
+                d.items
+                    .iter()
+                    .filter(|i| !["cancel", "save", "ok"].contains(&i.id))
+                    .all(|i| i.rect.bottom() <= d.height - 44.0)
+            );
             assert!(
                 d.items
                     .iter()

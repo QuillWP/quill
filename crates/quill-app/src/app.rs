@@ -89,6 +89,26 @@ impl MenuTrack {
     }
 }
 
+impl WinState {
+    /// A pop-up menu Quill has just opened (Zoom, the toolbar's own menu,
+    /// the formatting toolbar's Font, Size and Style), taken away so the
+    /// system can show it instead: the menu, its actions and its top-left
+    /// corner in window points.
+    #[cfg(target_os = "macos")]
+    fn take_popup_menu(&mut self) -> Option<(Menu, Vec<Action>, (f64, f64))> {
+        if matches!(self.menu.as_ref()?.source, MenuSource::Bar(_)) {
+            return None;
+        }
+        let track = self.menu.take()?;
+        let at = (
+            (track.open.rect.x * self.ui) as f64,
+            (track.open.rect.y * self.ui) as f64,
+        );
+        let menu = track.menu().clone();
+        Some((menu, track.actions, at))
+    }
+}
+
 /// Whole rows from wheel movement, keeping the remainder in `rest` for the
 /// next turn of the wheel.
 fn wheel_rows(rest: &mut f32, dy: f32) -> i32 {
@@ -188,6 +208,10 @@ pub struct WinState {
     /// dialog whose native construction failed keep the portable renderer.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     native_dialogs: bool,
+    /// This state belongs to a window on screen, not a snapshot, so AppKit
+    /// panels such as the Colors panel can be shown from it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    on_screen: bool,
     /// The color palette popped out beside a dialog's color, while it is.
     color_pop: Option<crate::palette::PaletteState>,
     pub show_toolbar: bool,
@@ -349,6 +373,7 @@ impl WinState {
             own_menu_bar: !cfg!(target_os = "macos"),
             native_scrollbars: false,
             native_dialogs: false,
+            on_screen: false,
             color_pop: None,
             dialog_mouse: false,
             font_names: Vec::new(),
@@ -1996,6 +2021,7 @@ impl App {
         {
             st.native_scrollbars = scrollbars.is_some();
             st.native_dialogs = false;
+            st.on_screen = true;
         }
         self.windows.push((
             id,
@@ -2508,7 +2534,7 @@ impl App {
             Effect::ChooseMergeData => {
                 let file = rfd::FileDialog::new()
                     .set_title("Open Data Document")
-                    .add_filter("Documents", &["qwp", "docx", "rtf", "odt", "txt"])
+                    .add_filter("Documents", quill_formats::READABLE)
                     .pick_file();
                 let list = self.window_list(id);
                 if let (Some(path), Some(i)) = (file, self.index(id)) {
@@ -2920,7 +2946,7 @@ impl App {
                     w.window.request_redraw();
                     self.context_actions = actions;
                     let w = &self.windows[i].1;
-                    crate::native_menu::show_context(&m, &w.window);
+                    crate::native_menu::show_context(&m, &w.window, None);
                 }
                 return;
             }
@@ -2937,6 +2963,14 @@ impl App {
             w.st.mouse_up(x, y, clip)
         };
         w.window.request_redraw();
+        // On the Mac every menu is the system's own, so a pop-up Quill
+        // would draw opens as a native menu where it would have been.
+        #[cfg(target_os = "macos")]
+        if let Some((m, actions, at)) = w.st.take_popup_menu() {
+            self.context_actions = actions;
+            let w = &self.windows[i].1;
+            crate::native_menu::show_context(&m, &w.window, Some(at));
+        }
         if let Some(n) = raise
             && let Some((_, other)) = self.windows.get(n)
         {
@@ -3026,7 +3060,7 @@ fn about() {
         .set_level(rfd::MessageLevel::Info)
         .set_title("About Quill")
         .set_description(format!(
-            "Quill {}\n\nA small word processor written in Rust, inspired by Lucas's favorite word processor from 1992.\n\n{}\nSee Help > Licenses… for the full text.",
+            "Quill {}\n\nA small word processor written in Rust, inspired by Lucas's favorite word processor from 1992.\n\n{}\nhttps://quillwp.com\nSee Help > Licenses… for the full text.",
             env!("CARGO_PKG_VERSION"),
             crate::licenses::SUMMARY
         ))
@@ -3771,7 +3805,375 @@ fn window_icon() -> Option<winit::window::Icon> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn toolbar_and_formatting_pop_ups_are_handed_to_the_system_menu_on_the_mac() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let families = fonts.family_info();
+        let mut cache = GlyphCache::new();
+        let mut label = Label {
+            fonts: &mut fonts,
+            cache: &mut cache,
+        };
+        let env = Env {
+            font_names: &[],
+            font_families: &families,
+            recent: &[],
+            windows: &[],
+        };
+        let mut state = WinState::new(DocView::new(Document::new(), "Pop-ups".into()));
+        state.width = 900.0;
+        state.height = 700.0;
+        state.ui = 1.5;
+        let toolbar_menu = (0..64)
+            .find(|i| toolbar::command(*i) == Some(Cmd::ToolbarMenu))
+            .expect("the toolbar has a Toolbar Menu button");
+        state.open_toolbar_menu(toolbar_menu, &mut label);
+        let (menu, actions, _) = state.take_popup_menu().expect("the toolbar's menu");
+        assert!(state.menu.is_none(), "Quill draws nothing itself");
+        assert!(
+            menu.items
+                .iter()
+                .any(|it| actions.get(it.id as usize) == Some(&Action::ToolbarPosition(1)))
+        );
+        for hit in [Hit::FontPopup, Hit::SizePopup, Hit::StylePopup] {
+            state.open_popup(hit, &mut label, &env);
+            let rect = state.menu.as_ref().expect("a pop-up opens").open.rect;
+            let (menu, _, at) = state.take_popup_menu().expect("the pop-up's menu");
+            assert!(state.menu.is_none(), "{hit:?}: Quill draws nothing itself");
+            assert!(!menu.items.is_empty(), "{hit:?}");
+            if hit == Hit::FontPopup {
+                // Font names keep their own faces in the native menu.
+                assert!(menu.items.iter().any(|it| it.font.is_some()));
+            }
+            assert_eq!(at, ((rect.x * 1.5) as f64, (rect.y * 1.5) as f64));
+        }
+    }
     use quill_core::{Position, Selection};
+
+    #[test]
+    fn character_styles_window_edits_and_adds_styles_through_its_editor() {
+        let mut doc = quill_core::text::from_plain_text("Body text");
+        doc.add_character_style(
+            "Callout",
+            quill_core::character_styles::CharacterFormat::default(),
+        )
+        .unwrap();
+        doc.forget_history();
+        let original = quill_formats::native::write(&doc, 0);
+        let mut state = WinState::new(DocView::new(doc, "Doc".into()));
+        let d = crate::character_style_dialog::dialog(&state.view);
+        state.dialogs.push((Which::CharacterStyles, d));
+        let mut clip = Clipboard::new();
+
+        // Cancel leaves the style and the document alone.
+        state.dialog_outcome(Outcome::Button("edit"), &mut clip);
+        assert!(matches!(
+            state.dialogs[1].0,
+            Which::CharacterStyleEdit(Some(1))
+        ));
+        state.dialogs[1].1.set_field("size", "18");
+        state.dialog_outcome(Outcome::Cancel, &mut clip);
+        assert_eq!(state.dialogs.len(), 1);
+        assert_eq!(quill_formats::native::write(&state.view.doc, 0), original);
+
+        // OK saves what the editor shows into the style; the text is untouched.
+        state.dialog_outcome(Outcome::Button("edit"), &mut clip);
+        let editor = &mut state.dialogs[1].1;
+        editor.set_field("size", "18");
+        editor.set_on("bold", true);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.dialogs.len(), 1, "back in Character Styles");
+        let format = state.view.doc.styles.character(1).unwrap().format;
+        assert_eq!(format.mask, (1 << 1) | (1 << 2));
+        assert_eq!(format.props.size, 36);
+        assert_eq!(
+            state.view.doc.main.paras[0].chp_of_char(0).character_style,
+            0
+        );
+        assert_eq!(
+            state.dialogs[0].1.item_label("description"),
+            "Sets: 18 pt, Bold"
+        );
+
+        // + makes a new style; a name already in use keeps the editor open.
+        state.dialog_outcome(Outcome::Button("new"), &mut clip);
+        assert!(matches!(
+            state.dialogs[1].0,
+            Which::CharacterStyleEdit(None)
+        ));
+        state.dialogs[1].1.set_field("name", "Callout");
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert!(state.dialogs.len() > 2, "an alert over the editor");
+        state.dialogs.truncate(2);
+        state.dialogs[1].1.set_field("name", "Aside");
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.dialogs.len(), 1);
+        assert_eq!(state.view.doc.styles.find_character("Aside"), Some(2));
+        assert_eq!(
+            crate::character_style_dialog::selected_style(&state.dialogs[0].1),
+            2
+        );
+        state.view.doc.undo();
+        state.view.doc.undo();
+        assert_eq!(quill_formats::native::write(&state.view.doc, 0), original);
+    }
+
+    #[test]
+    fn character_style_dialog_edits_stay_pending_and_cancel_does_not_add_fonts() {
+        let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+        let original = quill_formats::native::write(&state.view.doc, 0);
+        let (d, st) = crate::style_dialog::style(&state.view);
+        state.dialogs.push((Which::Style(st), d));
+        let mut clip = Clipboard::new();
+        state.dialog_outcome(Outcome::Button("character"), &mut clip);
+        let editor = &mut state.dialogs.last_mut().unwrap().1;
+        editor.set_options("font", vec!["A pending font".into()], 0);
+        editor.set_field("size", "18");
+        editor.set_on("bold", true);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert!(matches!(&state.dialogs[0].0, Which::Style(st)
+            if st.chp.bold && st.chp.size == 36 && st.fonts.contains(&"A pending font".into())));
+        assert_eq!(quill_formats::native::write(&state.view.doc, 0), original);
+        state.dialog_outcome(Outcome::Cancel, &mut clip);
+        assert_eq!(quill_formats::native::write(&state.view.doc, 0), original);
+        assert!(!state.view.doc.is_modified());
+
+        let (d, st) = crate::style_dialog::style(&state.view);
+        state.dialogs.push((Which::Style(st), d));
+        state.dialog_outcome(Outcome::Button("character"), &mut clip);
+        state.dialogs.last_mut().unwrap().1.set_field("size", "22");
+        state.dialog_outcome(Outcome::Cancel, &mut clip);
+        state.dialog_outcome(Outcome::Button("define"), &mut clip);
+        assert_eq!(quill_formats::native::write(&state.view.doc, 0), original);
+        assert!(!state.view.doc.is_modified());
+    }
+
+    #[test]
+    fn character_editor_defines_manual_defaults_and_ok_applies_the_defined_style() {
+        let doc = quill_core::text::from_plain_text("Body text");
+        let mut state = WinState::new(DocView::new(doc, "Doc".into()));
+        let (mut d, st) = crate::style_dialog::style(&state.view);
+        d.set_selected("list", 0);
+        state.dialogs.push((Which::Style(st), d));
+        let mut clip = Clipboard::new();
+        state.dialog_outcome(Outcome::Changed("list"), &mut clip);
+        state
+            .dialogs
+            .last_mut()
+            .unwrap()
+            .1
+            .set_field("name", "Large body");
+        state.dialog_outcome(Outcome::Button("character"), &mut clip);
+        let editor = &mut state.dialogs.last_mut().unwrap().1;
+        editor.set_field("size", "18");
+        editor.set_on("bold", true);
+        editor.set_options("font", vec!["A new style font".into()], 0);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert!(!state.view.doc.fonts.contains(&"A new style font".into()));
+        state.dialog_outcome(Outcome::Button("define"), &mut clip);
+        let id = state.view.doc.styles.find("Large body").unwrap();
+        assert_eq!(state.view.doc.styles.get(id).chp.size, 36);
+        assert!(state.view.doc.styles.get(id).chp.bold);
+        assert_eq!(
+            state
+                .view
+                .doc
+                .font_name(state.view.doc.styles.get(id).chp.font),
+            "A new style font"
+        );
+        assert_eq!(
+            state.view.doc.main.paras[0].pap.style, 0,
+            "Define does not apply the new style"
+        );
+        assert_eq!(state.dialogs.len(), 1, "Define keeps the dialog open");
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert!(state.dialogs.is_empty());
+        assert_eq!(state.view.doc.main.paras[0].pap.style, id);
+        assert_eq!(state.view.doc.main.paras[0].chp_of_char(0).size, 36);
+        assert!(state.view.doc.main.paras[0].chp_of_char(0).bold);
+        let bytes = quill_formats::native::write(&state.view.doc, 0);
+        let saved = quill_formats::native::read(&bytes).unwrap();
+        assert_eq!(saved.styles.get(id).chp, state.view.doc.styles.get(id).chp);
+    }
+
+    #[test]
+    fn choosing_a_character_style_in_format_style_links_it_and_no_style_unlinks() {
+        let mut doc = quill_core::text::from_plain_text("Body text");
+        doc.add_character_style(
+            "Emphasis",
+            quill_core::character_styles::CharacterFormat::new(
+                quill_core::CharProps {
+                    italic: true,
+                    ..Default::default()
+                },
+                1 << 3,
+            ),
+        )
+        .unwrap();
+        doc.forget_history();
+        let original = quill_formats::native::write(&doc, 0);
+        let mut state = WinState::new(DocView::new(doc, "Doc".into()));
+        let (mut d, st) = crate::style_dialog::style(&state.view);
+        let manual = st.chp;
+        assert_eq!(d.options("character_style"), &["No Style", "Emphasis"]);
+        d.set_selected("character_style", 1);
+        state.dialogs.push((Which::Style(st), d));
+        let mut clip = Clipboard::new();
+        state.dialog_outcome(Outcome::Changed("character_style"), &mut clip);
+        let struck = |state: &WinState| {
+            state.dialogs[0]
+                .1
+                .items
+                .iter()
+                .filter(|item| item.id.starts_with("char") && item.id.len() == 5)
+                .all(|item| item.struck)
+        };
+        assert!(struck(&state), "the manual values show, struck through");
+        assert!(
+            state.dialogs[0]
+                .1
+                .items
+                .iter()
+                .filter(|item| ["ok", "apply", "define"].contains(&item.id))
+                .all(|item| item.enabled),
+            "saving works with a style chosen"
+        );
+        assert!(
+            state.dialogs[0]
+                .1
+                .item_label("character_status")
+                .starts_with("Linked to Emphasis (Italic).")
+        );
+
+        // Define saves the link; the text in that style takes Italic.
+        state.dialog_outcome(Outcome::Button("define"), &mut clip);
+        let normal = state.view.doc.styles.get(0);
+        assert_eq!(normal.character, 1);
+        assert_eq!(normal.own(), manual);
+        assert!(state.view.doc.main.paras[0].chp_of_char(0).italic);
+        // Choosing the style again shows its link.
+        let Which::Style(st) = &state.dialogs[0].0 else {
+            unreachable!()
+        };
+        assert_eq!(st.character, 1);
+        assert_eq!(state.dialogs[0].1.selected("character_style"), 1);
+
+        // No Style brings the manual formatting back.
+        state.dialogs[0].1.set_selected("character_style", 0);
+        state.dialog_outcome(Outcome::Changed("character_style"), &mut clip);
+        assert!(!struck(&state));
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert!(state.dialogs.is_empty());
+        assert_eq!(state.view.doc.styles.get(0).character, 0);
+        assert!(!state.view.doc.main.paras[0].chp_of_char(0).italic);
+        state.view.doc.undo();
+        state.view.doc.undo();
+        assert_eq!(quill_formats::native::write(&state.view.doc, 0), original);
+    }
+
+    #[test]
+    fn paragraph_style_editor_stages_changes_and_cancel_keeps_the_document_clean() {
+        let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+        let (d, st) = crate::style_dialog::style(&state.view);
+        state.dialogs.push((Which::Style(st), d));
+        let original = state.view.doc.styles.clone();
+        let mut clip = Clipboard::new();
+        state.dialog_outcome(Outcome::Button("paragraph"), &mut clip);
+        state
+            .dialogs
+            .last_mut()
+            .unwrap()
+            .1
+            .set_field("before", "18 pt");
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.dialogs.len(), 1);
+        assert_eq!(state.view.doc.styles, original);
+        assert!(!state.view.doc.is_modified());
+        assert!(matches!(&state.dialogs[0].0, Which::Style(st) if st.pap.before == 360));
+        state.dialog_outcome(Outcome::Cancel, &mut clip);
+        assert!(state.dialogs.is_empty());
+        assert_eq!(state.view.doc.styles, original);
+        assert!(!state.view.doc.is_modified());
+
+        let (d, st) = crate::style_dialog::style(&state.view);
+        state.dialogs.push((Which::Style(st), d));
+        state.dialog_outcome(Outcome::Button("paragraph"), &mut clip);
+        state
+            .dialogs
+            .last_mut()
+            .unwrap()
+            .1
+            .set_field("before", "18 pt");
+        state.dialog_outcome(Outcome::Cancel, &mut clip);
+        state.dialog_outcome(Outcome::Button("define"), &mut clip);
+        assert_eq!(state.view.doc.styles, original);
+        assert!(!state.view.doc.is_modified());
+        assert!(state.view.doc.undo_label().is_none());
+    }
+
+    #[test]
+    fn defining_paragraph_format_changes_the_chosen_style_and_undo_restores_it() {
+        let mut doc = quill_core::text::from_plain_text("Body\nHeading one\nHeading two");
+        let heading = doc.styles.find("heading 1").unwrap();
+        doc.apply_style(quill_core::StoryId::Main, 1, 2, heading);
+        doc.forget_history();
+        let original = quill_formats::native::write(&doc, 0);
+        let mut state = WinState::new(DocView::new(doc, "Doc".into()));
+        let (mut d, st) = crate::style_dialog::style(&state.view);
+        let index = st
+            .entries
+            .iter()
+            .position(|entry| *entry == Some(heading))
+            .unwrap();
+        d.set_selected("list", index);
+        state.dialogs.push((Which::Style(st), d));
+        let mut clip = Clipboard::new();
+        state.dialog_outcome(Outcome::Changed("list"), &mut clip);
+        let body = state.view.doc.main.paras[0].clone();
+        let font = state.view.doc.styles.get(heading).chp;
+        state.dialog_outcome(Outcome::Button("paragraph"), &mut clip);
+        let editor = &mut state.dialogs.last_mut().unwrap().1;
+        for (id, value) in [
+            ("before", "18 pt"),
+            ("after", "6 pt"),
+            ("left", "0.5 in"),
+            ("right", "0.25 in"),
+            ("first", "0.125 in"),
+            ("line_by", "18"),
+        ] {
+            editor.set_field(id, value);
+        }
+        editor.set_selected("line", 2);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.view.doc.main.paras[0], body);
+        assert!(!state.view.doc.is_modified());
+        state.dialog_outcome(Outcome::Button("define"), &mut clip);
+        let style = state.view.doc.styles.get(heading);
+        assert_eq!(style.chp, font);
+        assert_eq!(
+            (
+                style.pap.before,
+                style.pap.after,
+                style.pap.left,
+                style.pap.right,
+                style.pap.first
+            ),
+            (360, 120, 720, 360, 180)
+        );
+        assert_eq!(style.pap.line, quill_core::LineSpacing::Exactly(360));
+        for para in &state.view.doc.main.paras[1..] {
+            assert_eq!(para.pap, style.pap);
+        }
+        assert_eq!(state.view.doc.main.paras[0], body);
+        assert!(state.view.doc.is_modified());
+        state.view.doc.undo();
+        assert_eq!(quill_formats::native::write(&state.view.doc, 0), original);
+        assert!(!state.view.doc.is_modified());
+    }
 
     #[test]
     fn global_character_style_changes_refresh_inactive_headers_without_copying_old_text_back() {
@@ -4808,6 +5210,27 @@ mod tests {
         };
         assert_eq!(p.custom.first(), Some(&quill_core::props::Rgb(0x102030)));
         assert_eq!(p.current, quill_core::props::Rgb(0x102030));
+    }
+
+    #[test]
+    fn find_format_character_more_colors_is_handled() {
+        let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+        let (character, _) = format_dialogs::character_for_find(&state.view, &[]);
+        state.dialogs.push((
+            Which::FindFormat {
+                replace: false,
+                kind: 0,
+            },
+            character,
+        ));
+        let mut clip = Clipboard::without_system();
+
+        let n = state.dialogs[0].1.options("color").len();
+        state.dialogs[0].1.set_selected("color", n - 1);
+        state.dialog_outcome(Outcome::Changed("color"), &mut clip);
+
+        assert_eq!(state.dialogs.len(), 2);
+        assert!(matches!(state.dialogs[1].0, Which::Palette(_)));
     }
 
     #[test]

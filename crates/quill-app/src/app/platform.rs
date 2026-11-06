@@ -93,6 +93,21 @@ impl App {
             w.window.request_redraw();
             return;
         }
+        // A row chosen in a list, or a double-click on one.
+        if let Some((row, double, _)) = choice
+            && let Some(item) = dialog.items.iter().find(|item| item.id == id)
+            && let crate::dialog::Kind::List { double: button, .. } = &item.kind
+        {
+            let button = *button;
+            dialog.select_row(id, row);
+            let outcome = match button {
+                Some(button) if double => Outcome::Button(button),
+                _ => Outcome::Changed(id),
+            };
+            w.st.dialog_outcome(outcome, clip);
+            w.window.request_redraw();
+            return;
+        }
         // A box or the button of the color pop-out, which are not items of
         // the dialog.
         if dialog.popout.is_some()

@@ -287,10 +287,11 @@ pub fn context_index(id: &str) -> Option<usize> {
     id.strip_prefix('c').and_then(|n| n.parse().ok())
 }
 
-/// Show `menu` as a native context menu at the pointer in `window`.
-/// Returns once the menu closes; a choice arrives later, like the menu
-/// bar's, with a "c" id.
-pub fn show_context(menu: &Menu, window: &winit::window::Window) {
+/// Show `menu` as a native context menu in `window`, at the pointer or
+/// with its top-left corner at `at` (logical points from the top-left of
+/// the window's content). Returns once the menu closes; a choice arrives
+/// later, like the menu bar's, with a "c" id.
+pub fn show_context(menu: &Menu, window: &winit::window::Window, at: Option<(f64, f64)>) {
     use muda::ContextMenu;
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     let Ok(handle) = window.window_handle() else {
@@ -306,6 +307,7 @@ pub fn show_context(menu: &Menu, window: &winit::window::Window) {
                 root.append(&PredefinedMenuItem::separator())?;
             } else if let Some(children) = &it.submenu {
                 let nested = Submenu::new(it.label.replace('&', "&&"), it.enabled);
+                nested.set_attributed_title(font_preview(it).as_deref());
                 for child in &children.items {
                     if child.separator {
                         nested.append(&PredefinedMenuItem::separator())?;
@@ -326,12 +328,19 @@ pub fn show_context(menu: &Menu, window: &winit::window::Window) {
     let Ok(root) = build() else {
         return;
     };
-    // No position: AppKit opens it where the pointer is. A position in
-    // the view lands far off, since winit's view counts down from the top.
+    // muda counts up from the bottom of the view, but winit's view counts
+    // down from the top, so turn the point over before handing it on.
+    // Without a point AppKit opens the menu where the pointer is.
+    let height = window
+        .inner_size()
+        .to_logical::<f64>(window.scale_factor())
+        .height;
+    let position = at
+        .map(|(x, y)| muda::dpi::Position::Logical(muda::dpi::LogicalPosition::new(x, height - y)));
     // SAFETY: winit owns this NSView for as long as the window is open,
     // and the menu shows and closes within this call.
     unsafe {
-        root.show_context_menu_for_nsview(handle.ns_view.as_ptr().cast(), None);
+        root.show_context_menu_for_nsview(handle.ns_view.as_ptr().cast(), position);
     }
 }
 

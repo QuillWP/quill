@@ -236,11 +236,39 @@ pub fn place(label: &mut Label, menu: &Menu, anchor: Rect, bounds: Rect, below: 
     }
 }
 
-/// Place a submenu beside its parent row, flipping left at the window edge.
+/// Place a submenu beside its parent row, moving up or left at the window edge.
 pub fn place_side(label: &mut Label, menu: &Menu, parent: Rect, bounds: Rect) -> OpenMenu {
+    // Use the full window height before scrolling, so a short submenu near
+    // the bottom moves up instead of showing only one item between arrows.
     // Size from the child labels, not the much wider parent menu.
-    let sizing_anchor = Rect::new(parent.x, parent.y, 60.0, parent.h);
+    let sizing_anchor = Rect::new(parent.x, bounds.y, 60.0, parent.h);
     let mut open = place(label, menu, sizing_anchor, bounds, false);
+    // Size visible face previews in their own fonts. Measuring only these
+    // rows keeps a long font-family submenu lazy too.
+    for it in menu.items.iter().take(open.visible_rows) {
+        if let Some(font) = it.font.as_deref() {
+            let key = crate::commands::display_key(&it.key);
+            let kw = if key.is_empty() {
+                0.0
+            } else {
+                label.width(interface_font(), SIZE, BOLD, &key) + 24.0
+            };
+            let face = label.fonts.resolve(font, it.style.bold, it.style.italic);
+            let text: f32 = it
+                .label
+                .chars()
+                .map(|ch| {
+                    let (f, g) = label.fonts.glyph(face, ch);
+                    label.fonts.advance(f, g, SIZE)
+                })
+                .sum();
+            open.rect.w = open.rect.w.max(text + kw + 40.0);
+        }
+    }
+    open.rect.y = parent
+        .y
+        .min(bounds.bottom() - open.rect.h - 4.0)
+        .max(bounds.y);
     open.rect.x = if parent.right() + open.rect.w <= bounds.right() {
         parent.right() - 1.0
     } else {
@@ -447,9 +475,23 @@ fn draw_menu_face(
             label.draw(c, font, SIZE, bold, ir.x + 4.0, base, "\u{2713}", fg);
         }
         let x = ir.x + 16.0;
+        let key = crate::commands::display_key(&it.key);
+        let kw = if key.is_empty() {
+            0.0
+        } else {
+            label.width(font, SIZE, bold, &key)
+        };
+        // Preview fonts can be much wider or taller than the menu font.
+        // Keep their ink inside the row, clear of shortcuts and arrows.
+        let clip = c.set_clip(Rect::new(
+            x,
+            ir.y,
+            (ir.right() - kw - 20.0 - x).max(0.0),
+            ir.h,
+        ));
         // Only visible rows reach this point, so a long installed-font list
         // remains lazy: opening it does not load every font on the machine.
-        let w = if let Some(font) = it.font.as_deref() {
+        if let Some(font) = it.font.as_deref() {
             if it.style.italic {
                 label.draw_italic(c, font, SIZE, it.style.bold, x, base, &it.label, fg)
             } else {
@@ -458,10 +500,8 @@ fn draw_menu_face(
         } else {
             draw_styled(c, label, font, &it.label, it.style, bold, x, base, fg)
         };
-        let _ = w;
-        if !it.key.is_empty() {
-            let key = crate::commands::display_key(&it.key);
-            let kw = label.width(font, SIZE, bold, &key);
+        c.restore_clip(clip);
+        if !key.is_empty() {
             label.draw(c, font, SIZE, bold, ir.right() - kw - 10.0, base, &key, fg);
         }
         if it.submenu.is_some() {
@@ -530,6 +570,44 @@ mod tests {
         let bold = Item::new("Bold", 2).checked(false);
         assert!(bold.checkable);
         assert!(!bold.checked);
+    }
+
+    #[test]
+    fn submenus_near_the_bottom_move_up_before_scrolling() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut cache = quill_layout::GlyphCache::new();
+        let mut label = Label {
+            fonts: &mut fonts,
+            cache: &mut cache,
+        };
+        let bounds = Rect::new(0.0, 0.0, 800.0, 480.0);
+        let parent = Rect::new(20.0, 444.0, 200.0, ITEM_HEIGHT);
+        let menu = Menu {
+            title: "Georgia".into(),
+            items: ["Normal", "Bold", "Italic", "Bold Italic"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, name)| Item::new(name, i as u32).font("Georgia"))
+                .collect(),
+        };
+        let open = place_side(&mut label, &menu, parent, bounds);
+        assert_eq!(open.visible_rows, menu.items.len());
+        assert!(open.rect.y < parent.y);
+        assert!(open.rect.bottom() <= bounds.bottom());
+        let text_width = label.width("Georgia", SIZE, false, "Bold Italic");
+        assert!(open.rect.w >= text_width + 40.0);
+        for i in 0..menu.items.len() {
+            assert!(item_rect(&menu, &open, i).is_some());
+        }
+
+        let (tall, _) = tall_menu(100);
+        let open = place_side(&mut label, &tall, parent, bounds);
+        assert!(open.visible_rows < tall.items.len());
+        assert!(open.visible_rows > menu.items.len());
+        assert!(open.rect.y >= bounds.y);
+        assert!(open.rect.bottom() <= bounds.bottom());
     }
 
     #[test]
@@ -614,5 +692,55 @@ mod tests {
         let preview = Item::new("Georgia", 2).font("Georgia");
         assert_eq!(plain.font, None);
         assert_eq!(preview.font.as_deref(), Some("Georgia"));
+    }
+
+    #[test]
+    fn font_preview_ink_stays_in_its_row_and_clear_of_the_arrow() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut cache = quill_layout::GlyphCache::new();
+        let mut label = Label {
+            fonts: &mut fonts,
+            cache: &mut cache,
+        };
+        let open = OpenMenu {
+            rect: Rect::new(20.0, 20.0, 100.0, 20.0),
+            visible_rows: 1,
+            ..Default::default()
+        };
+        for font in ["Georgia", "Bodoni Ornaments"] {
+            let mut menu = Menu {
+                title: "Font".into(),
+                items: vec![
+                    Item::new("Wide preview text repeated", 1)
+                        .font(font)
+                        .submenu(Menu::default()),
+                ],
+            };
+            let mut preview = vec![color::WHITE; 240 * 80];
+            draw_menu(
+                &mut Canvas::new(&mut preview, 240, 80, 1.0),
+                &mut label,
+                &menu,
+                &open,
+            );
+            menu.items[0].label.clear();
+            let mut blank = vec![color::WHITE; 240 * 80];
+            draw_menu(
+                &mut Canvas::new(&mut blank, 240, 80, 1.0),
+                &mut label,
+                &menu,
+                &open,
+            );
+            assert_ne!(preview, blank, "the preview must be drawn");
+            for y in 0..80 {
+                for x in 0..240 {
+                    if !(36..100).contains(&x) || !(22..38).contains(&y) {
+                        assert_eq!(preview[y * 240 + x], blank[y * 240 + x], "{font}: {x},{y}");
+                    }
+                }
+            }
+        }
     }
 }

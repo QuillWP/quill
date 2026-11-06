@@ -20,7 +20,10 @@ class PackageTests(unittest.TestCase):
             (self.root / name).write_text("fixture\n")
         for name in ["assets/quill.png", "data/language.dat", "data/licenses/notice.txt",
                      "tests/visual/example.png", "crates/new-uncommitted.rs", "tools/quill.desktop",
-                     "fuzz/fuzz_targets/example.rs", "fuzz/Cargo.toml"]:
+                     "fuzz/fuzz_targets/example.rs", "fuzz/support/oracle.rs", "fuzz/Cargo.toml",
+                     "assets/quill.icns", "assets/quill-document.icns", "assets/quill-about.jpg",
+                     "assets/quill.ico", "assets/quill-document.ico", "assets/quill-document.png",
+                     "tools/quill-mime.xml"]:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"fixture")
@@ -30,6 +33,7 @@ class PackageTests(unittest.TestCase):
     def test_source_keeps_images_data_and_working_files_but_excludes_builds(self):
         for name in ["target/huge.bin", "crates/target/huge.bin", "fuzz/target/huge.bin",
                      "fuzz/corpus/input", "fuzz/artifacts/crash", "Quill.app/generated",
+                     "drafts/icon.png", "lucas/private.md",
                      ".git/private", "tools/__pycache__/module.pyc", "assets/.DS_Store"]:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,10 +44,11 @@ class PackageTests(unittest.TestCase):
             names = set(bundle.namelist())
             for name in ["assets/quill.png", "tests/visual/example.png", "data/language.dat",
                          "data/licenses/notice.txt", "crates/new-uncommitted.rs", "Cargo.lock",
-                         "fuzz/fuzz_targets/example.rs"]:
+                         "fuzz/fuzz_targets/example.rs", "fuzz/support/oracle.rs"]:
                 self.assertIn("Quill/" + name, names)
             self.assertFalse(any("huge.bin" in name or "corpus/" in name or ".git/" in name
-                                 or ".DS_Store" in name or "__pycache__" in name for name in names))
+                                 or ".DS_Store" in name or "__pycache__" in name
+                                 or "drafts/" in name or "lucas/" in name for name in names))
         self.assertEqual((self.output / "keep-existing-package.zip").read_bytes(), b"preserved")
 
     def test_native_archives_include_runtime_data_licenses_and_executable(self):
@@ -64,9 +69,31 @@ class PackageTests(unittest.TestCase):
                         self.assertTrue(bundle.getmember(prefix + "quill").mode & 0o111)
                     binary = "quill"
                     self.assertIn("quill.desktop", names)
-                for name in [binary, "quill.png", "data/language.dat", "data/licenses/notice.txt",
+                for name in [binary, "quill.png", "quill.ico", "quill-document.png", "quill-document.ico",
+                             "quill-about.jpg", "quill-mime.xml", "data/language.dat", "data/licenses/notice.txt",
                              "LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES.txt", "README.md"]:
                     self.assertIn(name, names)
+
+    def test_mac_bundle_uses_separate_app_and_document_icons_and_qwp_type(self):
+        import plistlib
+        executable = Path(self.tmp.name) / "quill"
+        executable.write_bytes(b"executable")
+        info = plistlib.loads((package.ROOT / "tools/Info.plist").read_bytes())
+        (self.root / "tools/Info.plist").write_bytes(plistlib.dumps(info))
+        app = Path(self.tmp.name) / "Quill.app"
+        with patch.object(package, "ROOT", self.root), patch.object(package, "run"):
+            package.mac_app(executable, app, "1.2.3", None)
+        contents = app / "Contents"
+        info = plistlib.loads((contents / "Info.plist").read_bytes())
+        self.assertEqual(info["CFBundleIdentifier"], "com.quillwp.Quill")
+        self.assertEqual(info["CFBundleExecutable"], "quill")
+        self.assertNotIn("UTImportedTypeDeclarations", info)
+        self.assertEqual(info["CFBundleDocumentTypes"][0]["LSItemContentTypes"],
+                         ["com.quillwp.document"])
+        native = info["UTExportedTypeDeclarations"][0]["UTTypeTagSpecification"]
+        self.assertEqual(native["public.filename-extension"], ["qwp"])
+        for name in ["Quill.icns", "QuillDocument.icns", "quill-about.jpg"]:
+            self.assertTrue((contents / "Resources" / name).is_file())
 
 
 if __name__ == "__main__":

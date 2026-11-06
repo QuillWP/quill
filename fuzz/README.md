@@ -11,8 +11,8 @@ cargo +nightly fuzz run docx
 ```
 
 The targets cover ZIP containers, XML, DOCX, ODT, RTF, HTML, native .qwp files,
-image identification and decoding, settings, glossary files and print-merge data,
-plus `editing`, `character_styles` and `clipboard`, described below.
+image identification and decoding, settings, glossary files, print-merge data and
+Markdown, plus `editing`, `character_styles` and `clipboard`, described below.
 
 ## Overnight campaign
 
@@ -30,7 +30,7 @@ use content hashes; Word lock files and macOS metadata files are excluded.
 This prepares inputs only and does not launch a fuzz campaign.
 
 Run `python3 tools/overnight_fuzz.py` from the repository root under
-`caffeinate -i` to seed the missing corpora, build all fourteen targets with
+`caffeinate -i` to seed the missing corpora, build all fifteen targets with
 AddressSanitizer and checked arithmetic, and run each for three hours.
 Three targets run concurrently with three workers apiece. `--hours 8` instead
 shares eight hours, giving three quarters to the targets that read whole
@@ -41,6 +41,13 @@ Save them through Word into `fuzz/word-fixtures/2026-11-01/word`, then run
 `cargo run -p quill-formats --example seed_exports fuzz/word-fixtures/2026-11-01`
 for Quill's own .qwp, .rtf, .htm, .docx and .odt, and the script again with
 `--seed-corpus`.
+
+`python3 tools/make_feature_seeds.py` prepares the seeds for the features added
+since: border and shading colors, cropped and adjacent pictures, bullets, line
+numbers, links, character styles in every story and paragraph styles linked to
+them. Quill builds those documents itself, Word and LibreOffice save copies,
+Quill saves those again, and everything goes into the corpora. Its docstring
+lists the steps.
 
 Each campaign has an ignored `fuzz/runs/<timestamp>/` directory containing
 `report.md` (updated every thirty seconds and finalized on completion),
@@ -73,11 +80,14 @@ still check comment content and resolved state. This tests core editing, not
 mouse hit testing, caret navigation or rendering. Those remain separate UI tests.
 
 `character_styles` runs programs of define, apply, remove, redefine, rename,
-delete, Replace Fonts, paragraph style, join and Undo/Redo. After every step, text
-must show the style it names unless it overrides that field by hand. The same
+delete, Replace Fonts, paragraph style, join, linking a paragraph style to a
+character style and Undo/Redo. After every step, text must show the style it
+names unless it overrides that field by hand, and a linked paragraph style must
+show its character style and keep the link through a .qwp save. The same
 programs run in the normal test suite. `clipboard` pastes RTF or clipboard HTML
-into a document that already has conflicting style names, checks those rules, saves,
-and undoes. `native` reads .qwp files. `html` and `odt` now also save and reopen,
+into a document that already has conflicting style names, checks those rules,
+saves, and undoes. `native` reads .qwp files and `markdown` reads Markdown,
+never looking for pictures on disk. `html` and `odt` now also save and reopen,
 and every target that saves checks HTML and ODT as well as native, DOCX and RTF.
 
 Overnight campaigns also include `editing`. Failed property

@@ -96,7 +96,7 @@ mod tests {
     }
 
     #[test]
-    fn changing_save_preferences_without_a_document_updates_application_settings() {
+    fn canceling_preferences_discards_the_draft() {
         let before = crate::settings::get().foreign_as_quill;
         let mut preferences = ApplicationPreferences::new(&[], &[]);
         let mut clip = Clipboard::without_system();
@@ -124,11 +124,70 @@ mod tests {
         preferences
             .state
             .dialog_outcome(Outcome::Changed("foreign_quill"), &mut clip);
-        assert_eq!(crate::settings::get().foreign_as_quill, !before);
+        assert_eq!(crate::settings::get().foreign_as_quill, before);
         preferences.state.dialog_outcome(Outcome::Cancel, &mut clip);
         assert!(preferences.is_closed());
-        assert_eq!(crate::settings::get().foreign_as_quill, !before);
+        assert_eq!(crate::settings::get().foreign_as_quill, before);
         assert!(!preferences.state.view.doc.is_modified());
         crate::settings::update(|s| s.foreign_as_quill = before);
+    }
+    fn change(
+        preferences: &mut ApplicationPreferences,
+        id: &'static str,
+        value: &str,
+        clip: &mut Clipboard,
+    ) {
+        let d = &mut preferences.state.dialogs.last_mut().unwrap().1;
+        if id == "panel" {
+            d.set_selected(id, value.parse().unwrap());
+        } else {
+            d.set_field(id, value);
+        }
+        preferences.state.dialog_outcome(Outcome::Changed(id), clip);
+    }
+
+    #[test]
+    fn save_and_close_commits_edits_across_panels_and_preserves_other_settings() {
+        let before = crate::settings::get();
+        let mut p = ApplicationPreferences::new(&[], &[]);
+        let mut clip = Clipboard::without_system();
+        change(&mut p, "name", "Draft Name", &mut clip);
+        change(&mut p, "panel", "3", &mut clip);
+        change(&mut p, "size", "27", &mut clip);
+        change(&mut p, "panel", "0", &mut clip);
+        assert_eq!(
+            p.state.dialogs.last().unwrap().1.field_text("name"),
+            "Draft Name"
+        );
+        assert_eq!(crate::settings::get().name, before.name);
+        assert_eq!(crate::settings::get().size, before.size);
+        // Changes made outside Preferences while it is open must survive its save.
+        crate::settings::update(|s| s.recent_count = 37);
+        p.state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert!(p.is_closed());
+        let after = crate::settings::get();
+        assert_eq!(after.name, "Draft Name");
+        assert_eq!(after.size, 54);
+        assert_eq!(after.recent_count, 37);
+        crate::settings::update(|s| *s = before);
+    }
+
+    #[test]
+    fn save_keeps_the_window_open_and_cancel_discards_only_later_edits() {
+        let before = crate::settings::get();
+        let mut p = ApplicationPreferences::new(&[], &[]);
+        let mut clip = Clipboard::without_system();
+        change(&mut p, "name", "Saved Name", &mut clip);
+        p.state.dialog_outcome(Outcome::Button("save"), &mut clip);
+        assert!(!p.is_closed());
+        assert_eq!(crate::settings::get().name, "Saved Name");
+        change(&mut p, "name", "Discard Me", &mut clip);
+        change(&mut p, "panel", "3", &mut clip);
+        change(&mut p, "size", "31", &mut clip);
+        p.state.dialog_outcome(Outcome::Cancel, &mut clip);
+        assert!(p.is_closed());
+        assert_eq!(crate::settings::get().name, "Saved Name");
+        assert_eq!(crate::settings::get().size, before.size);
+        crate::settings::update(|s| *s = before);
     }
 }

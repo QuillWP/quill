@@ -14,6 +14,24 @@ pub struct Style {
     pub chp: CharProps,
     /// One of the original's automatic styles (Normal, heading 1, ...).
     pub builtin: bool,
+    /// A named character style this style's text takes, numbered from one;
+    /// zero for none. While one is linked, `chp` is it laid over `own_chp`.
+    pub character: u16,
+    /// The style's own character formatting, kept while a character style
+    /// is linked so that unlinking brings it back.
+    pub own_chp: CharProps,
+}
+
+impl Style {
+    /// The style's own character formatting: `chp` itself unless a
+    /// character style is linked.
+    pub fn own(&self) -> CharProps {
+        if self.character == 0 {
+            self.chp
+        } else {
+            self.own_chp
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,6 +79,8 @@ impl StyleSheet {
                 pap,
                 chp,
                 builtin: true,
+                character: 0,
+                own_chp: chp,
             });
             id
         };
@@ -189,6 +209,15 @@ impl StyleSheet {
         self.styles.get(id as usize).unwrap_or(&self.styles[0])
     }
 
+    /// The character formatting a paragraph style gives its text: `own`, or
+    /// character style `character` laid over it.
+    pub fn linked_chp(&self, own: CharProps, character: u16) -> CharProps {
+        match self.character(character) {
+            Some(c) => c.format.resolved(own),
+            None => own,
+        }
+    }
+
     pub fn find(&self, name: &str) -> Option<StyleId> {
         self.styles
             .iter()
@@ -232,6 +261,8 @@ impl StyleSheet {
             pap,
             chp,
             builtin: false,
+            character: 0,
+            own_chp: chp,
         });
         id
     }

@@ -42,6 +42,50 @@ pub fn check(doc: &Document) {
         );
         assert_eq!(c, expected, "text must show the style it names");
     }
+    for s in &doc.styles.styles {
+        assert!(
+            s.character as usize <= doc.styles.characters.len(),
+            "a paragraph style links to a character style that exists"
+        );
+        if s.character != 0 {
+            assert_eq!(
+                s.chp,
+                doc.styles.linked_chp(s.own_chp, s.character),
+                "a linked paragraph style shows its character style"
+            );
+        }
+    }
+}
+
+/// What Undo must bring back, with each paragraph style's link, which the
+/// shared snapshot leaves out because exchange formats drop it.
+type Snapshot = (
+    std::collections::BTreeMap<String, String>,
+    Vec<(u16, CharProps)>,
+);
+
+fn snapshot(doc: &Document) -> Snapshot {
+    let links = doc
+        .styles
+        .styles
+        .iter()
+        .map(|s| (s.character, s.own()))
+        .collect();
+    (round_trip::snapshot(doc), links)
+}
+
+/// Quill's own files keep every paragraph style's link and own formatting;
+/// exchange formats keep only the look, which `check_supported` compares.
+fn check_links_saved(doc: &Document) {
+    let back = quill_formats::native::read(&quill_formats::native::write(doc, 0)).unwrap();
+    for (a, b) in doc.styles.styles.iter().zip(&back.styles.styles) {
+        assert_eq!(
+            (a.character, a.own(), a.chp),
+            (b.character, b.own(), b.chp),
+            "{}",
+            a.name
+        );
+    }
 }
 
 fn format(doc: &mut Document, a: u8, b: u8) -> CharacterFormat {
@@ -101,26 +145,29 @@ pub fn exercise(data: &[u8]) {
         check(&doc);
         let selection = Selection::new(position(&doc, op[1], op[2]), position(&doc, op[3], op[4]));
         let (start, end) = selection.range();
-        match op[0] % 16 {
+        match op[0] % 19 {
             13 => {
                 if let Some(expected) = undo.pop() {
-                    let current = round_trip::snapshot(&doc);
+                    let current = snapshot(&doc);
                     doc.undo().expect("model has an undo step");
-                    assert_eq!(round_trip::snapshot(&doc), expected, "Undo");
+                    assert_eq!(snapshot(&doc), expected, "Undo");
                     redo.push(current);
                 }
             }
             14 => {
                 if let Some(expected) = redo.pop() {
-                    let current = round_trip::snapshot(&doc);
+                    let current = snapshot(&doc);
                     doc.redo().expect("model has a redo step");
-                    assert_eq!(round_trip::snapshot(&doc), expected, "Redo");
+                    assert_eq!(snapshot(&doc), expected, "Redo");
                     undo.push(current);
                 }
             }
-            15 => round_trip::check_supported(&doc),
+            15 => {
+                round_trip::check_supported(&doc);
+                check_links_saved(&doc);
+            }
             action => {
-                let before = round_trip::snapshot(&doc);
+                let before = snapshot(&doc);
                 doc.mark_saved();
                 doc.begin("Fuzz style", selection);
                 let chosen = id(&doc, op[5]);
@@ -155,6 +202,22 @@ pub fn exercise(data: &[u8]) {
                         doc.apply_style(MAIN, start.para, end.para, style);
                     }
                     11 => doc.revert_to_style(MAIN, start.para, end.para),
+                    // Link Heading to a character style, unlink it, or change
+                    // its own formatting while it stays linked.
+                    16..=18 => {
+                        let s = doc.styles.get(heading);
+                        let (pap, mut own, linked) = (s.pap.clone(), s.own(), s.character);
+                        let character = match action {
+                            16 => chosen,
+                            17 => 0,
+                            _ => {
+                                own.italic = !own.italic;
+                                own.size = 18 + u16::from(op[3]) % 30;
+                                linked
+                            }
+                        };
+                        doc.redefine_style_linked(MAIN, heading, pap, own, character);
+                    }
                     12 => {
                         let from = doc.font_id("Missing");
                         let to = doc.font_id("Georgia");
@@ -180,6 +243,7 @@ pub fn exercise(data: &[u8]) {
         check(&doc);
     }
     round_trip::check_supported(&doc);
+    check_links_saved(&doc);
 }
 
 /// One style over each story, for the fixed property tests.

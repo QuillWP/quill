@@ -98,7 +98,7 @@ pub fn path() -> Option<PathBuf> {
 }
 
 /// Validate before switching. A failed selection never replaces the active dictionary.
-pub fn select_file(path: &Path, create: bool) -> Result<(), String> {
+fn prepare_file(path: &Path, create: bool) -> Result<(), String> {
     if create {
         std::fs::OpenOptions::new()
             .write(true)
@@ -116,6 +116,12 @@ pub fn select_file(path: &Path, create: bool) -> Result<(), String> {
         return Err("Choose an existing UTF-8 word list, with one word per line.".into());
     }
     Dictionary::load(path)?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn select_file(path: &Path, create: bool) -> Result<(), String> {
+    prepare_file(path, create)?;
     crate::settings::update(|s| {
         s.custom_dictionary = Some(path.to_path_buf());
         s.words_to_system = false;
@@ -124,7 +130,7 @@ pub fn select_file(path: &Path, create: bool) -> Result<(), String> {
     Ok(())
 }
 
-pub fn choose_file(create: bool) -> Result<(), String> {
+pub fn choose_file(create: bool) -> Result<Option<PathBuf>, String> {
     let mut dialog = rfd::FileDialog::new()
         .set_title(if create {
             "New Custom Dictionary"
@@ -142,10 +148,10 @@ pub fn choose_file(create: bool) -> Result<(), String> {
     } else {
         dialog.pick_file()
     };
-    if let Some(path) = chosen {
-        select_file(&path, create)?;
+    if let Some(path) = &chosen {
+        prepare_file(path, create)?;
     }
-    Ok(())
+    Ok(chosen)
 }
 
 #[cfg(test)]

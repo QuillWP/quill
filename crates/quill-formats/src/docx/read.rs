@@ -2942,6 +2942,11 @@ fn parse_color(v: &str) -> Option<Rgb> {
     if v == "auto" {
         return Some(Rgb::BLACK);
     }
+    // Exactly six digits, as the format defines; a longer number would set
+    // bits no color has.
+    if v.len() != 6 {
+        return None;
+    }
     u32::from_str_radix(v, 16).ok().map(Rgb)
 }
 
@@ -3341,6 +3346,19 @@ mod tests {
         let mut zip = crate::zip::Writer::new(0);
         zip.add("word/document.xml", xml.as_bytes());
         zip.finish()
+    }
+
+    #[test]
+    fn colors_take_exactly_six_digits() {
+        let doc = read(&docx(
+            r#"<w:p><w:pPr><w:pBdr><w:top w:val="none" w:color="FF000000"/><w:bottom w:val="single" w:color="1234567"/></w:pBdr></w:pPr><w:r><w:rPr><w:color w:val="FFC0FFEE"/></w:rPr><w:t>x</w:t></w:r></w:p>"#,
+        ))
+        .unwrap();
+        let p = &doc.main.paras[0];
+        assert_eq!(p.pap.borders.top.color, Rgb::BLACK);
+        assert_eq!(p.pap.borders.bottom.color, Rgb::BLACK);
+        assert_eq!(p.runs[0].chp.color, Rgb::BLACK);
+        assert_eq!(parse_color("C0FFEE"), Some(Rgb(0xC0FFEE)));
     }
 
     #[test]

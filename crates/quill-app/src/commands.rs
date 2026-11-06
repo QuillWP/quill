@@ -280,7 +280,7 @@ impl Cmd {
             UpdateToc => "Update Table of Contents",
             MakeTocEditable => "Make Table of Contents Editable",
             StyleDialog => "Style…",
-            CharacterStylesDialog => "Manage Character Styles...",
+            CharacterStylesDialog => "Character Styles…",
             DefaultFont => "Default Font…",
             ToolbarMenu => "Toolbar Menu",
             Preferences => "Preferences…",

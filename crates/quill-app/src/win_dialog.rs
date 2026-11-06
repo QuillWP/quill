@@ -107,9 +107,12 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
 
 pub fn supported(dialog: &Dialog) -> bool {
     !dialog.items.iter().any(|item| {
-        matches!(item.kind, Kind::Swatch { .. } | Kind::Slider { .. })
-            || (matches!(item.kind, Kind::Custom)
-                && !matches!(item.id, "alert_icon" | "list" | "keys" | "description"))
+        // Lists are drawn by Quill until Windows has its own.
+        matches!(
+            item.kind,
+            Kind::Swatch { .. } | Kind::Slider { .. } | Kind::List { .. }
+        ) || (matches!(item.kind, Kind::Custom)
+            && !matches!(item.id, "alert_icon" | "list" | "keys" | "description"))
     })
 }
 

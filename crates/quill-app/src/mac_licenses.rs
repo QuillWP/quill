@@ -1,6 +1,6 @@
-//! The Mac's Licenses window and the credits in its About panel.
+//! The Mac's Licenses and About windows.
 //!
-//! The standard About panel shows a short summary of Quill's licensing with a
+//! The About window shows the artwork and a short summary of Quill's licensing with a
 //! link; the link opens the Licenses window, a plain scrollable, searchable
 //! text of Quill's own licenses with a link to the notices file for everything
 //! else (see `licenses`). Both draw on files in the app bundle, so nothing
@@ -14,24 +14,28 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The Licenses window, once made (it is hidden, not freed, when closed).
 static WINDOW: AtomicUsize = AtomicUsize::new(0);
+static ABOUT: AtomicUsize = AtomicUsize::new(0);
 /// The object that answers a click on the About panel's link.
 static LINKS: AtomicUsize = AtomicUsize::new(0);
 
-/// Close the Licenses window if it is the one in front. Command-W comes
-/// through the menu as Close, which would otherwise close a document.
+/// Close an auxiliary window if it is in front. Command-W comes through
+/// the menu as Close, which would otherwise close a document.
 pub fn close_if_key() -> bool {
-    let window = WINDOW.load(Ordering::Relaxed) as *mut AnyObject;
-    if window.is_null() {
-        return false;
-    }
-    // SAFETY: called on the main thread; the window is kept for good.
-    unsafe {
-        let key: bool = msg_send![window, isKeyWindow];
-        if key {
-            let _: () = msg_send![window, performClose: std::ptr::null::<AnyObject>()];
+    for saved in [&WINDOW, &ABOUT] {
+        let window = saved.load(Ordering::Relaxed) as *mut AnyObject;
+        if window.is_null() {
+            continue;
         }
-        key
+        // SAFETY: called on the main thread; these windows are kept for good.
+        unsafe {
+            let key: bool = msg_send![window, isKeyWindow];
+            if key {
+                let _: () = msg_send![window, performClose: std::ptr::null::<AnyObject>()];
+                return true;
+            }
+        }
     }
+    false
 }
 
 /// Show the Licenses window, making it the first time.
@@ -134,19 +138,73 @@ fn link_addresses(text: *mut AnyObject, body: &str) {
     }
 }
 
-/// Quill's About panel: the standard one, with the licensing summary and a
-/// link to the Licenses window in its credits.
+/// Show the About window with room for the artwork and its links.
 pub fn show_about() {
-    // SAFETY: as in `show`.
+    // SAFETY: called on the main thread with live AppKit objects.
     unsafe {
-        let credits = credits();
-        let key = NSString::from_str("Credits");
-        let options: *mut AnyObject =
-            msg_send![class!(NSDictionary), dictionaryWithObject: credits forKey: &*key];
+        let mut window = ABOUT.load(Ordering::Relaxed) as *mut AnyObject;
+        if window.is_null() {
+            window = make_about();
+            ABOUT.store(window as usize, Ordering::Relaxed);
+        }
         let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let _: () = msg_send![app, orderFrontStandardAboutPanelWithOptions: options];
         let _: () = msg_send![app, activateIgnoringOtherApps: true];
-        hook_link(app);
+        let _: () = msg_send![window, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+    }
+}
+
+fn make_about() -> *mut AnyObject {
+    // SAFETY: all objects and selectors are AppKit/Foundation classes, called
+    // on the main thread. The window owns its views and stays alive when closed.
+    unsafe {
+        let rect = NSRect::new(NSPoint::ZERO, NSSize::new(420.0, 600.0));
+        let window: *mut AnyObject = msg_send![class!(NSPanel), alloc];
+        let window: *mut AnyObject = msg_send![window, initWithContentRect: rect styleMask: 3usize backing: 2usize defer: false];
+        let _: () = msg_send![window, setTitle: &*NSString::from_str("About Quill")];
+        let _: () = msg_send![window, setReleasedWhenClosed: false];
+        let content: *mut AnyObject = msg_send![window, contentView];
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let icon: *mut AnyObject = msg_send![app, applicationIconImage];
+        let image: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+        let image: *mut AnyObject = msg_send![image, initWithFrame: NSRect::new(NSPoint::new(178.0, 520.0), NSSize::new(64.0, 64.0))];
+        let _: () = msg_send![image, setImage: icon];
+        let _: () = msg_send![image, setImageScaling: 3usize];
+        let _: () = msg_send![content, addSubview: image];
+        let _: () = msg_send![image, release];
+        for (string, y, size) in [
+            ("Quill Word Processor".to_owned(), 486.0, 20.0),
+            (
+                format!("Version {}", env!("CARGO_PKG_VERSION")),
+                462.0,
+                12.0,
+            ),
+        ] {
+            let label: *mut AnyObject =
+                msg_send![class!(NSTextField), labelWithString: &*NSString::from_str(&string)];
+            let _: () = msg_send![label, setFrame: NSRect::new(NSPoint::new(20.0, y), NSSize::new(380.0, 28.0))];
+            let font: *mut AnyObject = msg_send![class!(NSFont), systemFontOfSize: size];
+            let _: () = msg_send![label, setFont: font];
+            let _: () = msg_send![label, setAlignment: 1usize];
+            let _: () = msg_send![content, addSubview: label];
+        }
+        let scroll: *mut AnyObject = msg_send![class!(NSTextView), scrollableTextView];
+        let _: () = msg_send![scroll, setFrame: NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(380.0, 430.0))];
+        let _: () = msg_send![scroll, setHasVerticalScroller: true];
+        let _: () = msg_send![scroll, setAutohidesScrollers: true];
+        let text: *mut AnyObject = msg_send![scroll, documentView];
+        let _: () = msg_send![text, setEditable: false];
+        let _: () = msg_send![text, setSelectable: true];
+        let _: () = msg_send![text, setRichText: true];
+        let _: () = msg_send![text, setDrawsBackground: false];
+        let _: () = msg_send![scroll, setDrawsBackground: false];
+        let _: () = msg_send![text, setDelegate: links_delegate()];
+        let storage: *mut AnyObject = msg_send![text, textStorage];
+        let body = credits();
+        let _: () = msg_send![storage, setAttributedString: body];
+        let _: () = msg_send![body, release];
+        let _: () = msg_send![content, addSubview: scroll];
+        let _: () = msg_send![window, center];
+        window
     }
 }
 
@@ -157,7 +215,7 @@ fn credits() -> *mut AnyObject {
     unsafe {
         let summary = crate::licenses::SUMMARY;
         let link = crate::licenses::LINK_TEXT;
-        let all = format!("{summary}\n\n{link}");
+        let all = format!("quillwp.com\n\n{summary}\n\n{link}");
         let text = NSString::from_str(&all);
         let attributed: *mut AnyObject = msg_send![class!(NSMutableAttributedString), alloc];
         let attributed: *mut AnyObject = msg_send![attributed, initWithString: &*text];
@@ -171,73 +229,46 @@ fn credits() -> *mut AnyObject {
         let color: *mut AnyObject = msg_send![class!(NSColor), labelColor];
         add("NSColor", color, whole);
         let style: *mut AnyObject = msg_send![class!(NSMutableParagraphStyle), new];
-        let _: () = msg_send![style, setAlignment: 2usize]; // centered
+        let _: () = msg_send![style, setAlignment: 1usize]; // centered
         add("NSParagraphStyle", style, whole);
         // The link covers the last sentence.
         let target = NSString::from_str("quill://licenses");
         let url: *mut AnyObject = msg_send![class!(NSURL), URLWithString: &*target];
-        let at = summary.encode_utf16().count() + 2;
+        let at = all[..all.find(link).unwrap()].encode_utf16().count();
         add("NSLink", url, NSRange::new(at, link.encode_utf16().count()));
-        attributed
-    }
-}
+        let website = NSString::from_str("https://quillwp.com");
+        let website: *mut AnyObject = msg_send![class!(NSURL), URLWithString: &*website];
+        add("NSLink", website, NSRange::new(0, "quillwp.com".len()));
 
-/// Make a click on the credits' link open the Licenses window. The panel's
-/// credits are a text view somewhere in its window; find it and give it a
-/// delegate that answers the click itself instead of passing the address
-/// to the system.
-fn hook_link(app: *mut AnyObject) {
-    // SAFETY: called on the main thread with live AppKit objects, using
-    // messages the classes named answer.
-    unsafe {
-        let windows: *mut AnyObject = msg_send![app, windows];
-        let n: usize = msg_send![windows, count];
-        for i in 0..n {
-            let window: *mut AnyObject = msg_send![windows, objectAtIndex: i];
-            let visible: bool = msg_send![window, isVisible];
-            let content: *mut AnyObject = msg_send![window, contentView];
-            if !visible {
-                continue;
-            }
-            if let Some(text) = find_credits(content) {
-                let delegate = links_delegate();
-                let _: () = msg_send![text, setDelegate: delegate];
-                return;
-            }
+        let bytes = include_bytes!("../../../assets/quill-about.jpg");
+        let data: *mut AnyObject = msg_send![class!(NSData), dataWithBytes: bytes.as_ptr().cast::<std::ffi::c_void>() length: bytes.len()];
+        let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
+        let image: *mut AnyObject = msg_send![image, initWithData: data];
+        if image.is_null() {
+            let _: () = msg_send![style, release];
+            return attributed;
         }
-    }
-}
-
-/// The text view under `view` that holds the credits.
-fn find_credits(view: *mut AnyObject) -> Option<*mut AnyObject> {
-    // SAFETY: called on the main thread with live AppKit objects, using
-    // messages the classes named answer.
-    unsafe {
-        if view.is_null() {
-            return None;
-        }
-        let is_text: bool = msg_send![view, isKindOfClass: class!(NSTextView)];
-        if is_text {
-            let string: *mut AnyObject = msg_send![view, string];
-            let utf8: *const c_char = msg_send![string, UTF8String];
-            if !utf8.is_null()
-                && CStr::from_ptr(utf8)
-                    .to_string_lossy()
-                    .contains(crate::licenses::LINK_TEXT)
-            {
-                return Some(view);
-            }
-            return None;
-        }
-        let subviews: *mut AnyObject = msg_send![view, subviews];
-        let n: usize = msg_send![subviews, count];
-        for i in 0..n {
-            let sub: *mut AnyObject = msg_send![subviews, objectAtIndex: i];
-            if let Some(found) = find_credits(sub) {
-                return Some(found);
-            }
-        }
-        None
+        let attachment: *mut AnyObject = msg_send![class!(NSTextAttachment), new];
+        let _: () = msg_send![attachment, setImage: image];
+        let _: () =
+            msg_send![attachment, setBounds: NSRect::new(NSPoint::ZERO, NSSize::new(260.0, 260.0))];
+        let picture: *mut AnyObject =
+            msg_send![class!(NSAttributedString), attributedStringWithAttachment: attachment];
+        let result: *mut AnyObject = msg_send![class!(NSMutableAttributedString), new];
+        let _: () = msg_send![result, appendAttributedString: picture];
+        let newline: *mut AnyObject = msg_send![class!(NSAttributedString), alloc];
+        let newline: *mut AnyObject =
+            msg_send![newline, initWithString: &*NSString::from_str("\n")];
+        let _: () = msg_send![result, appendAttributedString: newline];
+        let _: () = msg_send![result, appendAttributedString: attributed];
+        let length: usize = msg_send![result, length];
+        let _: () = msg_send![result, addAttribute: &*NSString::from_str("NSParagraphStyle") value: style range: NSRange::new(0, length)];
+        let _: () = msg_send![newline, release];
+        let _: () = msg_send![attachment, release];
+        let _: () = msg_send![image, release];
+        let _: () = msg_send![attributed, release];
+        let _: () = msg_send![style, release];
+        result
     }
 }
 
@@ -246,11 +277,20 @@ extern "C" fn clicked(
     _this: *mut AnyObject,
     _cmd: Sel,
     _text: *mut AnyObject,
-    _link: *mut AnyObject,
+    link: *mut AnyObject,
     _at: usize,
 ) -> bool {
-    show();
-    true
+    // Let AppKit open ordinary web links; only the local license link is ours.
+    // SAFETY: AppKit supplies an NSURL or NSString as the live link object.
+    unsafe {
+        let description: *mut AnyObject = msg_send![link, description];
+        let value: *const c_char = msg_send![description, UTF8String];
+        if !value.is_null() && CStr::from_ptr(value).to_bytes() == b"quill://licenses" {
+            show();
+            return true;
+        }
+    }
+    false
 }
 
 /// The object that answers clicks on the credits' link, made once.

@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Quill
+Name=Quill Word Processor
 Comment=Inspired by Lucas's favorite word processor from 1992
 Exec=quill %f
 Icon=quill

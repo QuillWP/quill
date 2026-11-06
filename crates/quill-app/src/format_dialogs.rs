@@ -26,6 +26,12 @@ pub enum Which {
     PasteSpecial(Vec<crate::paste_special::Form>),
     Character(CharProps),
     Paragraph(ParaProps),
+    /// Paragraph formatting staged inside the Style dialog.
+    StyleParagraph(ParaProps),
+    /// Manual character defaults staged inside the Style dialog.
+    StyleCharacter(CharProps),
+    /// Edit Character Style for style `id`, or a new style when None.
+    CharacterStyleEdit(Option<u16>),
     SummaryInfo,
     /// The tabs as they were, the dialog's working copy (shown on the
     /// ruler while it is open), and the tab being edited.
@@ -50,6 +56,8 @@ pub enum Which {
     Preferences {
         panel: usize,
         fonts: Vec<String>,
+        original: Box<crate::settings::Settings>,
+        draft: Box<crate::settings::Settings>,
     },
     Find(crate::find_dialog::FindState),
     /// A format dialog opened from Find or Replace: for the Replace With
@@ -162,17 +170,23 @@ pub fn changed(which: &mut Which, d: &mut Dialog, view: &DocView, id: &str) {
         Which::Print => page_dialogs::print_changed(d, id),
         Which::InsertTable(_) => crate::table_dialogs::insert_changed(view, d, id),
         Which::TableLayout => crate::table_dialogs::table_layout_changed(d),
-        Which::Preferences { panel, fonts } => {
+        Which::Preferences {
+            panel,
+            fonts,
+            draft,
+            ..
+        } => {
             if id == "panel" {
+                crate::prefs_dialog::changed_in(*panel, d, id, draft);
                 let selected = d.selected("panel");
                 if selected != *panel {
                     *panel = selected;
                     let origin = d.origin;
-                    *d = crate::prefs_dialog::preferences(selected, fonts);
+                    *d = crate::prefs_dialog::preferences_with(selected, fonts, draft);
                     d.origin = origin;
                 }
             } else {
-                crate::prefs_dialog::changed(*panel, d, id);
+                crate::prefs_dialog::changed_in(*panel, d, id, draft);
             }
         }
         _ => {}
@@ -525,7 +539,7 @@ pub fn character_changed(d: &mut Dialog, id: &str) {
 }
 
 /// The character format the dialog describes, starting from `base`.
-fn read_character(d: &Dialog, base: &CharProps, view: &mut DocView) -> Option<CharProps> {
+pub fn read_character(d: &Dialog, base: &CharProps, view: &mut DocView) -> Option<CharProps> {
     let mut c = *base;
     let font = d.selected_text("font");
     if !font.is_empty() {
@@ -609,13 +623,17 @@ pub fn read_line_rule(d: &Dialog, rule: usize) -> Option<Option<LineSpacing>> {
 
 pub fn paragraph(view: &DocView) -> (Dialog, Which) {
     let p = view.current_pap().clone();
+    (paragraph_properties(&p), Which::Paragraph(p))
+}
+
+pub fn paragraph_properties(p: &ParaProps) -> Dialog {
     let mut d = Dialog::new("Paragraph", 438.0, 200.0);
     d.group("Spacing", 10.0, 4.0, 334.0, 70.0);
     d.text("Before:", 18.0, 24.0);
     d.field("before", &units::length(p.before), 84.0, 22.0, 66.0);
     d.text("After:", 18.0, 48.0);
     d.field("after", &units::length(p.after), 84.0, 46.0, 66.0);
-    d.text("Line:", 164.0, 24.0);
+    d.text("Line Spacing:", 164.0, 24.0);
     let (rule, value) = match p.line {
         LineSpacing::Auto => (0, String::new()),
         LineSpacing::AtLeast(t) => (1, units::points(t)),
@@ -665,10 +683,10 @@ pub fn paragraph(view: &DocView) -> (Dialog, Which) {
     d.button("border", "Border…", 358.0, 136.0, 68.0, false);
     d.button("frame", "Frame…", 358.0, 164.0, 68.0, false);
     d.focus("left");
-    (d, Which::Paragraph(p))
+    d
 }
 
-fn read_paragraph(d: &Dialog, base: &ParaProps) -> Option<ParaProps> {
+pub fn read_paragraph(d: &Dialog, base: &ParaProps) -> Option<ParaProps> {
     let mut p = base.clone();
     let len = |id, old| units::parse_length_from(&d.field_text(id), old);
     p.before = len("before", base.before)?.max(0);
@@ -776,6 +794,9 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
         Which::Preferences { .. } => true,
         // The milestone 8 dialogs are handled by the window.
         Which::Find(_)
+        | Which::StyleCharacter(_)
+        | Which::StyleParagraph(_)
+        | Which::CharacterStyleEdit(_)
         | Which::FindFormat { .. }
         | Which::GoTo
         | Which::Glossary(_)

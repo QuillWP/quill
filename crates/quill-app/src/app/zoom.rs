@@ -465,6 +465,32 @@ mod tests {
         assert!(!state.view.doc.is_modified());
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_zoom_dropdown_is_handed_to_the_system_menu_on_the_mac() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut cache = GlyphCache::new();
+        let mut label = Label {
+            fonts: &mut fonts,
+            cache: &mut cache,
+        };
+        let mut state = WinState::new(DocView::new(Document::new(), "Zoom".into()));
+        state.width = 900.0;
+        state.height = 700.0;
+        state.ui = 2.0;
+        let r = state.zoom_box().unwrap();
+        assert!(state.zoom_click(r.right() - 10.0, r.y + 10.0, &mut label));
+        let rect = state.menu.as_ref().unwrap().open.rect;
+        let (menu, actions, at) = state.take_popup_menu().unwrap();
+        assert!(state.menu.is_none(), "Quill draws nothing itself");
+        assert_eq!(menu.items[2].label, "100%");
+        assert_eq!(actions[menu.items[2].id as usize], Action::Zoom(2));
+        assert_eq!(at, ((rect.x * 2.0) as f64, (rect.y * 2.0) as f64));
+        assert!(state.take_popup_menu().is_none());
+    }
+
     #[test]
     fn preview_command_shortcut_and_saved_toolbar_route_to_platform_preview() {
         let mut view = DocView::new(Document::new(), "Preview".into());

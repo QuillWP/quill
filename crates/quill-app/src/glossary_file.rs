@@ -65,7 +65,7 @@ pub fn serialize(list: &[Entry]) -> Vec<u8> {
 }
 
 /// Parse as many complete, valid entries as are present. Truncated or damaged
-/// tails are ignored so a partially written legacy file cannot crash Quill.
+/// tails are ignored so a partially written file cannot crash Quill.
 pub fn parse(data: &[u8]) -> Vec<Entry> {
     let mut out = Vec::new();
     let mut at = match data.iter().position(|&b| b == b'\n') {

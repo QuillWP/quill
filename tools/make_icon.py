@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Draw Quill's application icon: a sheet of ruled paper with its corner
+"""Draw Quill's document icon: a sheet of ruled paper with its corner
 folded and a bold Q, in the flat grays and black of the classic Mac.
 
-Usage: python3 tools/make_icon.py assets/quill.png [size]
+Usage: python3 tools/make_icon.py assets/quill-document.png [size]
 
 Plain Python (no imaging library): the picture is drawn by testing each
 pixel against a few shapes, four samples a pixel for smooth edges, and

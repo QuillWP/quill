@@ -1,8 +1,8 @@
 //! Format > Style (⌘T): the document's style sheet. Pick a style to see
 //! its description, Based On and Next Style; type a name under New Style
-//! and Define to make a style from the selection's formatting; Apply puts
-//! the chosen style on the selected paragraphs. Layout measured from the
-//! original.
+//! and Define to make a style from the selection's formatting. Paragraph
+//! edits the pending paragraph properties; Define saves them to the style,
+//! and Apply puts the style on the selected paragraphs.
 
 use crate::dialog::{Dialog, units};
 use crate::docview::DocView;
@@ -19,6 +19,13 @@ pub struct StyleState {
     /// The list: None is "New Style".
     pub entries: Vec<Option<StyleId>>,
     pub selected: usize,
+    /// Formatting being edited; the document changes only on Define or Apply.
+    pub pap: ParaProps,
+    pub chp: CharProps,
+    pub fonts: Vec<String>,
+    /// The character style the paragraph style takes, numbered from one;
+    /// zero for none, when `chp` is used as it is.
+    pub character: u16,
     /// Styles in the Based On and Next Style popups, after a blank first
     /// choice (no style; for Next Style, the style itself).
     pub choices: Vec<StyleId>,
@@ -52,43 +59,71 @@ fn entries(view: &DocView, all: bool) -> Vec<Option<StyleId>> {
 }
 
 pub fn style(view: &DocView) -> (Dialog, StyleState) {
-    let mut d = Dialog::new(&format!("Style: {}", view.title), 348.0, 286.0);
+    let mut d = Dialog::new(&format!("Style: {}", view.title), 484.0, 414.0);
     d.close_box = true;
     let style_entries = entries(view, false);
     let style_names = entry_names(view, &style_entries);
-    d.popup_owned("list", style_names, 0, 14.0, 9.0, 254.0);
-    d.button("ok", "OK", 279.0, 14.0, 53.0, true);
-    d.button("cancel", "Cancel", 279.0, 40.0, 53.0, false);
-    d.button("apply", "Apply", 279.0, 66.0, 53.0, false);
-    d.button("define", "Define", 279.0, 92.0, 53.0, false);
-    d.button("delete", "Delete", 279.0, 115.0, 53.0, false);
+    d.popup_owned("list", style_names, 0, 14.0, 9.0, 320.0);
+    d.button("ok", "OK", 350.0, 14.0, 120.0, true);
+    d.button("cancel", "Cancel", 350.0, 40.0, 120.0, false);
+    d.button("apply", "Apply", 350.0, 66.0, 120.0, false);
+    d.button("define", "Define", 350.0, 92.0, 120.0, false);
+    d.button("delete", "Delete", 350.0, 118.0, 120.0, false);
+    d.button("paragraph", "Paragraph…", 350.0, 144.0, 120.0, false);
+    d.button("character", "Character…", 350.0, 170.0, 120.0, false);
     d.text("Show:", 15.0, 43.0);
     d.radio("docstyles", "Document Styles", 60.0, 42.0, 1, true);
     d.radio("allstyles", "All Styles", 192.0, 42.0, 1, false);
     d.text("Style:", 15.0, 68.0);
-    d.field("name", "", 14.0, 84.0, 209.0);
-    d.button("usedefault", "Use As Default", 226.0, 85.0, 106.0, false);
+    d.field("name", "", 14.0, 84.0, 320.0);
+    d.button("usedefault", "Use As Default", 350.0, 196.0, 120.0, false);
     d.disable("usedefault");
-    d.group("Description", 14.0, 112.0, 320.0, 109.0);
-    for (line, y) in [
+    d.group("Paragraph Formatting", 14.0, 112.0, 320.0, 92.0);
+    for (id, y) in [
         ("desc0", 128.0),
         ("desc1", 146.0),
         ("desc2", 164.0),
         ("desc3", 182.0),
-        ("desc4", 200.0),
     ] {
-        d.note(line, "", 21.0, y, 305.0);
+        d.note(id, "", 21.0, y, 305.0);
     }
-    d.text("Based On:", 15.0, 230.0);
-    d.text("Next Style:", 15.0, 256.0);
+    d.group("Manual Character Formatting", 14.0, 212.0, 320.0, 74.0);
+    for (id, y) in [("char0", 228.0), ("char1", 246.0), ("char2", 264.0)] {
+        d.note(id, "", 21.0, y, 305.0);
+    }
+    d.text("Based On:", 15.0, 296.0);
+    d.text("Next Style:", 15.0, 322.0);
     let choices = sorted(&view.doc, 0..view.doc.styles.styles.len() as StyleId);
     let names = choice_names(view, &choices);
-    d.popup_owned("basedon", names.clone(), 0, 93.0, 227.0, 241.0);
-    d.popup_owned("next", names, 0, 93.0, 253.0, 241.0);
+    d.popup_owned("basedon", names.clone(), 0, 116.0, 293.0, 218.0);
+    d.popup_owned("next", names, 0, 116.0, 319.0, 218.0);
+    d.text("Character Style:", 15.0, 348.0);
+    let characters = std::iter::once("No Style".to_string())
+        .chain(
+            view.doc
+                .styles
+                .characters
+                .iter()
+                .map(|style| style.name.clone()),
+        )
+        .collect();
+    d.popup_owned("character_style", characters, 0, 116.0, 345.0, 218.0);
+    d.note("character_status", "", 15.0, 375.0, 454.0);
+    d.note(
+        "actions_help",
+        "Define saves. OK saves, applies to the selection and closes.",
+        15.0,
+        395.0,
+        454.0,
+    );
     let mut st = StyleState {
         all: false,
         entries: style_entries,
         selected: 0,
+        pap: view.current_pap().clone(),
+        chp: view.current_chp(),
+        fonts: view.doc.fonts.clone(),
+        character: 0,
         choices,
     };
     // Start on the current paragraph's style, as the original does.
@@ -109,6 +144,9 @@ fn select(st: &mut StyleState, d: &mut Dialog, view: &DocView, i: usize) {
     };
     match st.entries[st.selected] {
         None => {
+            st.pap = view.current_pap().clone();
+            st.chp = view.current_chp();
+            st.character = 0;
             d.set_field("name", "");
             d.set_selected("basedon", at(Some(view.current_pap().style)));
             d.set_selected("next", 0);
@@ -116,12 +154,16 @@ fn select(st: &mut StyleState, d: &mut Dialog, view: &DocView, i: usize) {
         }
         Some(id) => {
             let s = view.doc.styles.get(id);
+            st.pap = s.pap.clone();
+            st.chp = s.own();
+            st.character = s.character;
             d.set_field("name", &s.name);
             d.set_selected("basedon", at(s.based_on));
             d.set_selected("next", if s.next == id { 0 } else { at(Some(s.next)) });
             d.enable("delete", !s.builtin);
         }
     }
+    d.set_selected("character_style", st.character as usize);
     update_description(st, d, view);
     d.focus("name");
 }
@@ -151,36 +193,72 @@ fn update_entry_options(st: &StyleState, d: &mut Dialog, view: &DocView) {
     d.set_options("list", entry_names(view, &st.entries), st.selected);
 }
 
-fn update_description(st: &StyleState, d: &mut Dialog, view: &DocView) {
-    let text = description(st, view);
+fn show_lines(d: &mut Dialog, ids: &[&str], text: &str, struck: bool) {
     let mut lines = vec![String::new()];
     for word in text.split_whitespace() {
-        let should_wrap = lines
+        if lines
             .last()
-            .is_some_and(|line| !line.is_empty() && line.len() + word.len() + 1 > 62)
-            && lines.len() < 5;
-        if should_wrap {
+            .is_some_and(|line| !line.is_empty() && line.len() + word.len() + 1 > 58)
+            && lines.len() < ids.len()
+        {
             lines.push(word.to_string());
         } else {
-            let line = lines.last_mut().expect("description always has a line");
+            let line = lines.last_mut().unwrap();
             if !line.is_empty() {
                 line.push(' ');
             }
             line.push_str(word);
         }
     }
-    for index in 0..5 {
-        d.set_label(
-            match index {
-                0 => "desc0",
-                1 => "desc1",
-                2 => "desc2",
-                3 => "desc3",
-                _ => "desc4",
-            },
-            lines.get(index).map_or("", String::as_str),
-        );
+    for (index, id) in ids.iter().enumerate() {
+        d.set_label(id, lines.get(index).map_or("", String::as_str));
+        d.set_struck(id, struck);
     }
+}
+
+pub fn update_description(st: &StyleState, d: &mut Dialog, view: &DocView) {
+    let base = st
+        .entries
+        .get(st.selected)
+        .copied()
+        .flatten()
+        .map_or(Some(view.current_pap().style), |id| {
+            view.doc.styles.get(id).based_on
+        });
+    let mut doc = Document::new();
+    doc.fonts = st.fonts.clone();
+    doc.styles = view.doc.styles.clone();
+    let paragraph = describe_component(&doc, base, &st.pap, &st.chp, false, true);
+    let characters = describe_component(&doc, None, &st.pap, &st.chp, true, false);
+    show_lines(d, &["desc0", "desc1", "desc2", "desc3"], &paragraph, false);
+    let linked = view.doc.styles.character(st.character);
+    show_lines(
+        d,
+        &["char0", "char1", "char2"],
+        &characters,
+        linked.is_some(),
+    );
+    let status = match linked {
+        Some(c) => {
+            let summary = crate::character_style_dialog::summary(&view.doc, c.format);
+            let sets = summary.strip_prefix("Sets: ").unwrap_or("nothing yet");
+            format!(
+                "Linked to {} ({sets}). No Style brings back the manual formatting above.",
+                c.name
+            )
+        }
+        None => "No Style uses the manual character formatting.".to_string(),
+    };
+    d.set_label("character_status", &status);
+}
+
+/// A private document holds pending font names without changing the real one.
+pub fn character_view(st: &StyleState) -> DocView {
+    let mut doc = Document::new();
+    doc.fonts = st.fonts.clone();
+    doc.styles.styles[0].chp = st.chp;
+    doc.main.paras[0].mark_chp = st.chp;
+    DocView::new(doc, "Style character formatting".into())
 }
 
 /// The style a popup names, if any.
@@ -190,6 +268,11 @@ fn chosen(st: &StyleState, d: &Dialog, id: &str) -> Option<StyleId> {
 }
 
 pub fn changed(st: &mut StyleState, d: &mut Dialog, view: &DocView, id: &str) {
+    if id == "character_style" {
+        st.character = d.selected("character_style") as u16;
+        update_description(st, d, view);
+        return;
+    }
     if id == "list" {
         select(st, d, view, d.selected("list"));
         return;
@@ -205,28 +288,38 @@ pub fn changed(st: &mut StyleState, d: &mut Dialog, view: &DocView, id: &str) {
 }
 
 /// Define: make a new style from the selection, or change the chosen
-/// style's name, Based On and Next Style. Returns the style, or None if
+/// style's name, formatting, Based On and Next Style. Returns the style, or None if
 /// there is nothing to define (New Style with no name).
 pub fn define(st: &mut StyleState, d: &mut Dialog, view: &mut DocView) -> Option<StyleId> {
     let name = d.field_text("name").trim().to_string();
     let based = chosen(st, d, "basedon");
     let next = chosen(st, d, "next");
+    if st.entries[st.selected].is_none() && name.is_empty() {
+        return None;
+    }
+    if let Some(id) = st.entries[st.selected]
+        && view.doc.styles.find(&name).is_some_and(|other| other != id)
+    {
+        return None;
+    }
+    let mut chp = st.chp;
+    if let Some(font) = st.fonts.get(chp.font as usize) {
+        chp.font = view.doc.font_id(font);
+    }
     let id = match st.entries[st.selected] {
         None if name.is_empty() => return None,
         None => {
-            let pap = view.current_pap().clone();
-            let chp = view.current_chp();
+            let pap = st.pap.clone();
             view.doc.begin("Define Style", view.sel);
             let id = match view.doc.styles.find(&name) {
                 // Defining an existing name redefines it from the selection.
-                Some(id) => {
-                    view.doc.redefine_style(StoryId::Main, id, pap, chp);
-                    id
-                }
+                Some(id) => id,
                 None => view
                     .doc
-                    .add_style(&name, based.unwrap_or(0), next, pap, chp),
+                    .add_style(&name, based.unwrap_or(0), next, pap.clone(), chp),
             };
+            view.doc
+                .redefine_style_linked(StoryId::Main, id, pap, chp, st.character);
             view.doc.commit(view.sel);
             id
         }
@@ -245,14 +338,27 @@ pub fn define(st: &mut StyleState, d: &mut Dialog, view: &mut DocView) -> Option
             if taken {
                 return Some(id);
             }
+            let formatting_changed =
+                s.pap != st.pap || s.own() != chp || s.character != st.character;
             view.doc.begin("Define Style", view.sel);
+            if formatting_changed {
+                view.doc.redefine_style_linked(
+                    StoryId::Main,
+                    id,
+                    st.pap.clone(),
+                    chp,
+                    st.character,
+                );
+            }
             view.doc
                 .rename_style(id, &new_name, based, next.unwrap_or(id));
             view.doc.commit(view.sel);
             id
         }
     };
+    view.invalidate_layout();
     // The list may have gained the style.
+    st.fonts = view.doc.fonts.clone();
     st.choices = sorted(&view.doc, 0..view.doc.styles.styles.len() as StyleId);
     let names = choice_names(view, &st.choices);
     d.set_options("basedon", names.clone(), 0);
@@ -361,7 +467,19 @@ pub fn reapply_ok(id: StyleId, d: &Dialog, view: &mut DocView) -> bool {
 /// What a style or the selection looks like, in the original's words: the base
 /// style's name, "+", then what differs ("Normal + Font: Helvetica,
 /// Bold, Indent: Left 0.5 in").
+#[cfg(test)]
 pub fn describe(doc: &Document, base: Option<StyleId>, pap: &ParaProps, chp: &CharProps) -> String {
+    describe_component(doc, base, pap, chp, true, true)
+}
+
+fn describe_component(
+    doc: &Document,
+    base: Option<StyleId>,
+    pap: &ParaProps,
+    chp: &CharProps,
+    characters: bool,
+    paragraph: bool,
+) -> String {
     let mut parts: Vec<String> = Vec::new();
     let (bp, bc) = match base {
         Some(b) => {
@@ -433,6 +551,7 @@ pub fn describe(doc: &Document, base: Option<StyleId>, pap: &ParaProps, chp: &Ch
             s => format!("Condensed {}", units::points(-s)),
         });
     }
+    let character_count = parts.len();
     if base.is_none() || pap.align != bp.align {
         parts.push(
             match pap.align {
@@ -526,6 +645,12 @@ pub fn describe(doc: &Document, base: Option<StyleId>, pap: &ParaProps, chp: &Ch
             None => format!("Shading: {}%", pap.shading as f32 / 10.0),
         });
     }
+    if !paragraph {
+        parts.truncate(character_count);
+    }
+    if !characters {
+        parts.drain(..character_count);
+    }
     let body = parts.join(", ");
     match base {
         Some(b) => {
@@ -537,22 +662,6 @@ pub fn describe(doc: &Document, base: Option<StyleId>, pap: &ParaProps, chp: &Ch
             }
         }
         None => body,
-    }
-}
-
-/// The description for the list's current entry.
-fn description(st: &StyleState, view: &DocView) -> String {
-    let doc = &view.doc;
-    match st.entries.get(st.selected).copied().flatten() {
-        // New Style: the selection's formatting, against its style.
-        None => {
-            let pap = view.current_pap();
-            describe(doc, Some(pap.style), pap, &view.current_chp())
-        }
-        Some(id) => {
-            let s = doc.styles.get(id);
-            describe(doc, s.based_on, &s.pap, &s.chp)
-        }
     }
 }
 

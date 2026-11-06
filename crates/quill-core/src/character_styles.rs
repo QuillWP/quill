@@ -346,6 +346,7 @@ impl Document {
         self.record_sheet();
         self.styles.characters[id as usize - 1].format = format;
         self.update_character_uses(id, old.format, false);
+        self.relink_paragraph_styles(id);
         true
     }
 
@@ -358,6 +359,15 @@ impl Document {
         self.record_sheet();
         self.styles.characters.remove(id as usize - 1);
         self.update_character_uses(id, old.format, true);
+        // Paragraph styles that took it keep their look, now as their own.
+        for s in &mut self.styles.styles {
+            if s.character == id {
+                s.character = 0;
+                s.own_chp = s.chp;
+            } else if s.character > id {
+                s.character -= 1;
+            }
+        }
         true
     }
 
@@ -433,6 +443,128 @@ mod tests {
     use super::*;
     use crate::{Rgb, Selection};
     const MAIN: StoryId = StoryId::Main;
+
+    /// A document with a heading paragraph and a Callout style (Bold, 18 pt).
+    fn linked_fixture() -> (Document, crate::props::StyleId, u16) {
+        let mut d = crate::text::from_plain_text("Title\nBody");
+        let heading = d.styles.find("heading 1").unwrap();
+        d.apply_style(MAIN, 0, 0, heading);
+        let callout = d
+            .add_character_style(
+                "Callout",
+                CharacterFormat::new(
+                    CharProps {
+                        bold: true,
+                        size: 36,
+                        ..Default::default()
+                    },
+                    (1 << 1) | (1 << 2),
+                ),
+            )
+            .unwrap();
+        d.forget_history();
+        (d, heading, callout)
+    }
+
+    #[test]
+    fn a_linked_paragraph_style_takes_the_character_style_and_unlinking_restores_it() {
+        let (mut d, heading, callout) = linked_fixture();
+        let own = d.styles.get(heading).chp;
+        let pap = d.styles.get(heading).pap.clone();
+        d.begin("Link", Selection::default());
+        d.redefine_style_linked(MAIN, heading, pap.clone(), own, callout);
+        d.commit(Selection::default());
+        let style = d.styles.get(heading);
+        assert_eq!(style.character, callout);
+        assert_eq!(style.own(), own, "the manual values are kept");
+        assert_eq!(style.chp.size, 36);
+        assert_eq!(
+            style.chp.bold, !own.bold,
+            "Bold switches the paragraph's value"
+        );
+        assert_eq!(
+            style.chp.font, own.font,
+            "what Callout leaves alone shows through"
+        );
+        let c = d.main.paras[0].chp_of_char(0);
+        assert_eq!((c.size, c.bold), (36, !own.bold));
+        assert_eq!(
+            d.main.paras[1].chp_of_char(0).size,
+            d.styles.get(0).chp.size
+        );
+
+        d.begin("Unlink", Selection::default());
+        d.redefine_style_linked(MAIN, heading, pap, own, 0);
+        d.commit(Selection::default());
+        assert_eq!(d.styles.get(heading).chp, own);
+        assert_eq!(d.main.paras[0].chp_of_char(0).size, own.size);
+        d.undo();
+        assert_eq!(d.styles.get(heading).character, callout);
+        assert_eq!(d.main.paras[0].chp_of_char(0).size, 36);
+    }
+
+    #[test]
+    fn changing_a_character_style_reaches_linked_paragraph_styles_and_their_text() {
+        let (mut d, heading, callout) = linked_fixture();
+        let (pap, own) = (d.styles.get(heading).pap.clone(), d.styles.get(heading).chp);
+        d.redefine_style_linked(MAIN, heading, pap, own, callout);
+        let format = CharacterFormat::new(
+            CharProps {
+                size: 48,
+                color: Rgb(0xFF0000),
+                ..Default::default()
+            },
+            (1 << 1) | (1 << 11),
+        );
+        assert!(d.redefine_character_style(callout, format));
+        let style = d.styles.get(heading);
+        assert_eq!((style.chp.size, style.chp.color), (48, Rgb(0xFF0000)));
+        assert_eq!(style.chp.bold, own.bold, "Callout no longer sets Bold");
+        let c = d.main.paras[0].chp_of_char(0);
+        assert_eq!((c.size, c.color, c.bold), (48, Rgb(0xFF0000), own.bold));
+    }
+
+    #[test]
+    fn deleting_a_linked_character_style_keeps_the_look_and_renumbers_other_links() {
+        let (mut d, heading, callout) = linked_fixture();
+        let quote = d
+            .add_character_style(
+                "Quote",
+                CharacterFormat::new(
+                    CharProps {
+                        italic: true,
+                        ..Default::default()
+                    },
+                    1 << 3,
+                ),
+            )
+            .unwrap();
+        let normal_pap = d.styles.get(0).pap.clone();
+        let normal_own = d.styles.get(0).chp;
+        d.redefine_style_linked(MAIN, 0, normal_pap, normal_own, quote);
+        let (pap, own) = (d.styles.get(heading).pap.clone(), d.styles.get(heading).chp);
+        d.redefine_style_linked(MAIN, heading, pap, own, callout);
+        let looked = d.styles.get(heading).chp;
+        assert!(d.delete_character_style(callout));
+        let style = d.styles.get(heading);
+        assert_eq!((style.character, style.chp), (0, looked));
+        assert_eq!(style.own(), looked);
+        assert_eq!(d.styles.get(0).character, quote - 1, "Quote moved down");
+        assert!(d.styles.get(0).chp.italic);
+    }
+
+    #[test]
+    fn a_link_to_a_missing_style_is_dropped_and_a_good_one_decides_the_look() {
+        let (mut d, heading, callout) = linked_fixture();
+        d.styles.styles[heading as usize].character = 9;
+        d.keep_in_bounds();
+        assert_eq!(d.styles.get(heading).character, 0);
+        let own = d.styles.get(heading).chp;
+        d.styles.styles[heading as usize].character = callout;
+        d.styles.styles[heading as usize].own_chp = own;
+        d.keep_in_bounds();
+        assert_eq!(d.styles.get(heading).chp.size, 36);
+    }
 
     #[test]
     fn named_layer_inherits_font_and_keeps_unrelated_format_and_metadata() {

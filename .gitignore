@@ -1,5 +1,6 @@
 /target
 .DS_Store
 /dist/
+/Quill.app/
 __pycache__/
 *.py[cod]

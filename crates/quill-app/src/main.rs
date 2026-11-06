@@ -33,7 +33,9 @@ mod listbox;
 mod local_dictionary;
 #[cfg(target_os = "macos")]
 mod mac_alert;
-#[cfg(target_os = "macos")]
+// Its only callers are left out of tests, which keep Quill's own editor.
+#[cfg(all(target_os = "macos", not(test)))]
+mod mac_color_panel;
 #[cfg(target_os = "macos")]
 mod mac_dialog;
 #[cfg(target_os = "macos")]

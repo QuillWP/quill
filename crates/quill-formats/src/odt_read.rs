@@ -9,6 +9,7 @@
 use crate::report::{self as notes, ImportReport};
 use crate::xml::{self, Element, Node};
 use crate::zip::Archive;
+use quill_core::character_styles::CharacterFormat;
 use quill_core::document::FootnotePosition;
 use quill_core::notes::{AnnotationInfo, NoteKind};
 use quill_core::para::{Mark, Paragraph, chars};
@@ -236,6 +237,40 @@ impl<'a> Styles<'a> {
                 .extend(masters.children_named("master-page"));
         }
     }
+}
+
+/// The character properties a text-properties element states, as a
+/// character style's mask (see `CharacterFormat`).
+fn stated(e: &Element) -> u16 {
+    let has = |names: &[&str]| names.iter().any(|n| e.attr(n).is_some());
+    let mut mask = 0;
+    for (bit, names) in [
+        (0, &["font-name", "font-family"][..]),
+        (1, &["font-size"][..]),
+        (2, &["font-weight"][..]),
+        (3, &["font-style"][..]),
+        (4, &["text-underline-style"][..]),
+        (5, &["text-line-through-style"][..]),
+        (6, &["text-outline"][..]),
+        (7, &["text-shadow"][..]),
+        (8, &["font-variant"][..]),
+        (9, &["text-transform"][..]),
+        (10, &["display"][..]),
+        (11, &["color", "use-window-font-color"][..]),
+        (12, &["text-position"][..]),
+        (13, &["letter-spacing"][..]),
+    ] {
+        if has(names) {
+            mask |= 1 << bit;
+        }
+    }
+    // A superscript or subscript position also sets a smaller size.
+    if e.attr("text-position")
+        .is_some_and(|v| v.split_whitespace().nth(1).is_some_and(|w| w != "100%"))
+    {
+        mask |= 1 << 1;
+    }
+    mask
 }
 
 /// The first family in a font-family list, without its quotes.
@@ -476,8 +511,8 @@ fn border(v: Option<&str>, padding: Option<&str>) -> BorderLine {
     for word in v.split_whitespace() {
         if let Some(w) = length(word) {
             width = Some(w);
-        } else if let Some(hex) = word.strip_prefix('#') {
-            color = u32::from_str_radix(hex, 16).map_or(color, Rgb);
+        } else if word.starts_with('#') {
+            color = parse_color(word).unwrap_or(color);
         } else {
             kind = word;
         }
@@ -1002,9 +1037,60 @@ impl<'a> Reader<'a> {
                 } else {
                     self.report.note(notes::CHARACTER_STYLES);
                 }
+            } else {
+                // A character style from another program (LibreOffice,
+                // OpenOffice): what its text properties say becomes the
+                // definition.
+                let display = style.attr("display-name").unwrap_or(name).to_string();
+                if display.trim().is_empty()
+                    || display.chars().count() > 255
+                    || self.doc.styles.characters.len() >= u16::MAX as usize
+                    || self.doc.styles.find_character(&display).is_some()
+                {
+                    self.report.note(notes::CHARACTER_STYLES);
+                    continue;
+                }
+                let format = self.foreign_character_format(name);
+                match self.doc.styles.add_character(&display, format) {
+                    Some(id) => {
+                        self.characters.insert(name, id);
+                    }
+                    None => self.report.note(notes::CHARACTER_STYLES),
+                }
             }
         }
         self.resolved.clear();
+    }
+
+    /// The definition of named text style `name` from another program: the
+    /// properties it and its parents state, read against Normal. On/off
+    /// properties are kept only when on, since a character style switches
+    /// the paragraph's value.
+    fn foreign_character_format(&mut self, name: &'a str) -> CharacterFormat {
+        let base = self.doc.styles.get(0).chp;
+        let mut c = base;
+        let mut mask = 0;
+        for s in self.chain("text", Some(name)) {
+            if let Some(t) = s.child("text-properties") {
+                mask |= stated(t);
+                self.apply_text(t, &mut c);
+            }
+        }
+        for (bit, on) in [
+            (2, c.bold),
+            (3, c.italic),
+            (5, c.strike),
+            (6, c.outline),
+            (7, c.shadow),
+            (8, c.small_caps),
+            (9, c.all_caps),
+            (10, c.hidden),
+        ] {
+            if !on {
+                mask &= !(1 << bit);
+            }
+        }
+        CharacterFormat::new(c, mask)
     }
 
     /// Tab stops count from the paragraph's indent in LibreOffice's files;
@@ -2402,6 +2488,64 @@ mod tests {
     fn read_content(body: &str, auto: &str) -> Document {
         let c = xml::parse(content(body, auto).as_bytes()).unwrap();
         build(&c, None, None, None, &|_| None).unwrap().0
+    }
+
+    #[test]
+    fn character_styles_from_other_programs_stay_named_styles() {
+        // As LibreOffice writes them: named text styles in styles.xml with no
+        // Quill attributes, one based on another, used directly and through
+        // an automatic style that adds to it.
+        let styles = xml::parse(
+            r##"<?xml version="1.0"?><office:document-styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="s" xmlns:fo="f" xmlns:text="t"><office:styles><style:style style:name="Emphasis" style:display-name="My Emphasis" style:family="text"><style:text-properties fo:font-style="italic" fo:color="#cc2200" fo:font-weight="normal"/></style:style><style:style style:name="Strong" style:family="text" style:parent-style-name="Emphasis"><style:text-properties fo:font-weight="bold"/></style:style></office:styles></office:document-styles>"##
+                .as_bytes(),
+        )
+        .unwrap();
+        let c = xml::parse(
+            content(
+                r#"<text:p><text:span text:style-name="Emphasis">one</text:span> <text:span text:style-name="T1">two</text:span> <text:span text:style-name="Strong">three</text:span></text:p>"#,
+                r#"<style:style style:name="T1" style:family="text" style:parent-style-name="Emphasis"><style:text-properties style:text-underline-style="solid"/></style:style>"#,
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let doc = build(&c, Some(&styles), None, None, &|_| None).unwrap().0;
+        let emphasis = doc
+            .styles
+            .find_character("My Emphasis")
+            .expect("named by its display name");
+        let strong = doc.styles.find_character("Strong").unwrap();
+        let e = doc.styles.character(emphasis).unwrap().format;
+        // Italic and color; "normal" weight switches nothing, so it is not kept.
+        assert_eq!(e.mask, (1 << 3) | (1 << 11));
+        assert_eq!(e.props.color, Rgb(0xCC2200));
+        let s = doc.styles.character(strong).unwrap().format;
+        assert_eq!(
+            s.mask,
+            (1 << 2) | (1 << 3) | (1 << 11),
+            "it takes its parent's too"
+        );
+        let p = &doc.main.paras[0];
+        let one = p.chp_of_char(0);
+        assert_eq!((one.character_style, one.direct_format), (emphasis, 0));
+        assert!(one.italic);
+        let two = p.chp_of_char(4);
+        assert_eq!(two.character_style, emphasis);
+        assert_eq!(two.direct_format, 1 << 4, "the underline is its own");
+        let three = p.chp_of_char(8);
+        assert_eq!(three.character_style, strong);
+        assert!(three.bold && three.italic);
+    }
+
+    #[test]
+    fn border_colors_take_exactly_six_digits() {
+        assert_eq!(
+            border(Some("0.5pt solid #ff000000"), None).color,
+            Rgb::BLACK
+        );
+        assert_eq!(
+            border(Some("0.5pt solid #c0ffee"), None).color,
+            Rgb(0xC0FFEE)
+        );
     }
 
     #[test]

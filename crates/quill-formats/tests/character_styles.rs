@@ -170,3 +170,183 @@ fn rtf_appearance_remains_correct_without_expanding_style_references() {
         "Georgia"
     );
 }
+
+/// A heading style linked to a Callout character style (18 pt, Bold).
+fn linked() -> (Document, u16) {
+    let mut d = quill_core::text::from_plain_text("Title\nBody");
+    let heading = d.styles.find("heading 1").unwrap();
+    d.apply_style(StoryId::Main, 0, 0, heading);
+    let callout = d
+        .add_character_style(
+            "Callout",
+            CharacterFormat::new(
+                CharProps {
+                    bold: true,
+                    size: 36,
+                    ..Default::default()
+                },
+                (1 << 1) | (1 << 2),
+            ),
+        )
+        .unwrap();
+    let (pap, own) = (d.styles.get(heading).pap.clone(), d.styles.get(heading).chp);
+    d.redefine_style_linked(StoryId::Main, heading, pap, own, callout);
+    (d, heading)
+}
+
+#[test]
+fn quill_files_keep_a_paragraph_styles_link_to_a_character_style() {
+    let (d, heading) = linked();
+    let back = native::read(&native::write(&d, 0)).unwrap();
+    let (a, b) = (d.styles.get(heading), back.styles.get(heading));
+    assert_eq!(b.character, a.character);
+    assert_eq!(b.own(), a.own());
+    assert_eq!(b.chp, a.chp);
+    assert_eq!(back.styles, d.styles);
+}
+
+#[test]
+fn exchange_formats_keep_the_linked_formatting_without_the_link() {
+    let (d, heading) = linked();
+    let look = d.styles.get(heading).chp;
+    let back = docx::read(&docx::write(&d, 0)).unwrap();
+    let id = back.styles.find("heading 1").unwrap();
+    let style = back.styles.get(id);
+    assert_eq!(style.character, 0);
+    assert_eq!((style.chp.size, style.chp.bold), (look.size, look.bold));
+    let text = back.main.paras[0].chp_of_char(0);
+    assert_eq!((text.size, text.bold), (look.size, look.bold));
+}
+
+/// A style that sets every property a character style can: font, size,
+/// color, underline, position, spacing and each on/off property.
+fn every_property() -> Document {
+    let mut d = quill_core::text::from_plain_text("Styled words and plain words");
+    let font = d.font_id("Georgia");
+    let everything = d
+        .add_character_style(
+            "Everything",
+            CharacterFormat::new(
+                CharProps {
+                    font,
+                    size: 30,
+                    bold: true,
+                    italic: true,
+                    underline: quill_core::Underline::Single,
+                    strike: true,
+                    outline: true,
+                    shadow: true,
+                    small_caps: true,
+                    all_caps: true,
+                    hidden: true,
+                    color: Rgb(0x1F5FAA),
+                    position: 60,
+                    spacing: 40,
+                    ..Default::default()
+                },
+                CharacterFormat::ALL,
+            ),
+        )
+        .unwrap();
+    d.apply_character_style(
+        StoryId::Main,
+        Position::new(0, 0),
+        Position::new(0, 12),
+        everything,
+    );
+    d
+}
+
+#[test]
+fn every_property_a_character_style_sets_survives_docx_rtf_and_odt() {
+    let d = every_property();
+    let want = d.styles.character(1).unwrap().clone();
+    let look = d.main.paras[0].chp_of_char(0);
+    // QUILL_CHARACTER_FIXTURES=dir writes the files for checking in Word and
+    // other word processors; QUILL_EVERYTHING_RETURN=a.docx,b.docx checks
+    // what those programs saved back.
+    if let Ok(dir) = std::env::var("QUILL_CHARACTER_FIXTURES") {
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("everything.docx"), docx::write(&d, 0)).unwrap();
+        std::fs::write(dir.join("everything.rtf"), rtf::write(&d)).unwrap();
+        std::fs::write(dir.join("everything.odt"), odt::write(&d, 0)).unwrap();
+    }
+    let mut versions = vec![
+        ("docx".to_string(), docx::read(&docx::write(&d, 0)).unwrap()),
+        ("rtf".to_string(), rtf::read(&rtf::write(&d)).unwrap()),
+        (
+            "odt".to_string(),
+            odt_read::read(&odt::write(&d, 0)).unwrap(),
+        ),
+    ];
+    if let Ok(paths) = std::env::var("QUILL_EVERYTHING_RETURN") {
+        for path in paths.split(',') {
+            let back = quill_formats::load(std::path::Path::new(path)).unwrap();
+            versions.push((path.to_string(), back));
+        }
+    }
+    for (name, back) in versions {
+        let id = back
+            .styles
+            .find_character("Everything")
+            .unwrap_or_else(|| panic!("{name}: the style is gone"));
+        let got = back.styles.character(id).unwrap();
+        assert_eq!(
+            got.format.mask, want.format.mask,
+            "{name}: what the style sets"
+        );
+        let mut props = got.format.props;
+        props.font = 0;
+        let mut expected = want.format.props;
+        expected.font = 0;
+        assert_eq!(props, expected, "{name}: the style's values");
+        assert_eq!(back.font_name(got.format.props.font), "Georgia", "{name}");
+        let c = back.main.paras[0].chp_of_char(0);
+        assert_eq!(c.character_style, id, "{name}: the text keeps the style");
+        assert_eq!(c.direct_format, 0, "{name}: nothing became hand formatting");
+        assert_eq!(
+            (
+                c.size,
+                c.bold,
+                c.italic,
+                c.underline,
+                c.color,
+                c.position,
+                c.spacing
+            ),
+            (
+                look.size,
+                look.bold,
+                look.italic,
+                look.underline,
+                look.color,
+                look.position,
+                look.spacing
+            ),
+            "{name}: the text looks the same"
+        );
+        assert_eq!(
+            back.main.paras[0].chp_of_char(13).character_style,
+            0,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn linked_paragraph_styles_save_their_look_in_rtf_and_odt_too() {
+    let (d, heading) = linked();
+    let look = d.styles.get(heading).chp;
+    for (name, back) in [
+        ("rtf", rtf::read(&rtf::write(&d)).unwrap()),
+        ("odt", odt_read::read(&odt::write(&d, 0)).unwrap()),
+    ] {
+        let text = back.main.paras[0].chp_of_char(0);
+        assert_eq!((text.size, text.bold), (look.size, look.bold), "{name}");
+        assert!(
+            back.styles.styles.iter().all(|s| s.character == 0),
+            "{name}"
+        );
+    }
+}

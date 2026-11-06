@@ -304,10 +304,24 @@ impl Document {
             clip_name(&mut s.name);
             s.format = crate::character_styles::CharacterFormat::new(s.format.props, s.format.mask);
         }
-        for s in &mut self.styles.styles {
+        let characters = self.styles.characters.len();
+        for k in 0..self.styles.styles.len() {
+            let s = &mut self.styles.styles[k];
             clip_name(&mut s.name);
             s.pap.keep_in_bounds();
             s.chp.keep_in_bounds();
+            s.own_chp.keep_in_bounds();
+            // A link to a style that is not there goes; a link that is
+            // decides what the style looks like.
+            if s.character as usize > characters {
+                s.character = 0;
+            }
+            if s.character == 0 {
+                s.own_chp = s.chp;
+            } else {
+                let (own, character) = (s.own_chp, s.character);
+                self.styles.styles[k].chp = self.styles.linked_chp(own, character);
+            }
         }
         for story in [&mut self.main, &mut self.notes, &mut self.annotations] {
             story.keep_in_bounds();

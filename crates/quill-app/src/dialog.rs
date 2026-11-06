@@ -63,6 +63,13 @@ pub enum Kind {
         from: u32,
         to: u32,
     },
+    /// A scrolling list of rows, one chosen. A double-click on a row presses
+    /// button `double`, when there is one.
+    List {
+        rows: Vec<String>,
+        state: crate::listbox::ListBox,
+        double: Option<&'static str>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -72,6 +79,8 @@ pub struct Item {
     pub rect: Rect,
     pub kind: Kind,
     pub enabled: bool,
+    /// A static label can remain visible while showing that it is overridden.
+    pub struck: bool,
 }
 
 impl Item {
@@ -82,6 +91,7 @@ impl Item {
             rect,
             kind,
             enabled: true,
+            struck: false,
         }
     }
 
@@ -167,6 +177,8 @@ pub struct Dialog {
     /// A panel popped out beside an item, and the last box pressed in it.
     pub popout: Option<Popout>,
     pop_click: Option<(std::time::Instant, &'static str)>,
+    /// The last row pressed in a list, to see a double-click.
+    list_click: Option<(std::time::Instant, &'static str, usize)>,
     /// A plain box with no title bar, like Go To and alerts.
     pub plain: bool,
 }
@@ -208,6 +220,7 @@ impl Dialog {
             held_slider: None,
             popout: None,
             pop_click: None,
+            list_click: None,
             plain: false,
         }
     }
@@ -296,6 +309,12 @@ impl Dialog {
     pub fn set_label(&mut self, id: &str, label: &str) {
         if let Some(i) = self.item_mut(id) {
             i.label = label.to_string();
+        }
+    }
+
+    pub fn set_struck(&mut self, id: &str, struck: bool) {
+        if let Some(item) = self.item_mut(id) {
+            item.struck = struck;
         }
     }
 
@@ -513,6 +532,79 @@ impl Dialog {
     }
 
     /// A slider from 0 to `max`, with its track going from color `from`
+    /// A list of `rows` with `selected` chosen. A double-click on a row
+    /// presses button `double`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn list(
+        &mut self,
+        id: &'static str,
+        rows: Vec<String>,
+        selected: usize,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        double: Option<&'static str>,
+    ) {
+        let r = Rect::new(x, y, w, h);
+        let mut state = crate::listbox::ListBox {
+            len: rows.len(),
+            ..Default::default()
+        };
+        state.select(selected, r);
+        self.items.push(Item::new(
+            id,
+            "",
+            r,
+            Kind::List {
+                rows,
+                state,
+                double,
+            },
+        ));
+    }
+
+    /// Put new rows in list `id`, with `selected` chosen.
+    pub fn set_rows(&mut self, id: &str, new_rows: Vec<String>, selected: usize) {
+        if let Some(item) = self.item_mut(id) {
+            let r = item.rect;
+            if let Kind::List { rows, state, .. } = &mut item.kind {
+                state.len = new_rows.len();
+                *rows = new_rows;
+                state.select(selected, r);
+            }
+        }
+    }
+
+    /// The chosen row of list `id`, if it has any rows.
+    pub fn list_selected(&self, id: &str) -> Option<usize> {
+        match self.item(id).map(|i| &i.kind) {
+            Some(Kind::List { rows, state, .. }) if !rows.is_empty() => {
+                Some(state.selected.min(rows.len() - 1))
+            }
+            _ => None,
+        }
+    }
+
+    /// Choose row `row` of list `id`, as a click on it does.
+    pub fn select_row(&mut self, id: &str, row: usize) {
+        if let Some(item) = self.item_mut(id) {
+            let r = item.rect;
+            if let Kind::List { state, .. } = &mut item.kind {
+                state.select(row, r);
+            }
+        }
+    }
+
+    /// A check box that is either on or off, never gray.
+    pub fn set_two_state(&mut self, id: &str, state: bool) {
+        if let Some(Kind::Check { on, tri, mixed }) = self.item_mut(id).map(|i| &mut i.kind) {
+            *tri = false;
+            *mixed = false;
+            *on = state;
+        }
+    }
+
     /// to color `to`.
     #[allow(clippy::too_many_arguments)]
     pub fn slider(
@@ -565,11 +657,13 @@ impl Dialog {
     /// Whether the dialog has items only its own canvas drawing can show
     /// (an owner-drawn area, a color box, a slider), so it cannot be a
     /// native window.
+    /// Whether something in the dialog can only be drawn by Quill. A color
+    /// button is not: native dialogs make it an ordinary button.
     pub fn needs_canvas(&self) -> bool {
         self.items.iter().any(|i| {
             matches!(
                 i.kind,
-                Kind::Custom | Kind::Swatch { .. } | Kind::Slider { .. }
+                Kind::Custom | Kind::Swatch { button: false, .. } | Kind::Slider { .. }
             )
         })
     }
@@ -1044,10 +1138,18 @@ impl Dialog {
             }
             Kind::Text => {
                 label.draw(c, MODERN_FONT, SIZE, false, r.x, r.y + 12.5, &it.label, fg);
+                if it.struck {
+                    let width = label.width(MODERN_FONT, SIZE, false, &it.label).min(r.w);
+                    c.hline(r.x, r.x + width, r.y + 8.0, fg);
+                }
             }
             Kind::Note => {
                 let clip = c.set_clip(r);
                 label.draw(c, MODERN_FONT, 10.0, false, r.x, r.y + 10.5, &it.label, fg);
+                if it.struck {
+                    let width = label.width(MODERN_FONT, 10.0, false, &it.label).min(r.w);
+                    c.hline(r.x, r.x + width, r.y + 7.0, fg);
+                }
                 c.restore_clip(clip);
             }
             Kind::Group => {
@@ -1068,6 +1170,18 @@ impl Dialog {
                 }
             }
             Kind::Custom => {}
+            Kind::List { rows, state, .. } => {
+                let rows: Vec<crate::listbox::Row> = rows
+                    .iter()
+                    .map(|text| crate::listbox::Row {
+                        text,
+                        mark: "",
+                        bold: false,
+                        underline: false,
+                    })
+                    .collect();
+                state.draw(c, label, r, &rows);
+            }
             Kind::Swatch { rgb, button } => {
                 c.fill(r, *rgb);
                 c.frame(
@@ -1190,6 +1304,29 @@ impl Dialog {
             Kind::Slider { .. } => {
                 self.held_slider = Some(i);
                 return self.drag_slider(x);
+            }
+            Kind::List { .. } => {
+                let r = self.at(self.items[i].rect);
+                let id = self.items[i].id;
+                let Kind::List { state, double, .. } = &mut self.items[i].kind else {
+                    unreachable!();
+                };
+                return match state.click(x - r.x, y - r.y, r) {
+                    crate::listbox::Click::Chose(row) => {
+                        let now = std::time::Instant::now();
+                        let again = self.list_click.is_some_and(|(t, last, k)| {
+                            last == id
+                                && k == row
+                                && now - t < std::time::Duration::from_millis(450)
+                        });
+                        self.list_click = (!again).then_some((now, id, row));
+                        match double {
+                            Some(button) if again => Outcome::Button(button),
+                            _ => Outcome::Changed(id),
+                        }
+                    }
+                    _ => Outcome::None,
+                };
             }
             Kind::Popup {
                 options,

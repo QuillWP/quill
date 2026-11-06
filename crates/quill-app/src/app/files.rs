@@ -449,25 +449,39 @@ impl App {
 
 /// Warn before adopting a format that cannot keep the whole document.
 fn save_format_warning(doc: &quill_core::Document, format: Format, chosen: bool) -> Option<String> {
-    let limits = match format {
-        Format::Text => {
-            "Plain text does not keep formatting, pictures, tables or other document features."
-        }
-        Format::Odt | Format::Html => {
-            "This format keeps basic text, formatting, tables and pictures, but leaves out advanced layout such as headers, footers, section columns and positioned frames."
-        }
+    // Only Quill's own format keeps a paragraph style's link to a character
+    // style; the others keep the formatting it gives.
+    let linked =
+        chosen && format != Format::Quill && doc.styles.styles.iter().any(|s| s.character != 0);
+    let link = if linked {
+        " Paragraph styles linked to a character style keep its formatting, but not the link."
+    } else {
+        ""
+    };
+    let (limits, keeps_changes) = match format {
+        Format::Text => (
+            "Plain text does not keep formatting, pictures, tables or other document features.",
+            false,
+        ),
+        Format::Odt | Format::Html => (
+            "This format keeps basic text, formatting, tables and pictures, but leaves out advanced layout such as headers, footers, section columns and positioned frames.",
+            false,
+        ),
+        _ if linked => ("", true),
         _ => return None,
     };
-    if !chosen && !doc.has_changes() {
+    if !linked && !chosen && !doc.has_changes() {
         return None;
     }
-    let revisions = if doc.has_changes() {
+    let revisions = if doc.has_changes() && !keeps_changes {
         " Tracked changes will be accepted in the saved file."
     } else {
         ""
     };
+    let limits = format!("{limits}{revisions}{link}");
+    let limits = limits.trim_start();
     Some(format!(
-        "{limits}{revisions}\n\nThe saved file will become the document you're editing. Features left out of the file remain on screen until you close it, but will be gone when you reopen it. Save a .qwp copy first to keep them.\n\nSave as {} anyway?",
+        "{limits}\n\nThe saved file will become the document you're editing. Features left out of the file remain on screen until you close it, but will be gone when you reopen it. Save a .qwp copy first to keep them.\n\nSave as {} anyway?",
         format.name()
     ))
 }
@@ -756,6 +770,30 @@ mod tests {
         for format in [Format::Quill, Format::Docx, Format::Rtf, Format::Markdown] {
             assert!(super::save_format_warning(&doc, format, true).is_none());
         }
+    }
+
+    #[test]
+    fn saving_as_another_format_names_a_lost_character_style_link() {
+        let mut doc = quill_core::text::from_plain_text("Body");
+        let callout = doc
+            .add_character_style(
+                "Callout",
+                quill_core::character_styles::CharacterFormat::default(),
+            )
+            .unwrap();
+        let (pap, own) = (doc.styles.get(0).pap.clone(), doc.styles.get(0).chp);
+        doc.redefine_style_linked(StoryId::Main, 0, pap, own, callout);
+        for format in [Format::Docx, Format::Rtf, Format::Odt, Format::Text] {
+            let warning = super::save_format_warning(&doc, format, true).unwrap();
+            assert!(
+                warning.contains("linked to a character style"),
+                "{format:?}"
+            );
+            assert!(!warning.starts_with(' '));
+        }
+        assert!(super::save_format_warning(&doc, Format::Quill, true).is_none());
+        // Saving again in the format already chosen does not ask again.
+        assert!(super::save_format_warning(&doc, Format::Docx, false).is_none());
     }
 
     #[test]

@@ -201,9 +201,27 @@ fn dispatch(sender: *mut AnyObject) {
     else {
         return;
     };
-    let choice = if matches!(target.id, "list" | "keys") {
+    // IDs are shared by table views and ordinary style popups. Only a table
+    // answers selectedRow; a popup's selection is read from its dialog value.
+    let is_table: bool = unsafe { msg_send![sender, isKindOfClass: class!(NSTableView)] };
+    let choice = if is_table {
         let row: isize = unsafe { msg_send![sender, selectedRow] };
-        (row >= 0).then_some((row as usize, false, false))
+        let double = unsafe {
+            let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            let event: *mut AnyObject = msg_send![app, currentEvent];
+            !event.is_null() && {
+                let kind: usize = msg_send![event, type];
+                // Only a mouse-up can be a double-click; a selection moved
+                // by the keyboard is not.
+                let clicks: isize = if kind == 2 {
+                    msg_send![event, clickCount]
+                } else {
+                    0
+                };
+                clicks >= 2
+            }
+        };
+        (row >= 0).then_some((row as usize, double, false))
     } else if target.choice.is_none() && target.id == "font" {
         unsafe {
             let selected: *mut AnyObject = msg_send![sender, selectedItem];
@@ -1069,6 +1087,7 @@ impl NativeDialog {
                 }
                 match &item.kind {
                     Kind::Field { text, sel } => {
+                        set_field_enabled(ptr, item.enabled);
                         let current: *mut AnyObject = msg_send![ptr, stringValue];
                         if rust_string(current) != *text {
                             let value = NSString::from_str(text);
@@ -1108,8 +1127,7 @@ impl NativeDialog {
                         }
                     }
                     Kind::Text | Kind::Note => {
-                        let value = NSString::from_str(&item.label);
-                        let _: () = msg_send![ptr, setStringValue: &*value];
+                        set_static_label(ptr, &item.label, item.struck);
                     }
                     Kind::Button { .. } => {
                         let value = NSString::from_str(&item.label);
@@ -1150,6 +1168,35 @@ impl NativeDialog {
                         let desired = crate::commands_dialog::native_selection(dialog, control.id)
                             .or_else(|| (control.id == "keys" && changed && has_rows).then_some(0));
                         if let Some(row) = desired {
+                            let selected: isize = msg_send![ptr, selectedRow];
+                            if selected != row as isize {
+                                let set: *mut AnyObject =
+                                    msg_send![class!(NSIndexSet), indexSetWithIndex: row];
+                                let _: () = msg_send![ptr, selectRowIndexes: set byExtendingSelection: false];
+                                let _: () = msg_send![ptr, scrollRowToVisible: row as isize];
+                            }
+                        }
+                    }
+                    Kind::List { rows, state, .. }
+                        if matches!(control.kind, ControlKind::Table) =>
+                    {
+                        let changed = tables().lock().is_ok_and(|mut tables| {
+                            let Some(data) =
+                                tables.iter_mut().find(|data| data.table == ptr as usize)
+                            else {
+                                return false;
+                            };
+                            if data.rows == *rows {
+                                return false;
+                            }
+                            data.rows = rows.clone();
+                            true
+                        });
+                        if changed {
+                            let _: () = msg_send![ptr, reloadData];
+                        }
+                        if !rows.is_empty() {
+                            let row = state.selected.min(rows.len() - 1);
                             let selected: isize = msg_send![ptr, selectedRow];
                             if selected != row as isize {
                                 let set: *mut AnyObject =
@@ -1283,6 +1330,7 @@ impl Control {
             | (ControlKind::Static, Kind::Text | Kind::Note)
             | (ControlKind::Group, Kind::Group) => true,
             (ControlKind::Table | ControlKind::Description, Kind::Custom) => true,
+            (ControlKind::Table, Kind::List { .. }) => true,
             (ControlKind::Swatch, Kind::Swatch { button: true, .. }) => true,
             (ControlKind::Radio(a), Kind::Radio { group: b, .. }) => a == b,
             (
@@ -1379,11 +1427,53 @@ pub fn edit_in_field(cmd: crate::commands::Cmd) -> bool {
     }
 }
 
+unsafe fn set_field_enabled(field: *mut AnyObject, enabled: bool) {
+    unsafe {
+        let _: () = msg_send![field, setEnabled: enabled];
+        let _: () = msg_send![field, setEditable: enabled];
+        let _: () = msg_send![field, setSelectable: enabled];
+        let _: () = msg_send![field, setDrawsBackground: true];
+        let background: *mut AnyObject = if enabled {
+            msg_send![class!(NSColor), textBackgroundColor]
+        } else {
+            msg_send![class!(NSColor), controlBackgroundColor]
+        };
+        let foreground: *mut AnyObject = if enabled {
+            msg_send![class!(NSColor), controlTextColor]
+        } else {
+            msg_send![class!(NSColor), disabledControlTextColor]
+        };
+        let _: () = msg_send![field, setBackgroundColor: background];
+        let _: () = msg_send![field, setTextColor: foreground];
+    }
+}
+
 fn native_rect(r: crate::canvas::Rect, content_height: f64) -> NSRect {
     let x = r.x as f64 * SCALE;
     let h = r.h as f64 * SCALE;
     let y = content_height - (r.y + r.h) as f64 * SCALE;
     NSRect::new(NSPoint::new(x, y), NSSize::new(r.w as f64 * SCALE, h))
+}
+
+// Keep overridden formatting legible rather than hiding its saved values.
+unsafe fn set_static_label(field: *mut AnyObject, text: &str, struck: bool) {
+    unsafe {
+        let string = NSString::from_str(text);
+        if !struck {
+            let _: () = msg_send![field, setStringValue: &*string];
+            return;
+        }
+        let value: *mut AnyObject = msg_send![class!(NSMutableAttributedString), alloc];
+        let value: *mut AnyObject = msg_send![value, initWithString: &*string];
+        let range = NSRange::new(0, text.encode_utf16().count());
+        let font: *mut AnyObject = msg_send![field, font];
+        let _: () =
+            msg_send![value, addAttribute: &*NSString::from_str("NSFont") value: font range: range];
+        let strike: *mut AnyObject = msg_send![class!(NSNumber), numberWithInteger: 1isize];
+        let _: () = msg_send![value, addAttribute: &*NSString::from_str("NSStrikethrough") value: strike range: range];
+        let _: () = msg_send![field, setAttributedStringValue: value];
+        let _: () = msg_send![value, release];
+    }
 }
 
 unsafe fn make_control(
@@ -1400,6 +1490,19 @@ unsafe fn make_control(
     if matches!(item.kind, Kind::Custom) {
         return unsafe { make_commands_control(item, frame, panel, delegate, content) };
     }
+    if let Kind::List { double, .. } = &item.kind {
+        return unsafe {
+            make_table(
+                item.id,
+                frame,
+                panel,
+                delegate,
+                content,
+                false,
+                double.is_some(),
+            )
+        };
+    }
     let (class, kind, button_type): (&AnyClass, ControlKind, Option<usize>) = match item.kind {
         Kind::Button { .. } => (class!(NSButton), ControlKind::Button, Some(0)),
         Kind::Check { .. } => (class!(NSButton), ControlKind::Check, Some(3)),
@@ -1413,7 +1516,9 @@ unsafe fn make_control(
         Kind::Text | Kind::Note => (class!(NSTextField), ControlKind::Static, None),
         Kind::Group => (class!(NSBox), ControlKind::Group, None),
         Kind::Swatch { button: true, .. } => (class!(NSButton), ControlKind::Swatch, Some(0)),
-        Kind::Custom | Kind::Swatch { .. } | Kind::Slider { .. } => unreachable!(),
+        Kind::Custom | Kind::Swatch { .. } | Kind::Slider { .. } | Kind::List { .. } => {
+            unreachable!()
+        }
     };
     let raw: *mut AnyObject = unsafe { msg_send![class, alloc] };
     let raw: *mut AnyObject = if let Kind::Popup { selected, .. } = item.kind {
@@ -1444,6 +1549,7 @@ unsafe fn make_control(
                 let _: () = msg_send![ptr, setTitle: &*label];
             }
             Kind::Field { text, .. } => {
+                set_field_enabled(ptr, item.enabled);
                 let value = NSString::from_str(text);
                 let _: () = msg_send![ptr, setStringValue: &*value];
                 let _: () = msg_send![ptr, setDelegate: delegate];
@@ -1474,6 +1580,7 @@ unsafe fn make_control(
                 let _: () = msg_send![ptr, setSelectable: false];
                 let _: () = msg_send![ptr, setBezeled: false];
                 let _: () = msg_send![ptr, setDrawsBackground: false];
+                set_static_label(ptr, &item.label, item.struck);
             }
             Kind::Group => {
                 let _: () = msg_send![ptr, setTitle: &*label];
@@ -1482,7 +1589,7 @@ unsafe fn make_control(
                 let _: () = msg_send![ptr, setBordered: false];
                 set_swatch_picture(ptr, *rgb, frame.size);
             }
-            Kind::Custom | Kind::Slider { .. } => unreachable!(),
+            Kind::Custom | Kind::Slider { .. } | Kind::List { .. } => unreachable!(),
         }
         if let Some(button_type) = button_type {
             let _: () = msg_send![ptr, setButtonType: button_type];
@@ -1666,7 +1773,34 @@ unsafe fn make_commands_control(
     if !matches!(item.id, "list" | "keys") {
         return None;
     }
+    unsafe {
+        make_table(
+            item.id,
+            frame,
+            panel,
+            delegate,
+            content,
+            item.id == "keys",
+            false,
+        )
+    }
+}
 
+/// A one-column table in a scroll view. `double` makes a double-click on a
+/// row send the action again, with the click count to tell it apart.
+unsafe fn make_table(
+    id: &'static str,
+    frame: NSRect,
+    panel: *mut AnyObject,
+    delegate: *mut AnyObject,
+    content: *mut AnyObject,
+    allow_empty: bool,
+    double: bool,
+) -> Option<(
+    Retained<AnyObject>,
+    Option<Retained<AnyObject>>,
+    ControlKind,
+)> {
     let scroll_raw: *mut AnyObject = unsafe { msg_send![class!(NSScrollView), alloc] };
     let scroll_raw: *mut AnyObject = unsafe { msg_send![scroll_raw, initWithFrame: frame] };
     let scroll = unsafe { Retained::from_raw(scroll_raw) }?;
@@ -1679,7 +1813,7 @@ unsafe fn make_commands_control(
     let table_ptr = Retained::as_ptr(&table) as *mut AnyObject;
 
     let column_raw: *mut AnyObject = unsafe { msg_send![class!(NSTableColumn), alloc] };
-    let identifier = NSString::from_str(item.id);
+    let identifier = NSString::from_str(id);
     let column_raw: *mut AnyObject =
         unsafe { msg_send![column_raw, initWithIdentifier: &*identifier] };
     let column = unsafe { Retained::from_raw(column_raw) }?;
@@ -1689,7 +1823,11 @@ unsafe fn make_commands_control(
         let _: () = msg_send![table_ptr, addTableColumn: column_ptr];
         let _: () = msg_send![table_ptr, setHeaderView: std::ptr::null::<AnyObject>()];
         let _: () = msg_send![table_ptr, setAllowsMultipleSelection: false];
-        let _: () = msg_send![table_ptr, setAllowsEmptySelection: item.id == "keys"];
+        let _: () = msg_send![table_ptr, setAllowsEmptySelection: allow_empty];
+        if double {
+            let _: () = msg_send![table_ptr, setTarget: delegate];
+            let _: () = msg_send![table_ptr, setDoubleAction: sel!(quillDialogAction:)];
+        }
         let _: () = msg_send![table_ptr, setRowHeight: 20.0f64];
         let _: () = msg_send![table_ptr, setIntercellSpacing: NSSize::new(0.0, 1.0)];
         let _: () = msg_send![table_ptr, setDelegate: delegate];
@@ -1707,7 +1845,7 @@ unsafe fn make_commands_control(
     actions().lock().ok()?.push(ActionTarget {
         control: table_ptr as usize,
         panel: panel as usize,
-        id: item.id,
+        id,
         choice: None,
         default: false,
     });
@@ -1828,6 +1966,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn list_and_keys_ids_do_not_send_table_messages_to_other_objects() {
+        // NSObject is safe to construct off the main thread and, like a popup,
+        // does not answer selectedRow. The control ID must not choose that API.
+        let object: Retained<AnyObject> =
+            unsafe { Retained::from_raw(msg_send![class!(NSObject), new]).unwrap() };
+        let sender = Retained::as_ptr(&object) as *mut AnyObject;
+        for id in ["list", "keys"] {
+            actions().lock().unwrap().push(ActionTarget {
+                control: sender as usize,
+                panel: 0,
+                id,
+                choice: None,
+                default: false,
+            });
+            dispatch(sender);
+            actions()
+                .lock()
+                .unwrap()
+                .retain(|target| target.control != sender as usize);
+        }
+    }
+
+    #[test]
     fn special_codes_replace_only_the_native_field_selection() {
         for (start, length, expected) in [(4, 0, "a\u{1f600}b^t"), (1, 2, "a^tb"), (0, 4, "^t")] {
             let mut d = Dialog::new("Find", 300.0, 100.0);
@@ -1860,6 +2021,16 @@ mod tests {
         let (commands, _) = crate::commands_dialog::dialog(None);
         assert!(supported(&commands));
         assert!(is_commands(&commands));
+    }
+
+    #[test]
+    fn the_character_dialog_with_its_color_button_is_native() {
+        let view = crate::docview::DocView::new(quill_core::Document::new(), "t".into());
+        let (dialog, _) = crate::format_dialogs::build_character_with_button(&view);
+        assert!(supported(&dialog));
+        let mut swatch = Dialog::new("Colors", 200.0, 100.0);
+        swatch.swatch("preview", 10.0, 10.0, 40.0, 40.0, 0);
+        assert!(!supported(&swatch));
     }
 
     #[test]

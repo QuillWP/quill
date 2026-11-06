@@ -33,7 +33,7 @@ SOURCE_FILES = (
 # The notices a package carries, for the crates its own platform builds with.
 # The THIRD-PARTY-NOTICES.txt in the source tree covers every platform.
 PACKAGE_NOTICES = ROOT / "target/notices/THIRD-PARTY-NOTICES.txt"
-EXCLUDED_DIRS = {"target", "dist", ".git", "__pycache__", "Quill.app"}
+EXCLUDED_DIRS = {"target", "dist", ".git", "__pycache__", "Quill.app", "drafts"}
 
 
 def run(*command: str, capture: bool = False) -> str:
@@ -57,7 +57,7 @@ def source_files(root: Path):
             path = root / "fuzz" / name
             if path.is_file() and not path.is_symlink():
                 yield path
-        directories.append(root / "fuzz" / "fuzz_targets")
+        directories.extend([root / "fuzz" / "fuzz_targets", root / "fuzz" / "support"])
     for directory in directories:
         if not directory.exists():
             continue
@@ -148,6 +148,10 @@ def portable_package(executable: Path, output: Path, version: str,
         shutil.copy2(executable, stage / ("quill.exe" if system == "windows" else "quill"))
         copy_common(stage)
         shutil.copy2(ROOT / "assets/quill.png", stage / "quill.png")
+        for asset in ("quill.ico", "quill-document.png", "quill-document.ico", "quill-mime.xml", "quill-about.jpg"):
+            source = ROOT / ("tools" if asset.endswith(".xml") else "assets") / asset
+            if source.is_file():
+                shutil.copy2(source, stage / asset)
         if system == "linux":
             shutil.copy2(ROOT / "tools/quill.desktop", stage / "quill.desktop")
         archive = Path(tmp) / destination.name
@@ -170,8 +174,9 @@ def mac_app(executable: Path, app: Path, version: str, identity: str | None) -> 
     resources.mkdir()
     shutil.copy2(executable, contents / "MacOS/quill")
     copy_common(resources, mac=True)
-    run("sips", "-s", "format", "icns", str(ROOT / "assets/quill.png"),
-        "--out", str(resources / "Quill.icns"))
+    shutil.copy2(ROOT / "assets/quill.icns", resources / "Quill.icns")
+    shutil.copy2(ROOT / "assets/quill-document.icns", resources / "QuillDocument.icns")
+    shutil.copy2(ROOT / "assets/quill-about.jpg", resources / "quill-about.jpg")
     info = plistlib.loads((ROOT / "tools/Info.plist").read_bytes())
     info["CFBundleVersion"] = info["CFBundleShortVersionString"] = version
     (contents / "Info.plist").write_bytes(plistlib.dumps(info))

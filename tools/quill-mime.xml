@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-quillwp">
+    <comment>Quill Word Processor Document</comment>
+    <glob pattern="*.qwp"/>
+    <icon name="application-x-quillwp"/>
+    <sub-class-of type="application/zip"/>
+  </mime-type>
+</mime-info>

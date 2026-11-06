@@ -1,17 +1,28 @@
 //! Save a folder's documents in Quill's own formats, for the fuzz corpora:
 //! `cargo run -p quill-formats --example seed_exports fuzz/word-fixtures/2026-11-01`.
 //! Reads `sources` and `word`, writes .qwp, .rtf, .htm, .docx and .odt to `quill`.
+//! Folder names after the first argument are read instead, and written to
+//! `return`, for files that other programs saved from Quill's.
 
 use quill_formats::Format;
 use std::path::Path;
 
 fn main() {
-    let root = std::env::args().nth(1).expect("a fixture folder");
+    let mut args = std::env::args().skip(1);
+    let root = args.next().expect("a fixture folder");
     let root = Path::new(&root);
-    let out = root.join("quill");
+    let mut folders: Vec<String> = args.collect();
+    let out = root.join(if folders.is_empty() {
+        "quill"
+    } else {
+        "return"
+    });
+    if folders.is_empty() {
+        folders = vec!["sources".into(), "word".into()];
+    }
     std::fs::create_dir_all(&out).unwrap();
     let mut made = 0;
-    for folder in ["sources", "word"] {
+    for folder in &folders {
         let mut paths: Vec<_> = std::fs::read_dir(root.join(folder))
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -35,7 +46,8 @@ fn main() {
             for ext in ["qwp", "rtf", "htm", "docx", "odt"] {
                 let target = out.join(format!("{stem}.{ext}"));
                 let format = Format::from_path(&target).expect("known extension");
-                quill_formats::save(&doc, &target, format).unwrap_or_else(|e| panic!("{e}"));
+                quill_formats::save(&doc, &target, format)
+                    .unwrap_or_else(|e| panic!("{}: {e}", target.display()));
                 made += 1;
             }
         }

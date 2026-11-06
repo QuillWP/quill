@@ -7,8 +7,8 @@
 use super::*;
 use quill_core::Picture;
 
-/// Handles are this many points square, inside the picture's frame.
-const HANDLE: f32 = 6.0;
+/// Handle diameter in points, inside the picture's frame.
+const HANDLE: f32 = 10.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handle {
@@ -222,7 +222,7 @@ impl DocView {
 
     /// A handle with the few points around it that still grab it.
     fn grown(h: Rect) -> Rect {
-        Rect::new(h.x - 2.0, h.y - 2.0, h.w + 4.0, h.h + 4.0)
+        Rect::new(h.x - 5.0, h.y - 5.0, h.w + 10.0, h.h + 10.0)
     }
 
     /// A click on a picture: select it, or start dragging one of its
@@ -373,7 +373,9 @@ impl DocView {
         };
         c.frame(r, color::BLACK);
         for (_, h) in Self::handles(r) {
-            c.fill(h, color::BLACK);
+            let (cx, cy) = (h.x + h.w / 2.0, h.y + h.h / 2.0);
+            c.circle(cx, cy, h.w / 2.0, color::BLACK);
+            c.circle(cx, cy, h.w / 2.0 - 1.5, color::WHITE);
         }
         if let Some(d) = &self.pic_drag {
             let o = Self::dragged_rect(d);
@@ -426,11 +428,14 @@ mod tests {
             v.picture_cursor(r.x + 3.0, r.y + r.h / 2.0),
             Some(Handle::Left)
         );
+        // Near misses outside the visible handle still grab it.
+        let near = (r.right() + 4.0, r.bottom() + 4.0);
+        assert_eq!(v.picture_cursor(near.0, near.1), Some(Handle::BottomRight));
         // Just outside the grab margin, and the middle of the picture.
-        assert_eq!(v.picture_cursor(r.right() + 4.0, r.bottom() + 4.0), None);
+        assert_eq!(v.picture_cursor(r.right() + 6.0, r.bottom() + 6.0), None);
         assert_eq!(v.picture_cursor(r.x + 20.0, r.y + 20.0), None);
         // While a handle is being dragged the pointer keeps its shape.
-        assert!(v.picture_mouse_down(corner.0, corner.1, false));
+        assert!(v.picture_mouse_down(near.0, near.1, false));
         assert_eq!(v.picture_cursor(0.0, 0.0), Some(Handle::BottomRight));
     }
 

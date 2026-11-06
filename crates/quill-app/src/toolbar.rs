@@ -171,7 +171,7 @@ pub fn slot(i: usize) -> (usize, Option<Cmd>) {
     let custom = crate::settings::with(|s| {
         s.toolbar_buttons
             .iter()
-            .find(|(p, _, c)| *p == i && !crate::settings::retired_command(c))
+            .find(|(p, _, c)| *p == i && crate::commands::by_name(c).is_some())
             .map(|(_, pic, c)| (*pic, crate::commands::by_name(c)))
     });
     let default = LAYOUT.get(i).map_or(0, |l| l.0);
@@ -603,12 +603,12 @@ mod tests {
     }
 
     #[test]
-    fn retired_commands_do_not_return_and_the_blank_picture_borrows_one() {
+    fn unknown_commands_use_the_default_and_the_blank_picture_borrows_one() {
         let original = crate::settings::get();
         crate::settings::update(|s| {
-            s.toolbar_buttons = vec![(8, 11, "CreateEnvelope".into()), (9, 11, "Save".into())];
+            s.toolbar_buttons = vec![(8, 11, "UnknownCommand".into()), (9, 11, "Save".into())];
         });
-        assert!(crate::commands::by_name("CreateEnvelope").is_none());
+        assert!(crate::commands::by_name("UnknownCommand").is_none());
         assert_eq!(slot(8), (12, Some(Cmd::Spelling)));
         assert_eq!(slot(9), (2, Some(Cmd::Save)));
         crate::settings::update(|s| *s = original);

@@ -16,9 +16,9 @@ import time
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = ['character_styles', 'native', 'clipboard', 'docx', 'rtf', 'html', 'odt', 'zip', 'xml', 'images', 'settings', 'glossary', 'merge_data', 'editing']
+TARGETS = ['character_styles', 'native', 'clipboard', 'docx', 'rtf', 'html', 'odt', 'markdown', 'zip', 'xml', 'images', 'settings', 'glossary', 'merge_data', 'editing']
 # Share of the time for the targets that read whole documents; the rest split a quarter.
-DOCUMENT_TARGETS = TARGETS[:7]
+DOCUMENT_TARGETS = TARGETS[:8]
 LIMIT = 262144
 
 def budgets(hours):
@@ -54,7 +54,7 @@ def seed():
             try:
                 if path.stat().st_size > LIMIT:
                     continue
-                target = {'.odt':'odt', '.fodt':'odt', '.html':'html', '.htm':'html', '.png':'images', '.jpg':'images', '.jpeg':'images', '.bmp':'images', '.tif':'images', '.tiff':'images', '.qwp':'native'}.get(ext)
+                target = {'.odt':'odt', '.fodt':'odt', '.html':'html', '.htm':'html', '.png':'images', '.jpg':'images', '.jpeg':'images', '.bmp':'images', '.tif':'images', '.tiff':'images', '.qwp':'native', '.md':'markdown', '.markdown':'markdown'}.get(ext)
                 if target:
                     add(target, path.read_bytes())
                 if ext == '.odt':
@@ -76,8 +76,12 @@ def seed():
         add('editing', bytes([action, 0, 0, 0, 3, 0]) * 4)
     # Style programs start by defining a style, so the rest have one to act on.
     define = bytes([0, 0, 0, 31, 5, 0])
-    for action in range(16):
+    for action in range(19):
         add('character_styles', define + bytes([1, 0, 0, 0, 9, 0]) + bytes([action, 0, 0, 3, 7, 1]) * 3)
+    # Link Heading to a style, restyle it while linked, redefine and delete the
+    # character style under it, undo all of that, and save.
+    add('character_styles', define + bytes([0, 0, 0, 9, 3, 1]) + b''.join(bytes([action, 0, 0, 1, 9, 0])
+                                              for action in [10, 16, 18, 3, 1, 5, 13, 13, 14, 17, 15]))
     add('character_styles', define + b''.join(bytes([action, 0, 1, 1, 9, 0])
                                               for action in [1, 6, 10, 3, 13, 14, 9, 12, 5, 15]))
     add('editing', b''.join(bytes([action, 0, 0, 0, 3, 0])

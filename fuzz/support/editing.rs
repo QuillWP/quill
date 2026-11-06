@@ -35,7 +35,12 @@ pub fn valid(doc: &Document) {
                 }
             }
             assert_eq!(offset, para.text.len());
-            assert!(para.runs.windows(2).all(|pair| pair[0].chp != pair[1].chp));
+            // Each picture keeps its own run, even beside the same picture.
+            assert!(
+                para.runs
+                    .windows(2)
+                    .all(|pair| pair[0].chp != pair[1].chp || pair[0].chp.object != 0)
+            );
         }
     }
 }

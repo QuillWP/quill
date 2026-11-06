@@ -989,3 +989,25 @@ fn a_live_table_of_contents_is_a_toc_field_in_docx() {
     assert_eq!(back.props.live_toc, Some(o));
     assert_eq!(back.main.paras[0].text, "Intro\t1");
 }
+
+/// The same picture twice in a row shares one object but keeps one run per
+/// picture, as editing does, after every format reads it back.
+#[test]
+fn the_same_picture_twice_keeps_a_run_each() {
+    let mut doc = Document::new();
+    let chp = doc.main.paras[0].mark_chp;
+    let pic = Picture::from_bytes(png(3, 2)).unwrap();
+    let after = doc.insert_picture(StoryId::Main, Position::new(0, 0), pic.clone(), chp);
+    doc.insert_picture(StoryId::Main, after, pic, chp);
+    assert_eq!(doc.main.paras[0].runs.len(), 2);
+    quill_round_trip(&doc);
+    let docx = quill_formats::docx::write(&doc, SECS);
+    let rtf = quill_formats::rtf::write(&doc);
+    for back in [
+        quill_formats::docx::read(&docx).unwrap(),
+        quill_formats::rtf::read(&rtf).unwrap(),
+        quill_formats::odt_read::read(&quill_formats::odt::write(&doc, SECS)).unwrap(),
+    ] {
+        assert_eq!(back.main.paras[0].runs.len(), 2);
+    }
+}

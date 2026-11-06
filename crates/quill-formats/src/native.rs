@@ -51,8 +51,9 @@ const MAJOR: u16 = 1;
 /// 1.1: sections' own headers and footers. 1.2: bounded picture previews.
 /// 1.3: hyperlinks. 1.4: tracked changes, and comments' ranges, replies and
 /// resolved state. 1.5: live tables of contents. 1.6: solid shading colors.
-/// 1.7: named character styles and direct-format masks.
-const MINOR: u16 = 7;
+/// 1.7: named character styles and direct-format masks. 1.8: paragraph styles
+/// linked to a character style.
+const MINOR: u16 = 8;
 
 /// Whether `bytes` is a `.qwp` file rather than some other ZIP (.docx).
 pub fn is_quill(bytes: &[u8]) -> bool {
@@ -713,6 +714,8 @@ fn style(o: &mut Out, s: &Style) {
         pap: p,
         chp: c,
         builtin,
+        character,
+        own_chp,
     } = s;
     o.text(1, name);
     if let Some(b) = based_on {
@@ -722,6 +725,11 @@ fn style(o: &mut Out, s: &Style) {
     o.nest(4, |o| pap(o, p));
     o.nest(5, |o| chp(o, c));
     o.flag(6, *builtin);
+    // A linked character style, and the style's own formatting under it.
+    if *character != 0 {
+        o.uint(7, *character as u64);
+        o.nest(8, |o| chp(o, own_chp));
+    }
 }
 
 fn paragraph(o: &mut Out, p: &Paragraph) {
@@ -1329,6 +1337,8 @@ fn read_style(b: &[u8]) -> Result<Style, Damaged> {
         pap: ParaProps::default(),
         chp: CharProps::default(),
         builtin: false,
+        character: 0,
+        own_chp: CharProps::default(),
     };
     for (tag, f) in fields(b)? {
         match tag {
@@ -1338,8 +1348,13 @@ fn read_style(b: &[u8]) -> Result<Style, Damaged> {
             4 => s.pap = read_pap(f)?,
             5 => s.chp = read_chp(f)?,
             6 => s.builtin = flag(f)?,
+            7 => s.character = u16_of(f)?,
+            8 => s.own_chp = read_chp(f)?,
             _ => {}
         }
+    }
+    if s.character == 0 {
+        s.own_chp = s.chp;
     }
     Ok(s)
 }
@@ -1394,7 +1409,8 @@ fn read_story(b: &[u8]) -> Result<Story, Damaged> {
 /// Read a `.qwp` file.
 pub fn read(bytes: &[u8]) -> Result<Document, String> {
     let z = zip::Archive::open(bytes).map_err(|e| e.to_string())?;
-    if z.read("mimetype").map_err(|e| e.to_string())?.as_deref() != Some(MIMETYPE.as_bytes()) {
+    let mime = z.read("mimetype").map_err(|e| e.to_string())?;
+    if !matches!(mime.as_deref(), Some(m) if m == MIMETYPE.as_bytes()) {
         return Err("This is not a Quill document.".into());
     }
     let bin = z
@@ -1655,12 +1671,13 @@ fn repair(doc: &mut Document) {
                     });
                 }
             }
-            // Neighboring runs with the same format become one.
+            // Neighboring runs with the same format become one, except
+            // pictures: each keeps its own run, as editing leaves them.
             let mut merged: Vec<Run> = Vec::with_capacity(p.runs.len());
             for mut r in p.runs.drain(..) {
                 fix_chp(&mut r.chp);
                 match merged.last_mut() {
-                    Some(last) if last.chp == r.chp => last.len += r.len,
+                    Some(last) if last.chp == r.chp && r.chp.object == 0 => last.len += r.len,
                     _ => merged.push(r),
                 }
             }

@@ -1404,6 +1404,71 @@ dependencies = [
 ]
 
 [[package]]
+name = "quill-app"
+version = "0.11.0"
+dependencies = [
+ "ab_glyph_rasterizer",
+ "arboard",
+ "block2 0.6.2",
+ "cc",
+ "libc",
+ "miniz_oxide 0.9.1",
+ "muda",
+ "objc2 0.5.3",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.2.2",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.2.2",
+ "objc2-foundation 0.3.2",
+ "quill-core",
+ "quill-formats",
+ "quill-layout",
+ "rfd",
+ "softbuffer",
+ "windows",
+ "winit",
+ "zune-jpeg",
+]
+
+[[package]]
+name = "quill-core"
+version = "0.11.0"
+
+[[package]]
+name = "quill-formats"
+version = "0.11.0"
+dependencies = [
+ "gif",
+ "image-webp",
+ "miniz_oxide 0.9.1",
+ "quick-xml 0.42.0",
+ "quill-core",
+ "tiff",
+]
+
+[[package]]
+name = "quill-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "miniz_oxide 0.9.1",
+ "quill-app",
+ "quill-core",
+ "quill-formats",
+]
+
+[[package]]
+name = "quill-layout"
+version = "0.11.0"
+dependencies = [
+ "ab_glyph",
+ "ab_glyph_rasterizer",
+ "fontdb",
+ "memmap2",
+ "quill-core",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2145,70 +2210,6 @@ name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
-
-[[package]]
-name = "quill-app"
-version = "0.10.0"
-dependencies = [
- "ab_glyph_rasterizer",
- "arboard",
- "block2 0.6.2",
- "libc",
- "miniz_oxide 0.9.1",
- "muda",
- "objc2 0.5.3",
- "objc2 0.6.5",
- "objc2-app-kit 0.2.2",
- "objc2-app-kit 0.3.2",
- "objc2-foundation 0.2.2",
- "objc2-foundation 0.3.2",
- "rfd",
- "softbuffer",
- "quill-core",
- "quill-formats",
- "quill-layout",
- "windows",
- "winit",
- "zune-jpeg",
-]
-
-[[package]]
-name = "quill-core"
-version = "0.10.0"
-
-[[package]]
-name = "quill-formats"
-version = "0.10.0"
-dependencies = [
- "gif",
- "image-webp",
- "miniz_oxide 0.9.1",
- "quick-xml 0.42.0",
- "tiff",
- "quill-core",
-]
-
-[[package]]
-name = "quill-fuzz"
-version = "0.0.0"
-dependencies = [
- "libfuzzer-sys",
- "miniz_oxide 0.9.1",
- "quill-app",
- "quill-core",
- "quill-formats",
-]
-
-[[package]]
-name = "quill-layout"
-version = "0.10.0"
-dependencies = [
- "ab_glyph",
- "ab_glyph_rasterizer",
- "fontdb",
- "memmap2",
- "quill-core",
-]
 
 [[package]]
 name = "winapi"

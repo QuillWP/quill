@@ -541,7 +541,7 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
     };
 
     let mut character_items = vec![
-        b.cmd("Manage Character Styles...", Cmd::CharacterStylesDialog),
+        b.cmd("Character Styles…", Cmd::CharacterStylesDialog),
         sep(),
         b.item("None", Action::CharacterStyle(0))
             .checked(chp.character_style == 0),
@@ -618,6 +618,7 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
         actions: vec![Action::None],
     };
     let selected = !view.sel.is_empty();
+    let picture = view.selected_picture().is_some();
     // Breaks can't go inside a table, so a table cell's menu leaves them out.
     let in_table = view.current_pap().in_table;
     let insert = Menu {
@@ -649,9 +650,8 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
         toc_items.push(Item::separator());
     }
     // On a picture: its size and crop.
-    if view.selected_picture().is_some() {
+    if picture {
         let cropping = view.cropping_in_place();
-        toc_items.push(b.cmd("Properties\u{2026}", Cmd::PictureProperties));
         toc_items.push(b.cmd("Crop in Place", Cmd::CropInPlace).checked(cropping));
         toc_items.push(
             b.cmd("Resize in Place", Cmd::ResizeInPlace)
@@ -714,7 +714,7 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
         toc_items.push(b.cmd("Convert to Table", Cmd::ConvertToTable));
         toc_items.push(Item::separator());
     }
-    let menu = Menu {
+    let mut menu = Menu {
         title: String::new(),
         items: toc_items
             .into_iter()
@@ -743,6 +743,11 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
             ])
             .collect(),
     };
+    if picture {
+        menu.items.push(Item::separator());
+        menu.items
+            .push(b.cmd("Properties\u{2026}", Cmd::PictureProperties));
+    }
     (menu, b.actions)
 }
 
