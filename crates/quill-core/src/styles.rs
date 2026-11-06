@@ -194,10 +194,20 @@ impl StyleSheet {
 
     /// Outline level of a heading style (1-9), if it is one.
     pub fn heading_level(&self, id: StyleId) -> Option<u8> {
-        let name = &self.get(id).name;
-        name.strip_prefix("heading ")
-            .and_then(|n| n.parse().ok())
-            .filter(|n| (1..=9).contains(n))
+        self.numbered_level(id, "heading")
+    }
+
+    /// Level of a table-of-contents style (1-9), if it is one.
+    pub fn toc_level(&self, id: StyleId) -> Option<u8> {
+        self.numbered_level(id, "toc")
+    }
+
+    fn numbered_level(&self, id: StyleId, kind: &str) -> Option<u8> {
+        let (prefix, number) = self.get(id).name.rsplit_once(' ')?;
+        if !prefix.eq_ignore_ascii_case(kind) {
+            return None;
+        }
+        number.parse().ok().filter(|n| (1..=9).contains(n))
     }
 
     /// Add a new user style and return its id.
@@ -275,6 +285,24 @@ mod tests {
         let h = s.get(s.find("header").unwrap());
         let tabs: Vec<_> = h.pap.tabs.iter().map(|t| (t.pos, t.align)).collect();
         assert_eq!(tabs, [(4320, TabAlign::Center), (8640, TabAlign::Right)]);
+    }
+
+    #[test]
+    fn numbered_styles_accept_case_variations_and_only_supported_levels() {
+        let mut s = sheet();
+        for level in 1..=9 {
+            let heading = s.find(&format!("heading {level}")).unwrap();
+            let toc = s.find(&format!("toc {level}")).unwrap();
+            s.styles[heading as usize].name = format!("Heading {level}");
+            s.styles[toc as usize].name = format!("TOC {level}");
+            assert_eq!(s.heading_level(heading), Some(level));
+            assert_eq!(s.toc_level(toc), Some(level));
+        }
+        let toc = s.find("toc 6").unwrap();
+        for name in ["TOC 0", "TOC 10", "TOC notes"] {
+            s.styles[toc as usize].name = name.into();
+            assert_eq!(s.toc_level(toc), None);
+        }
     }
 
     #[test]

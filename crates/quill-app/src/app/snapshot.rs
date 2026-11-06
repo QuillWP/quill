@@ -193,6 +193,7 @@ pub fn snapshot(
                 let at = v
                     .doc
                     .insert_table(quill_core::StoryId::Main, v.sel.focus, r, c, w);
+                crate::table_dialogs::border_new_table(v, at);
                 v.sel = quill_core::Selection::caret(at);
                 let sel = v.sel;
                 v.doc.commit(sel);
@@ -201,7 +202,7 @@ pub fn snapshot(
             // (palette:#336699), or its editor (editcolor:#336699).
             "palette" => {
                 let start = crate::palette::parse_hex(arg);
-                let (d, ps) = crate::palette::palette(start);
+                let (d, ps) = crate::palette::palette(start, &st.view.doc);
                 st.dialogs.push((Which::Palette(ps), d));
             }
             "editcolor" => {

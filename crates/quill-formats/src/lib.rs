@@ -244,6 +244,9 @@ pub fn holds_text_not_its_format(path: &Path) -> bool {
     let Some(_) = named_as_package(path) else {
         return false;
     };
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file()) {
+        return false;
+    }
     let Ok(file) = std::fs::File::open(path) else {
         return false;
     };
@@ -409,12 +412,22 @@ fn document_error(path: &Path, feature: &str, error: String) -> String {
 /// Read at most `limit` bytes, checking both the initial metadata and the
 /// bytes actually read in case the file grows while it is being opened.
 fn read_file_with_limit(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    // Opening a named pipe can block before any byte limit is applied.
+    // Reject devices, pipes and directories before opening, then check the
+    // opened handle too in case the path changed.
+    let metadata = std::fs::metadata(path).map_err(|e| file_error("inspect", path, e))?;
+    if !metadata.is_file() {
+        return Err(format!("Not a regular file: {}", path.display()));
+    }
     let file = std::fs::File::open(path)
         .map_err(|e| format!("Could not open \u{201c}{}\u{201d}: {e}", path.display()))?;
-    let len = file
+    let metadata = file
         .metadata()
-        .map_err(|e| format!("Could not inspect \u{201c}{}\u{201d}: {e}", path.display()))?
-        .len();
+        .map_err(|e| file_error("inspect", path, e))?;
+    if !metadata.is_file() {
+        return Err(format!("Not a regular file: {}", path.display()));
+    }
+    let len = metadata.len();
     if len > limit {
         return Err(format!(
             "\u{201c}{}\u{201d} is too large for Quill to open ({} MB maximum).",
@@ -520,11 +533,62 @@ pub fn save(doc: &Document, path: &Path, format: Format) -> Result<(), String> {
         // is not there.
         let folder = path.with_file_name(markdown_pictures_folder(path));
         std::fs::create_dir_all(&folder).map_err(|e| file_error("create", &folder, e))?;
+        if !std::fs::symlink_metadata(&folder)
+            .map_err(|e| file_error("inspect", &folder, e))?
+            .file_type()
+            .is_dir()
+        {
+            return Err(format!(
+                "Picture folder is not a regular directory: {}",
+                folder.display()
+            ));
+        }
         for picture in &pictures {
-            write_atomic(&folder.join(&picture.name), &picture.bytes)?;
+            write_picture_file(&folder.join(&picture.name), &picture.bytes)?;
         }
     }
     write_atomic(path, &bytes)
+}
+
+// Assets are immutable once published: even an unlikely checksum collision
+// or a user-owned file must not overwrite pictures used by an older save.
+fn write_picture_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata =
+                std::fs::symlink_metadata(path).map_err(|e| file_error("inspect", path, e))?;
+            if metadata.file_type().is_file() && metadata.len() == bytes.len() as u64 {
+                let mut existing = Vec::new();
+                std::fs::File::open(path)
+                    .and_then(|file| file.take(bytes.len() as u64 + 1).read_to_end(&mut existing))
+                    .map_err(|e| file_error("read", path, e))?;
+                if existing == bytes {
+                    return Ok(());
+                }
+            }
+            return Err(format!(
+                "Quill did not replace the existing picture file: {}",
+                path.display()
+            ));
+        }
+        Err(e) => return Err(file_error("create", path, e)),
+    };
+    let mut cleanup = TempCleanup {
+        path: Some(path.to_path_buf()),
+        file: Some(file),
+    };
+    let file = cleanup.file.as_mut().unwrap();
+    file.write_all(bytes)
+        .map_err(|e| file_error("write", path, e))?;
+    file.sync_all().map_err(|e| file_error("sync", path, e))?;
+    drop(cleanup.file.take());
+    cleanup.path = None;
+    sync_parent(path)
 }
 
 /// The folder a Markdown file's pictures are saved in, beside it: its name
@@ -924,6 +988,70 @@ mod tests {
     use quill_core::{Position, StoryId, text};
 
     #[test]
+    fn the_saved_view_survives_every_format_that_has_one() {
+        use quill_core::document::SavedView;
+        let dir = std::env::temp_dir().join(format!("quill-view-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for view in [SavedView::Normal, SavedView::Outline, SavedView::PageLayout] {
+            let mut doc = quill_core::Document::new();
+            doc.props.view = Some(view);
+            for format in [Format::Quill, Format::Docx, Format::Rtf] {
+                let path = dir.join(format!("a.{}", format.extensions()[0]));
+                save(&doc, &path, format).unwrap();
+                assert_eq!(load(&path).unwrap().props.view, Some(view), "{format:?}");
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn border_colors_survive_every_format() {
+        use quill_core::props::{BorderLine, BorderStyle, Rgb};
+        let mut doc = quill_core::Document::new();
+        doc.insert_table(StoryId::Main, Position::new(0, 0), 1, 2, 2000);
+        let row = quill_core::table::row_at(&doc.main.paras, 0).unwrap();
+        let mut props = quill_core::table::row_props(&doc.main.paras, &row, 4000);
+        let line = BorderLine {
+            style: BorderStyle::Single,
+            color: Rgb(0x336699),
+            ..Default::default()
+        };
+        props.cells[0].borders.top = line;
+        props.cells[1].borders.left = line;
+        doc.set_row(StoryId::Main, row.end, props);
+        doc.main.paras.last_mut().unwrap().pap.borders.bottom = line;
+        let dir = std::env::temp_dir().join(format!("quill-line-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for format in [Format::Quill, Format::Docx, Format::Rtf, Format::Odt] {
+            let path = dir.join(format!("a.{}", format.extensions()[0]));
+            save(&doc, &path, format).unwrap();
+            let back = load(&path).unwrap();
+            let row = quill_core::table::row_at(&back.main.paras, 0).unwrap();
+            let props = quill_core::table::row_props(&back.main.paras, &row, 4000);
+            assert_eq!(props.cells[0].borders.top.color, line.color, "{format:?}");
+            assert_eq!(props.cells[1].borders.left.color, line.color, "{format:?}");
+            assert_eq!(
+                props.cells[0].borders.bottom.color,
+                Rgb::BLACK,
+                "{format:?}"
+            );
+            // ODT export leaves paragraph borders out altogether.
+            if format != Format::Odt {
+                let last = back.main.paras.last().unwrap();
+                assert_eq!(last.pap.borders.bottom.color, line.color, "{format:?}");
+            }
+        }
+        // Another program's RTF says it in the standard words.
+        let rtf = br"{\rtf1{\colortbl;\red51\green102\blue153;}
+\trowd\clbrdrt\brdrs\brdrw15\brdrcf1\cellx2000 A\cell\row}";
+        let back = rtf::read(rtf).unwrap();
+        let row = quill_core::table::row_at(&back.main.paras, 0).unwrap();
+        let props = quill_core::table::row_props(&back.main.paras, &row, 4000);
+        assert_eq!(props.cells[0].borders.top.color, line.color);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn cell_vertical_alignment_survives_every_format() {
         use quill_core::props::VAlign;
         let mut doc = quill_core::Document::new();
@@ -997,6 +1125,36 @@ mod tests {
 
         assert!(error.contains("damaged.rtf"), "{error}");
         assert!(error.contains("RTF"), "{error}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn document_reading_refuses_devices_before_reading() {
+        let error = read_file_with_limit(Path::new("/dev/zero"), 8).unwrap_err();
+        assert!(error.contains("Not a regular file"), "{error}");
+        assert!(!holds_text_not_its_format(Path::new("/dev/null")));
+    }
+
+    #[test]
+    fn picture_files_are_created_once_and_never_overwritten() {
+        let dir =
+            std::env::temp_dir().join(format!("quill-immutable-pictures-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("image.png");
+        write_picture_file(&path, b"first").unwrap();
+        write_picture_file(&path, b"first").unwrap();
+        // Same length deliberately exercises the content comparison.
+        assert!(write_picture_file(&path, b"other").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        #[cfg(unix)]
+        {
+            let link = dir.join("linked.png");
+            std::os::unix::fs::symlink(&path, &link).unwrap();
+            assert!(write_picture_file(&link, b"first").is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

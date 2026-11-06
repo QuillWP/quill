@@ -29,6 +29,7 @@ mod frames;
 mod language;
 mod layout_engine;
 mod link;
+mod lists;
 mod live_spelling;
 mod markdown;
 mod memory;
@@ -89,6 +90,8 @@ pub enum Effect {
     About,
     /// Help > Licenses…: every license Quill carries.
     Licenses,
+    /// Format > Replace Missing Fonts…, which needs the installed fonts.
+    ReplaceFonts,
     OpenRecent(usize),
     RemoveRecent(usize),
     ClearRecent,
@@ -175,6 +178,7 @@ pub enum DialogId {
     Frame,
     DropCap,
     Hyperlink,
+    Picture,
     ReviewChanges,
 }
 
@@ -346,6 +350,10 @@ pub struct DocView {
     back: Vec<Position>,
     /// A picture handle being dragged.
     pic_drag: Option<picture::PicDrag>,
+    /// The picture Crop in Place is on for.
+    pic_crop: Option<Position>,
+    /// Control is held, so a picture's handles crop.
+    pub crop_held: bool,
     table_drag: Option<table_move::TableDrag>,
     /// A cell border being dragged.
     border_drag: Option<borders::BorderDrag>,
@@ -434,6 +442,8 @@ impl DocView {
             status: None,
             back: Vec::new(),
             pic_drag: None,
+            pic_crop: None,
+            crop_held: false,
             table_drag: None,
             border_drag: None,
             frames: Vec::new(),
@@ -830,7 +840,11 @@ impl DocView {
     /// participates in the primary button's double/triple-click sequence.
     pub fn context_at(&mut self, pos: Position, upstream: bool) {
         let (start, end) = self.sel.range();
-        if self.sel.is_empty() || pos < start || pos >= end {
+        let inside = match self.selected_cells() {
+            Some(_) => self.in_selected_cells(pos),
+            None => !self.sel.is_empty() && start <= pos && pos < end,
+        };
+        if !inside {
             self.sel = Selection::caret(pos);
             self.upstream = upstream;
             self.typing_chp = None;
@@ -860,7 +874,7 @@ impl DocView {
         };
         self.last_click = Some((now, wx, wy, count));
         if count == 1
-            && (self.picture_mouse_down(wx, wy, shift, cmd)
+            && (self.picture_mouse_down(wx, wy, cmd)
                 || self.table_mouse_down(wx, wy)
                 || self.border_mouse_down(wx, wy))
         {
@@ -892,27 +906,21 @@ impl DocView {
         {
             self.sel = Selection::new(Position::new(0, 0), Position::new(end + 1, 0));
             self.drag = None;
-            self.status = Some(
-                "Table of contents: it keeps itself up to date. Right-click to update it or make it editable."
-                    .into(),
-            );
+            self.status = Some("Table of contents: right-click for options".into());
             self.reset_blink();
             return;
         }
         // ⌘-click on a link follows it, as in today's Word; anywhere else
         // it selects the sentence, as in the original.
-        if cmd && !shift && !in_bar && count == 1 {
-            let before = Position::new(pos.para, pos.offset.saturating_sub(1));
-            if let Some(url) = self
-                .link_url_at(pos)
-                .or_else(|| self.link_url_at(before).filter(|_| pos.offset > 0))
-            {
-                if !link::follow(&url) {
-                    self.status = Some(format!("Quill does not open links like {url}"));
-                }
-                self.drag = None;
-                return;
-            }
+        if cmd
+            && !shift
+            && !in_bar
+            && count == 1
+            && let Some(url) = self.link_url_near(pos)
+        {
+            self.open_link(&url);
+            self.drag = None;
+            return;
         }
         let story = &self.doc.main;
         let (unit, range) = if in_bar {
@@ -987,6 +995,11 @@ impl DocView {
         self.table_mouse_up();
         self.border_mouse_up();
         self.confine_to_comment();
+    }
+
+    /// Whether a picture's handle is being dragged.
+    pub fn picture_dragging(&self) -> bool {
+        self.pic_drag.is_some()
     }
 
     pub fn dragging(&self) -> bool {
@@ -1516,6 +1529,24 @@ mod tests {
     }
 
     #[test]
+    fn a_right_click_in_any_selected_cell_keeps_the_selection() {
+        let mut clip = Clipboard::new();
+        let mut v = with_table(&mut clip);
+        let (first, second) = {
+            let rows = quill_core::table::table_rows(&v.doc.main.paras, 2);
+            (rows[0].cells[0].0, rows[1].cells[0].0)
+        };
+        v.sel = Selection::new(Position::new(first, 0), Position::new(second, 0));
+        let sel = v.sel;
+        // The second cell is at the end of the range, and past it.
+        v.context_at(Position::new(second, 1), false);
+        assert_eq!(v.sel, sel);
+        // Outside the block the selection goes, as anywhere else.
+        v.context_at(Position::new(first + 1, 0), false);
+        assert!(v.sel.is_empty());
+    }
+
+    #[test]
     fn whole_tables_cut_copy_and_paste_in_one_piece() {
         let mut clip = Clipboard::new();
         let table = "aTc bTc Tr cTc dTc Tr";
@@ -1523,6 +1554,9 @@ mod tests {
         assert_eq!(shape(&v), format!("Before {table} After"));
         v.sel = Selection::caret(Position::new(2, 0));
         v.exec(Cmd::SelectTable, false, &mut clip);
+        // Every cell shows as selected, though the selection ends past them.
+        let block = v.selected_cells().unwrap();
+        assert_eq!((block.rows.len(), block.from, block.to), (2, 0, 1));
         v.exec(Cmd::Cut, false, &mut clip);
         assert_eq!(shape(&v), "Before After");
         v.exec(Cmd::Undo, false, &mut clip);
@@ -1750,16 +1784,20 @@ mod tests {
                     .is_some_and(|s| s.contains("inside a table"))
             );
         }
-        let names = |v: &DocView| {
+        // In a cell, Insert is the table's: no breaks.
+        let insert = |v: &DocView| {
             let (menu, _) = crate::app_menus::context_menu(v, false, false);
-            menu.items
-                .iter()
-                .map(|i| i.label.clone())
-                .collect::<Vec<_>>()
+            let item = menu
+                .items
+                .into_iter()
+                .find(|i| i.label == "Insert")
+                .unwrap();
+            let items = item.submenu.unwrap().items;
+            items.into_iter().map(|i| i.label).collect::<Vec<_>>()
         };
-        assert!(!names(&v).contains(&"Insert".to_string()));
+        assert_eq!(insert(&v)[0], "Row Above");
         v.sel = Selection::caret(Position::new(0, 1));
-        assert!(names(&v).contains(&"Insert".to_string()));
+        assert_eq!(insert(&v)[0], "Page Break");
     }
 
     #[test]

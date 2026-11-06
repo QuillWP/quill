@@ -470,10 +470,13 @@ fn border(v: Option<&str>, padding: Option<&str>) -> BorderLine {
     };
     let mut width = None;
     let mut kind = "solid";
+    let mut color = Rgb::BLACK;
     for word in v.split_whitespace() {
         if let Some(w) = length(word) {
             width = Some(w);
-        } else if !word.starts_with('#') {
+        } else if let Some(hex) = word.strip_prefix('#') {
+            color = u32::from_str_radix(hex, 16).map_or(color, Rgb);
+        } else {
             kind = word;
         }
     }
@@ -494,6 +497,7 @@ fn border(v: Option<&str>, padding: Option<&str>) -> BorderLine {
         } else {
             padding.and_then(length).unwrap_or(0).max(0)
         },
+        color,
     }
 }
 
@@ -807,6 +811,7 @@ impl<'a> Reader<'a> {
         }
         if let Some(v) = e.attr("background-color") {
             p.shading = shading(v);
+            p.shading_color = parse_color(v);
         }
         if e.attrs.iter().any(|(k, _)| k.starts_with("border")) {
             p.borders = borders(e);
@@ -2073,6 +2078,9 @@ impl<'a> Reader<'a> {
                         shading: cp
                             .and_then(|p| p.attr("background-color"))
                             .map_or(0, shading),
+                        shading_color: cp
+                            .and_then(|p| p.attr("background-color"))
+                            .and_then(parse_color),
                         valign: match cp.and_then(|p| p.attr("vertical-align")) {
                             Some("middle") => quill_core::props::VAlign::Center,
                             Some("bottom") => quill_core::props::VAlign::Bottom,

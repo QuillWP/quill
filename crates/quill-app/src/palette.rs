@@ -6,7 +6,9 @@
 
 use crate::canvas::{Canvas, Rect};
 use crate::dialog::{Dialog, PopItem, Popout};
+use quill_core::Document;
 use quill_core::props::Rgb;
+use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
 /// The standard colors, in the order they are shown: grays, then the
@@ -81,15 +83,22 @@ pub struct PaletteState {
     last_click: Option<(Instant, Slot)>,
 }
 
+thread_local! {
+    /// Colors edited from the Character dialog's pop-out. They wait for
+    /// the dialog's OK, so its Cancel leaves the custom colors as they were.
+    static PENDING: RefCell<Vec<(Target, Rgb)>> = const { RefCell::new(Vec::new()) };
+}
+
 impl PaletteState {
-    /// The palette on `start` (black if none), with the custom colors
-    /// kept in the settings.
-    pub fn new(start: Option<Rgb>) -> PaletteState {
-        let custom = crate::settings::with(|s| s.custom_colors.clone())
-            .into_iter()
-            .map(Rgb)
-            .take(SLOTS)
-            .collect();
+    /// The palette on `start` (black if none), with the saved colors, the
+    /// colors `doc` uses, and any edits waiting for their dialog's OK.
+    pub fn new(start: Option<Rgb>, doc: &Document) -> PaletteState {
+        let mut custom = custom_colors(doc);
+        PENDING.with_borrow(|pending| {
+            for &(target, new) in pending {
+                place_edit(&mut custom, target, new);
+            }
+        });
         let current = start.unwrap_or(Rgb::BLACK);
         let mut st = PaletteState {
             current,
@@ -127,8 +136,8 @@ pub enum Click {
 }
 
 /// The palette, opened on `start` (or black), and its state.
-pub fn palette(start: Option<Rgb>) -> (Dialog, PaletteState) {
-    let st = PaletteState::new(start);
+pub fn palette(start: Option<Rgb>, doc: &Document) -> (Dialog, PaletteState) {
+    let st = PaletteState::new(start, doc);
     let current = st.current;
     let row = PITCH * SLOTS as f32 - (PITCH - BOX);
     let mut d = Dialog::new("Color", row + 28.0, 222.0);
@@ -258,25 +267,16 @@ pub fn edited(st: &mut PaletteState, d: &mut Dialog, target: Target, new: Rgb) {
     }
     st.current = new;
     sync(st, d);
-    remember(&st.custom);
 }
 
-/// OK: the color chosen. A color that is not one of the standard or
-/// custom ones is remembered.
+/// OK: the color chosen, added to the row while the palette is open.
 pub fn finish(st: &mut PaletteState) -> Rgb {
     let c = st.current;
     if !STANDARD.contains(&c) && !st.custom.contains(&c) {
         st.custom.insert(0, c);
         st.custom.truncate(SLOTS);
     }
-    remember(&st.custom);
     c
-}
-
-/// Keep the custom colors for the next time.
-fn remember(custom: &[Rgb]) {
-    let colors: Vec<u32> = custom.iter().map(|c| c.0 & 0xFF_FFFF).collect();
-    crate::settings::update(|s| s.custom_colors = colors);
 }
 
 // ----- The pop-out -----
@@ -309,6 +309,7 @@ pub fn popout(st: &PaletteState, anchor: &'static str) -> Popout {
                 rgb: st.color_at(slot).map(|c| c.0),
                 selected: st.selected == Some(slot),
                 label: "",
+                tip: st.color_at(slot).and_then(name_of),
             });
         }
     }
@@ -319,6 +320,7 @@ pub fn popout(st: &PaletteState, anchor: &'static str) -> Popout {
         rgb: None,
         selected: false,
         label: "Edit Color…",
+        tip: None,
     });
     Popout {
         anchor,
@@ -358,28 +360,55 @@ pub fn pop_swatch(st: &mut PaletteState, id: &str, double: bool) -> Option<Pick>
     })
 }
 
-/// A color used in a dialog that was applied: kept among the custom
-/// colors unless it is a standard one or already there.
-pub fn remember_used(c: Rgb) {
-    let mut custom: Vec<Rgb> = crate::settings::with(|s| s.custom_colors.clone())
+/// The custom row: the colors saved in Preferences for every document,
+/// then the colors this document uses. A color made for one document
+/// stays with it, in its text.
+fn custom_colors(doc: &Document) -> Vec<Rgb> {
+    let mut out: Vec<Rgb> = crate::settings::with(|s| s.named_colors.clone())
         .into_iter()
-        .map(Rgb)
+        .map(|(c, _)| Rgb(c))
         .collect();
-    if STANDARD.contains(&c) || custom.contains(&c) {
-        return;
+    let stories = std::iter::once(&doc.main)
+        .chain(doc.headers.iter())
+        .chain([&doc.notes, &doc.annotations]);
+    for p in stories.flat_map(|s| &s.paras) {
+        for run in p.runs.iter().filter(|r| r.len > 0) {
+            let c = run.chp.color;
+            if !STANDARD.contains(&c) && !out.contains(&c) {
+                out.push(c);
+            }
+        }
+        if out.len() >= SLOTS {
+            break;
+        }
     }
-    custom.insert(0, c);
-    custom.truncate(SLOTS);
-    remember(&custom);
+    out.truncate(SLOTS);
+    out
 }
 
-/// A color edited from the pop-out goes where the edit said, among the
-/// remembered colors.
-pub fn remember_edit(target: Target, new: Rgb) {
-    let mut custom: Vec<Rgb> = crate::settings::with(|s| s.custom_colors.clone())
-        .into_iter()
-        .map(Rgb)
-        .collect();
+/// The name saved for a color in Preferences, if it has one.
+pub fn name_of(c: Rgb) -> Option<String> {
+    crate::settings::with(|s| {
+        s.named_colors
+            .iter()
+            .find(|(rgb, _)| *rgb == c.0)
+            .map(|(_, name)| name.clone())
+    })
+}
+
+/// A color edited from the pop-out, held until its dialog's OK.
+pub fn hold_edit(target: Target, new: Rgb) {
+    PENDING.with_borrow_mut(|pending| pending.push((target, new)));
+}
+
+/// The dialog is done: forget the colors edited from it. One that was
+/// applied is in the document's text now, and shows from there.
+pub fn drop_edits() {
+    PENDING.with_borrow_mut(Vec::clear);
+}
+
+/// Put an edited color where the edit said.
+fn place_edit(custom: &mut Vec<Rgb>, target: Target, new: Rgb) {
     match target {
         Target::Replace(i) if i < custom.len() => custom[i] = new,
         _ => {
@@ -388,7 +417,6 @@ pub fn remember_edit(target: Target, new: Rgb) {
             custom.truncate(SLOTS);
         }
     }
-    remember(&custom);
 }
 
 // ----- The editor -----
@@ -537,7 +565,7 @@ mod tests {
 
     #[test]
     fn choosing_editing_and_remembering_colors() {
-        let (mut d, mut st) = palette(Some(Rgb(0xFF0000)));
+        let (mut d, mut st) = palette(Some(Rgb(0xFF0000)), &Document::new());
         st.custom.clear();
         // Red is a standard color, selected to begin with.
         assert_eq!(st.selected, Some(Slot::Standard(5)));
@@ -579,5 +607,31 @@ mod tests {
             finish(&mut st);
         }
         assert_eq!(st.custom.len(), SLOTS);
+    }
+
+    #[test]
+    fn an_edited_color_shows_until_its_dialog_is_done() {
+        let doc = Document::new();
+        let dropped = Rgb(0x0A0B0C);
+        hold_edit(Target::Add, dropped);
+        assert!(PaletteState::new(None, &doc).custom.contains(&dropped));
+        drop_edits();
+        assert!(!PaletteState::new(None, &doc).custom.contains(&dropped));
+    }
+
+    #[test]
+    fn custom_colors_are_the_saved_ones_and_the_documents_own() {
+        let mut doc = Document::new();
+        let own = Rgb(0x123123);
+        let chp = quill_core::CharProps {
+            color: own,
+            ..doc.styles.get(0).chp
+        };
+        doc.main.paras[0].insert(0, "Hello", chp);
+        crate::settings::update(|s| s.named_colors = vec![(0xFF0000 + 7, "Company".into())]);
+        let row = custom_colors(&doc);
+        crate::settings::update(|s| s.named_colors.clear());
+        assert_eq!(row, [Rgb(0xFF0007), own]);
+        assert!(custom_colors(&Document::new()).is_empty());
     }
 }

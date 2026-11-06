@@ -128,8 +128,16 @@ pub const TRACK: u32 = 0xF2F2F2;
 pub const EDGE: u32 = 0xD0D0D0;
 
 /// The bar under the text: page number box, style name box, then the
-/// horizontal scroll bar, and the grow box in the corner.
-pub fn draw_status(c: &mut Canvas, label: &mut Label, r: Rect, page: &str, style: &str) -> Rect {
+/// horizontal scroll bar, and the grow box in the corner. A `message` takes
+/// the place of both boxes, which are too narrow for one.
+pub fn draw_status(
+    c: &mut Canvas,
+    label: &mut Label,
+    r: Rect,
+    page: &str,
+    style: &str,
+    message: Option<&str>,
+) -> Rect {
     let page_w = 90.0;
     let style_w = 120.0;
     c.fill(r, TRACK);
@@ -144,24 +152,26 @@ pub fn draw_status(c: &mut Canvas, label: &mut Label, r: Rect, page: &str, style
         false,
         r.x + 6.0,
         base,
-        page,
+        message.unwrap_or(page),
         ink,
     );
-    c.fill(Rect::new(r.x + page_w, r.y + 3.0, h, r.h - 6.0), EDGE);
-    label.draw(
-        c,
-        quill_layout::fonts::UI_FONT,
-        10.0,
-        false,
-        r.x + page_w + 6.0,
-        base,
-        style,
-        ink,
-    );
-    c.fill(
-        Rect::new(r.x + page_w + style_w, r.y + 3.0, h, r.h - 6.0),
-        EDGE,
-    );
+    if message.is_none() {
+        c.fill(Rect::new(r.x + page_w, r.y + 3.0, h, r.h - 6.0), EDGE);
+        label.draw(
+            c,
+            quill_layout::fonts::UI_FONT,
+            10.0,
+            false,
+            r.x + page_w + 6.0,
+            base,
+            style,
+            ink,
+        );
+        c.fill(
+            Rect::new(r.x + page_w + style_w, r.y + 3.0, h, r.h - 6.0),
+            EDGE,
+        );
+    }
     Rect::new(r.x + page_w + style_w, r.y, r.w - page_w - style_w, BAR)
 }
 

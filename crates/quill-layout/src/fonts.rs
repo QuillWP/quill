@@ -5,7 +5,7 @@
 //! Mac's read-only system fonts are memory-mapped.
 
 use ab_glyph::{Font, FontRef, GlyphId, VariableFont};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -163,17 +163,21 @@ impl Catalog {
         catalog
     }
 
+    /// Every font family here, in lower case.
+    pub fn family_keys(&self) -> HashSet<String> {
+        self.families
+            .iter()
+            .map(|f| f.name.to_lowercase())
+            .collect()
+    }
+
     /// The family and style each installed face's PostScript name stands
     /// for, keyed in lower case: "helveticaneue-bold" is Helvetica Neue in
     /// bold. Rich text copied from other Mac apps names its fonts this way.
     /// Names that are also a family's own name are left out, as are the
     /// system's hidden interface fonts.
     pub fn postscript_names(&self) -> HashMap<String, (String, FontVariant)> {
-        let families: std::collections::HashSet<String> = self
-            .families
-            .iter()
-            .map(|f| f.name.to_lowercase())
-            .collect();
+        let families = self.family_keys();
         let mut out = HashMap::new();
         for family in self.families.iter().filter(|f| !f.hidden) {
             for face in &family.faces {

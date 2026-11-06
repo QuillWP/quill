@@ -328,7 +328,7 @@ fn button(
     }
     let n = c.scale;
     let im = icon::cached(spec, 16, 16, n);
-    let alpha = if live { 255 } else { 80 };
+    let alpha = if live { 255 } else { c.faded() };
     let x = r.x + ((r.w - 16.0) / 2.0).floor();
     icon::paint(c, label, &im, x, r.y, alpha, background());
 }
@@ -348,7 +348,7 @@ fn tool_button(c: &mut Canvas, label: &mut Label, r: Rect, name: &str, hot: bool
     let n = c.scale;
     let im = icon::cached(spec, w, h, n);
     let x = r.x + (r.w - w as f32 * k) / 2.0;
-    let alpha = if live { 255 } else { 80 };
+    let alpha = if live { 255 } else { c.faded() };
     icon::paint(c, label, &im, x / k, r.y / k, alpha, background());
     c.set_scale(old);
 }

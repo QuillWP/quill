@@ -19,9 +19,31 @@ impl WinState {
             actions,
             open,
             submenu: None,
+            typed: (String::new(), None),
             opened: Instant::now(),
             held: false,
         });
+    }
+
+    /// The address of the link in the main text at (`x`, `y`), if any.
+    pub(super) fn link_at_point(&self, x: f32, y: f32) -> Option<String> {
+        if self.dialogs.iter().any(|(_, d)| !d.modeless) {
+            return None;
+        }
+        let (cx, cy) = (x / self.ui, y / self.ui);
+        if self
+            .pane
+            .as_ref()
+            .is_some_and(|p| p.bounds.contains(cx, cy))
+        {
+            return None;
+        }
+        let (dx, dy) = self.document_point(x, y);
+        if !self.view.area.contains(dx, dy) {
+            return None;
+        }
+        let (pos, _) = self.view.hit(dx, dy);
+        self.view.link_url_near(pos)
     }
 
     /// Right-click at (`x`, `y`): put the insertion point there unless it
@@ -62,8 +84,10 @@ impl WinState {
                 dialog.inactive = true;
             }
         }
-        let (pos, upstream) = self.view.hit(dx, dy);
-        self.view.context_at(pos, upstream);
+        if !self.view.select_picture_at(dx, dy) {
+            let (pos, upstream) = self.view.hit(dx, dy);
+            self.view.context_at(pos, upstream);
+        }
         let forms = clip.forms();
         let can_paste_text = forms.contains(&crate::paste_special::Form::Unformatted);
         let (m, actions) = app_menus::context_menu(&self.view, !forms.is_empty(), can_paste_text);
@@ -147,6 +171,12 @@ impl WinState {
         strip
             .contains(x, y)
             .then(|| toolbar::hit(at, x, y, &self.tool_state()))
+    }
+
+    /// The toolbar button under a point, enabled or not, for its tooltip.
+    pub(super) fn toolbar_button_at(&self, x: f32, y: f32) -> Option<usize> {
+        let (at, _) = self.toolbar_place()?;
+        toolbar::button_at(at, x, y)
     }
 
     /// The formatting or paragraph toolbar control under a point.
@@ -477,10 +507,8 @@ impl WinState {
         }
         let style = self.view.style_name().to_string();
         let status = Rect::new(0.0, h - BAR, w - gutter, BAR);
-        let page = match &self.view.status {
-            Some(s) => s.clone(),
-            None => format!("Page {}", self.main_view().caret_page() + 1),
-        };
+        let page = format!("Page {}", self.main_view().caret_page() + 1);
+        let message = self.view.status.clone();
 
         if let Some(p) = &self.pane {
             let title = if p.story == StoryId::Annotations {
@@ -521,7 +549,7 @@ impl WinState {
         self.draw_revisions(c, &mut label);
         self.draw_revision_badges(c, &mut label);
         self.draw_comment_links(c, z / k);
-        let hbar = chrome::draw_status(c, &mut label, status, &page, &style);
+        let hbar = chrome::draw_status(c, &mut label, status, &page, &style, message.as_deref());
         if !self.native_scrollbars {
             let v = self.main_view();
             let max = v.max_scroll_x();
@@ -679,6 +707,7 @@ impl WinState {
             actions,
             open,
             submenu: None,
+            typed: (String::new(), None),
             opened: Instant::now(),
             held: true,
         });
@@ -706,9 +735,102 @@ impl WinState {
             actions,
             open,
             submenu: None,
+            typed: (String::new(), None),
             opened: Instant::now(),
             held: true,
         });
+    }
+
+    /// A key while a menu of Quill's own is open: the arrows move through
+    /// it and in and out of a submenu, Return chooses, and typing jumps to
+    /// the item that starts with what was typed.
+    pub(super) fn menu_key(
+        &mut self,
+        key: &Key,
+        text: Option<&str>,
+        label: &mut Label,
+        clip: &mut Clipboard,
+    ) -> Effect {
+        let bounds = Rect::new(0.0, 0.0, self.width, self.height);
+        let Some(t) = &mut self.menu else {
+            return Effect::None;
+        };
+        let menu = t.index();
+        let in_child = t.submenu.as_ref().is_some_and(|(_, c)| c.hot.is_some());
+        match key {
+            Key::Named(NamedKey::ArrowDown | NamedKey::ArrowUp) => {
+                let down = *key == Key::Named(NamedKey::ArrowDown);
+                if let (true, Some((parent, child))) = (in_child, &mut t.submenu) {
+                    if let Some(m) = t.menus[menu].items[*parent].submenu.as_ref() {
+                        menu::step(m, child, down);
+                    }
+                } else {
+                    t.submenu = None;
+                    menu::step(&t.menus[menu], &mut t.open, down);
+                }
+            }
+            Key::Named(NamedKey::ArrowRight) if !in_child => {
+                let Some(i) = t.open.hot else {
+                    return Effect::None;
+                };
+                let m = &t.menus[menu];
+                if let (Some(child), Some(parent)) =
+                    (m.items[i].submenu.as_ref(), menu::item_rect(m, &t.open, i))
+                {
+                    let mut open = menu::place_side(label, child, parent, bounds);
+                    menu::step(child, &mut open, true);
+                    t.submenu = Some((i, open));
+                }
+            }
+            Key::Named(NamedKey::ArrowLeft) if in_child => t.submenu = None,
+            Key::Named(NamedKey::Enter) => {
+                let m = t.menu();
+                let chosen = match &t.submenu {
+                    Some((parent, child)) if in_child => m.items[*parent]
+                        .submenu
+                        .as_ref()
+                        .zip(child.hot)
+                        .map(|(sub, i)| sub.items[i].id),
+                    _ => t.open.hot.map(|i| m.items[i].id),
+                };
+                let Some(id) = chosen else {
+                    return Effect::None;
+                };
+                let action = t.actions.get(id as usize).cloned().unwrap_or(Action::None);
+                self.menu = None;
+                return self.act(action, clip);
+            }
+            _ => {
+                // On the Mac typed letters come as the key, with no text.
+                let typed = match key {
+                    Key::Character(c) => Some(c.as_str()),
+                    Key::Named(NamedKey::Space) => Some(" "),
+                    _ => text,
+                };
+                let typed = typed.filter(|s| s.chars().all(|c| !c.is_control()));
+                let Some(typed) = typed.filter(|s| !s.is_empty()) else {
+                    return Effect::None;
+                };
+                let fresh = t
+                    .typed
+                    .1
+                    .is_some_and(|at| at.elapsed() < Duration::from_secs(1));
+                if !fresh {
+                    t.typed.0.clear();
+                }
+                t.typed.0.push_str(typed);
+                t.typed.1 = Some(Instant::now());
+                let found = t.typed.0.clone();
+                if let (true, Some((parent, child))) = (in_child, &mut t.submenu) {
+                    if let Some(m) = t.menus[menu].items[*parent].submenu.as_ref() {
+                        menu::jump(m, child, &found);
+                    }
+                } else if menu::jump(&t.menus[menu], &mut t.open, &found) {
+                    t.submenu = None;
+                }
+            }
+        }
+        Effect::None
     }
 
     pub(super) fn open_popup(&mut self, hit: Hit, label: &mut Label, env: &Env) {
@@ -731,6 +853,7 @@ impl WinState {
             actions,
             open,
             submenu: None,
+            typed: (String::new(), None),
             opened: Instant::now(),
             held: true,
         });

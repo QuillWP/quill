@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import pathlib
@@ -19,15 +20,33 @@ DATA_NOTICES = (
 )
 
 
-def metadata() -> dict:
+def metadata(target: str | None) -> dict:
+    platform = ["--filter-platform", target] if target else []
     result = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--locked"],
+        ["cargo", "metadata", "--format-version", "1", "--locked", *platform],
         cwd=ROOT,
         check=True,
         capture_output=True,
         text=True,
     )
     return json.loads(result.stdout)
+
+
+def shipped(data: dict) -> set[str]:
+    """The ids of the packages quill-app builds with, leaving out test-only ones."""
+    nodes = {node["id"]: node for node in data["resolve"]["nodes"]}
+    app = next(package["id"] for package in data["packages"] if package["name"] == "quill-app")
+    found = set()
+    waiting = [app]
+    while waiting:
+        node = waiting.pop()
+        if node in found:
+            continue
+        found.add(node)
+        for dep in nodes[node]["deps"]:
+            if any(kind["kind"] != "dev" for kind in dep["dep_kinds"]):
+                waiting.append(dep["pkg"])
+    return found
 
 
 def notice_files(package: dict) -> list[pathlib.Path]:
@@ -48,13 +67,20 @@ def notice_files(package: dict) -> list[pathlib.Path]:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--target", help="list only the crates built for this target triple")
+    parser.add_argument("--output", type=pathlib.Path, default=OUTPUT)
+    args = parser.parse_args()
+    data = metadata(args.target)
+    ids = shipped(data) if args.target else None
     packages = sorted(
         # Crates from crates.io, and the patched copies in vendor/.
         (
             package
-            for package in metadata()["packages"]
-            if package.get("source")
-            or pathlib.Path(package["manifest_path"]).is_relative_to(ROOT / "vendor")
+            for package in data["packages"]
+            if (ids is None or package["id"] in ids)
+            and (package.get("source")
+                 or pathlib.Path(package["manifest_path"]).is_relative_to(ROOT / "vendor"))
         ),
         key=lambda package: (package["name"].lower(), package["version"]),
     )
@@ -135,7 +161,8 @@ def main() -> int:
         "Quill third-party notices",
         "========================",
         "",
-        "Generated from Cargo.lock by tools/generate-notices.py.",
+        "Generated from Cargo.lock by tools/generate-notices.py"
+        + (f" for {args.target}." if args.target else "."),
         "The package list records each crate's declared SPDX expression; the",
         "deduplicated source license and notice files follow it.",
         "",
@@ -157,12 +184,17 @@ def main() -> int:
     # The language data in data/ is not Cargo-sourced; its license texts live
     # in data/licenses and are repeated here so every package carries them.
     for title, name in DATA_NOTICES:
+        # The Mac hyphenates with the system's patterns, so its package leaves
+        # Quill's copy out (see copy_common in package.py).
+        if args.target and "apple" in args.target and "hyph" in name:
+            continue
         text = (ROOT / "data" / "licenses" / name).read_text(encoding="utf-8")
         lines.extend(
             ["", title, "-" * len(title), f"Source: data/licenses/{name}", "", text.strip()]
         )
-    OUTPUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"wrote {OUTPUT} ({len(packages)} packages, {len(documents)} documents)")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"wrote {args.output} ({len(packages)} packages, {len(documents)} documents)")
     return 0
 
 

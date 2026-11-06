@@ -1,5 +1,5 @@
 //! Hyperlinks: finding the link at the cursor, making and changing one
-//! (Insert > Hyperlink), taking links off, and following one.
+//! (Edit > Hyperlink), taking links off, and following one.
 
 use super::*;
 use quill_core::Link;
@@ -15,6 +15,9 @@ pub struct LinkTarget {
     /// The link the text already is (0 for none), whose settings the
     /// dialog starts from.
     pub link: u32,
+    /// The first link in a selection that runs past it (0 for none), which
+    /// the dialog offers to stretch over the whole selection.
+    pub within: u32,
     /// The color of the linked text.
     pub color: Rgb,
 }
@@ -43,20 +46,41 @@ impl DocView {
         } else {
             self.doc.copy(MAIN, start, end).plain_text()
         };
-        let color = if link != 0 {
-            self.doc.main.paras[start.para]
-                .chp_of_char(start.offset)
-                .color
+        let within = if link == 0 && s != e {
+            self.first_link_in(s, e)
         } else {
-            quill_core::link::BROWSER_BLUE
+            None
+        };
+        let color = match (link, within) {
+            (0, None) => quill_core::link::BROWSER_BLUE,
+            (0, Some((_, color))) => color,
+            _ => {
+                self.doc.main.paras[start.para]
+                    .chp_of_char(start.offset)
+                    .color
+            }
         };
         LinkTarget {
             start,
             end,
             text,
             link,
+            within: within.map_or(0, |(id, _)| id),
             color,
         }
+    }
+
+    /// The first link in `s..e`, and its color.
+    fn first_link_in(&self, s: Position, e: Position) -> Option<(u32, Rgb)> {
+        let paras = &self.doc.main.paras;
+        (s.para..=e.para).find_map(|i| {
+            let p = &paras[i];
+            let a = if i == s.para { s.offset } else { 0 };
+            let b = if i == e.para { e.offset } else { p.len() };
+            p.run_bounds()
+                .find(|(rs, re, c)| c.link != 0 && *rs < b && *re > a)
+                .map(|(_, _, c)| (c.link, c.color))
+        })
     }
 
     /// Make `target`'s text into `link`, shown in `color` and underlined.
@@ -127,6 +151,21 @@ impl DocView {
         })
     }
 
+    /// The address of the link a click at `at` landed on: a click falls
+    /// between two characters, so either one counts.
+    pub fn link_url_near(&self, at: Position) -> Option<String> {
+        let before = Position::new(at.para, at.offset.saturating_sub(1));
+        self.link_url_at(at)
+            .or_else(|| self.link_url_at(before).filter(|_| at.offset > 0))
+    }
+
+    /// Open `url`, saying so in the status line if Quill won't.
+    pub fn open_link(&mut self, url: &str) {
+        if !follow(url) {
+            self.status = Some(format!("Quill does not open links like {url}"));
+        }
+    }
+
     /// The address of the link at main text position `at`: the character
     /// there, not the one before it, so a click just past a link misses.
     pub fn link_url_at(&self, at: Position) -> Option<String> {
@@ -175,6 +214,57 @@ mod tests {
 
     fn view(text: &str) -> DocView {
         DocView::new(quill_core::text::from_plain_text(text), "Links".into())
+    }
+
+    #[test]
+    fn a_selection_past_a_link_can_stretch_it_or_replace_it() {
+        let old = Link::new("https://old.example");
+        let mut v = view("see the manual first");
+        let manual = LinkTarget {
+            start: Position::new(0, 8),
+            end: Position::new(0, 14),
+            text: "manual".into(),
+            link: 0,
+            within: 0,
+            color: Rgb(0xAA0000),
+        };
+        v.apply_link(&manual, "manual", old, Rgb(0xAA0000));
+        let id = v.doc.main.paras[0].chp_of_char(8).link;
+        v.sel = Selection::new(Position::new(0, 4), Position::new(0, 20));
+        let t = v.link_target();
+        assert_eq!((t.link, t.within), (0, id));
+        assert_eq!(t.color, Rgb(0xAA0000));
+
+        // Stretched: one link over all of it, at the same address.
+        let (mut d, st) = crate::link_dialog::dialog(&v);
+        assert_eq!(d.field_text("url"), "https://old.example");
+        assert!(!d.is_enabled("url"));
+        let (text, link, color) = crate::link_dialog::read(&d, &st).unwrap();
+        v.apply_link(&t, &text, link, color);
+        let p = &v.doc.main.paras[0];
+        assert_eq!(p.link_range(5), Some((4, 20, id)));
+        assert_eq!(p.chp_of_char(16).color, Rgb(0xAA0000));
+        assert_eq!(p.chp_of_char(3).link, 0);
+        let mut clip = Clipboard::without_system();
+        v.exec(Cmd::Undo, false, &mut clip);
+
+        // A new address: the old link goes and one new link covers it all.
+        v.sel = Selection::new(Position::new(0, 4), Position::new(0, 20));
+        let t = v.link_target();
+        d.set_on("stretch", false);
+        d.set_on("fresh", true);
+        crate::link_dialog::changed(&mut d, &st);
+        assert_eq!(d.field_text("url"), "");
+        assert!(d.is_enabled("url"));
+        assert!(crate::link_dialog::read(&d, &st).is_none());
+        d.set_field("url", "https://new.example");
+        let (text, link, color) = crate::link_dialog::read(&d, &st).unwrap();
+        v.apply_link(&t, &text, link, color);
+        let p = &v.doc.main.paras[0];
+        let (s, e, new) = p.link_range(5).unwrap();
+        assert_eq!((s, e), (4, 20));
+        assert_ne!(new, id);
+        assert_eq!(quill_core::link::url(new), "https://new.example");
     }
 
     #[test]
@@ -293,6 +383,13 @@ mod tests {
             ))
         );
         assert_eq!(link("mailto:nobody"), None);
+        assert_eq!(
+            typed_address("lucas@example.com.").map(|a| a.1).as_deref(),
+            Some("mailto:lucas@example.com")
+        );
+        assert_eq!(typed_address("a@b"), None);
+        assert_eq!(typed_address("@example.com"), None);
+        assert_eq!(typed_address("one@two@three.com"), None);
         assert_eq!(link("http://"), None);
         assert_eq!(link("www."), None);
         assert_eq!(link("example.com"), None);
@@ -351,6 +448,24 @@ mod tests {
         v.type_text(" ");
         let c = v.doc.main.paras[0].chp_of_char(0);
         assert_eq!(quill_core::link::url(c.link), "https://real.example");
+    }
+
+    #[test]
+    fn a_click_on_either_side_of_a_character_finds_its_link() {
+        let mut v = view("See this page now");
+        v.sel = Selection::new(Position::new(0, 4), Position::new(0, 8));
+        let t = v.link_target();
+        v.apply_link(
+            &t,
+            "this",
+            Link::new("https://example.com"),
+            quill_core::link::BROWSER_BLUE,
+        );
+        let at = |offset| v.link_url_near(Position::new(0, offset));
+        assert_eq!(at(4).as_deref(), Some("https://example.com"));
+        assert_eq!(at(8).as_deref(), Some("https://example.com"));
+        assert_eq!(at(0), None);
+        assert_eq!(at(10), None);
     }
 
     #[test]

@@ -26,13 +26,57 @@ pub struct Data {
     pub records: Vec<Vec<String>>,
 }
 
+// Empty fields still cost a String slot. Bound that overhead separately
+// from document text, and reject rather than silently omit recipients.
+const MAX_DATA_FIELDS_PER_RECORD: usize = 1024;
+const MAX_DATA_CELLS: usize = 1_000_000;
+const MAX_DATA_BYTES: usize = crate::limits::MAX_CHARACTERS * 4;
+
+struct DataBudget {
+    cells: usize,
+    bytes: usize,
+}
+
+impl DataBudget {
+    fn cell(&mut self, in_record: usize) -> Result<(), String> {
+        if in_record >= MAX_DATA_FIELDS_PER_RECORD {
+            return Err(format!(
+                "Print Merge data has more than {MAX_DATA_FIELDS_PER_RECORD} fields in one record"
+            ));
+        }
+        if self.cells == 0 {
+            return Err(format!(
+                "Print Merge data has more than {MAX_DATA_CELLS} cells"
+            ));
+        }
+        self.cells -= 1;
+        Ok(())
+    }
+
+    fn text(&mut self, bytes: usize) -> Result<(), String> {
+        self.bytes = self
+            .bytes
+            .checked_sub(bytes)
+            .ok_or_else(|| "Print Merge data has too much text".to_string())?;
+        Ok(())
+    }
+}
+
 /// Split one record: by tabs if it has any, else by commas, with the original's
 /// quotes around values that hold commas.
-fn split_record(line: &str) -> Vec<String> {
-    if line.contains('\t') {
-        return line.split('\t').map(|s| s.trim().to_string()).collect();
-    }
+fn split_record(line: &str, budget: &mut DataBudget) -> Result<Vec<String>, String> {
+    budget.text(line.len())?;
+    budget.cell(0)?;
     let mut out = Vec::new();
+    if line.contains('\t') {
+        for field in line.split('\t') {
+            if !out.is_empty() {
+                budget.cell(out.len())?;
+            }
+            out.push(field.trim().to_string());
+        }
+        return Ok(out);
+    }
     let mut cur = String::new();
     let mut quoted = false;
     let mut chars = line.chars().peekable();
@@ -43,53 +87,70 @@ fn split_record(line: &str) -> Vec<String> {
                 chars.next();
             }
             '"' => quoted = !quoted,
-            ',' if !quoted => out.push(std::mem::take(&mut cur).trim().to_string()),
+            ',' if !quoted => {
+                budget.cell(out.len() + 1)?;
+                out.push(std::mem::take(&mut cur).trim().to_string());
+            }
             c => cur.push(c),
         }
     }
     out.push(cur.trim().to_string());
-    out
+    Ok(out)
 }
 
 impl Data {
     /// The data in a document: a table's rows, or its paragraphs.
-    pub fn from_document(doc: &Document) -> Data {
+    /// Excessive data returns an error without a partial recipient list.
+    pub fn from_document(doc: &Document) -> Result<Data, String> {
+        Self::from_document_with_budget(
+            doc,
+            DataBudget {
+                cells: MAX_DATA_CELLS,
+                bytes: MAX_DATA_BYTES,
+            },
+        )
+    }
+
+    fn from_document_with_budget(doc: &Document, mut budget: DataBudget) -> Result<Data, String> {
         let paras = &doc.main.paras;
         let mut rows: Vec<Vec<String>> = Vec::new();
         let mut i = 0;
         while i < paras.len() {
+            if rows.len() >= crate::limits::MAX_PARAGRAPHS {
+                return Err("Print Merge data has too many records".into());
+            }
             if paras[i].pap.in_table
                 && let Some(row) = crate::table::row_at(paras, i)
             {
-                let cells = row
-                    .cells
-                    .iter()
-                    .map(|&(a, b)| {
-                        paras[a..=b]
-                            .iter()
-                            .map(|p| p.text.as_str())
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                            .trim()
-                            .to_string()
-                    })
-                    .collect();
+                let mut cells = Vec::new();
+                for &(a, b) in &row.cells {
+                    budget.cell(cells.len())?;
+                    let mut text = String::new();
+                    for (j, p) in paras[a..=b].iter().enumerate() {
+                        budget.text(p.text.len() + usize::from(j != 0))?;
+                        if j != 0 {
+                            text.push('\n');
+                        }
+                        text.push_str(&p.text);
+                    }
+                    cells.push(text.trim().to_string());
+                }
                 rows.push(cells);
                 i = row.end + 1;
                 continue;
             }
-            let t = paras[i].text.trim();
-            if !t.is_empty() {
-                rows.push(split_record(t));
+            let t = paras[i].text.as_str();
+            if !t.trim().is_empty() || t.contains('\t') {
+                rows.push(split_record(t, &mut budget)?);
             }
             i += 1;
         }
         let mut rows = rows.into_iter();
         let fields = rows.next().unwrap_or_default();
-        Data {
+        Ok(Data {
             fields,
             records: rows.collect(),
-        }
+        })
     }
 
     fn value(&self, record: usize, name: &str) -> Option<String> {
@@ -499,10 +560,66 @@ mod tests {
 
     #[test]
     fn data_from_tabs_commas_and_quotes() {
-        let d = Data::from_document(&doc("Name\tCity\nAda\tLondon\n\"Smith, J\",x"));
+        let d = Data::from_document(&doc("Name\tCity\nAda\tLondon\n\"Smith, J\",x")).unwrap();
         assert_eq!(d.fields, ["Name", "City"]);
         assert_eq!(d.records[0], ["Ada", "London"]);
         assert_eq!(d.records[1], ["Smith, J", "x"]);
+    }
+
+    #[test]
+    fn data_limits_fields_in_headers_and_later_records() {
+        for delimiter in [",", "\t"] {
+            let accepted = format!("a{}", delimiter.repeat(MAX_DATA_FIELDS_PER_RECORD - 1));
+            assert_eq!(
+                Data::from_document(&doc(&accepted)).unwrap().fields.len(),
+                MAX_DATA_FIELDS_PER_RECORD
+            );
+            let excessive = format!("{accepted}{delimiter}");
+            assert!(
+                Data::from_document(&doc(&excessive))
+                    .unwrap_err()
+                    .contains("fields in one record")
+            );
+            assert!(Data::from_document(&doc(&format!("Name\n{excessive}"))).is_err());
+        }
+        assert!(Data::from_document(&doc(&",".repeat(8192))).is_err());
+        let empty_columns = Data::from_document(&doc("Name\tCity\t\nAda\tLondon\t\n\t\t")).unwrap();
+        assert_eq!(empty_columns.fields, ["Name", "City", ""]);
+        assert_eq!(
+            empty_columns.records,
+            [vec!["Ada", "London", ""], vec!["", "", ""]]
+        );
+        let quoted = format!("\"{}\",\"A\"\"B\"", ",".repeat(8192));
+        let data = Data::from_document(&doc(&quoted)).unwrap();
+        assert_eq!(data.fields, [",".repeat(8192), "A\"B".into()]);
+    }
+
+    #[test]
+    fn data_budgets_are_cumulative_for_text_and_tables() {
+        let text = doc("Name,City\nAda,London");
+        let read = |doc: &Document, cells, bytes| {
+            Data::from_document_with_budget(doc, DataBudget { cells, bytes })
+        };
+        assert!(read(&text, 4, 19).is_ok());
+        assert!(read(&text, 3, 19).unwrap_err().contains("cells"));
+        assert!(read(&text, 4, 18).unwrap_err().contains("text"));
+
+        let mut table = doc("");
+        table.insert_table(crate::StoryId::Main, Position::new(0, 0), 2, 2, 1440);
+        let mut cell_number = 0;
+        for p in &mut table.main.paras {
+            if p.mark == Mark::CellEnd {
+                p.text = format!("c{cell_number}");
+                cell_number += 1;
+            }
+        }
+        assert_eq!(cell_number, 4);
+        let data = read(&table, 4, 8).unwrap();
+        assert_eq!(data.fields, ["c0", "c1"]);
+        assert_eq!(data.records, [vec!["c2", "c3"]]);
+        assert!(read(&table, 3, 8).unwrap_err().contains("cells"));
+        assert!(read(&table, 4, 7).unwrap_err().contains("text"));
+        assert!(Data::from_document(&doc("")).unwrap().fields.is_empty());
     }
 
     #[test]
@@ -511,7 +628,7 @@ mod tests {
             "«DATA people»\nDear «Name»,\n«IF City=\"London\"»See you soon.«ELSE»Write soon.«ENDIF»",
         );
         assert_eq!(data_instruction(&main).unwrap().0, "people");
-        let data = Data::from_document(&doc("Name,City\nAda,London\nBob,Paris"));
+        let data = Data::from_document(&doc("Name,City\nAda,London\nBob,Paris")).unwrap();
         let (out, errors) = merge(&main, &data, None);
         assert!(errors.is_empty(), "{errors:?}");
         let texts: Vec<&str> = out.main.paras.iter().map(|p| p.text.as_str()).collect();
@@ -526,7 +643,7 @@ mod tests {
 
     #[test]
     fn nextif_advances_and_skipif_omits_matching_records() {
-        let data = Data::from_document(&doc("Name,City\nAda,London\nBob,Paris\nCy,Rome"));
+        let data = Data::from_document(&doc("Name,City\nAda,London\nBob,Paris\nCy,Rome")).unwrap();
         let (out, errors) = merge(
             &doc("«DATA people»\n«SKIPIF City=\"Paris\"»«Name»"),
             &data,
@@ -555,7 +672,7 @@ mod tests {
     #[test]
     fn include_inserts_and_merges_another_document() {
         let main = doc("«DATA people»\nBefore\n«INCLUDE \"part.qwp\"»After");
-        let data = Data::from_document(&doc("Name\nAda"));
+        let data = Data::from_document(&doc("Name\nAda")).unwrap();
         let mut names = Vec::new();
         let (out, errors) = merge_with_includes(&main, &data, None, &mut |name| {
             names.push(name.to_string());
@@ -576,7 +693,7 @@ mod tests {
     #[test]
     fn ask_requests_and_reuses_a_response_for_each_record() {
         let main = doc("«DATA people»\n«ASK greeting=?Greeting for this person?»«greeting» «Name»");
-        let data = Data::from_document(&doc("Name\nAda\nBob"));
+        let data = Data::from_document(&doc("Name\nAda\nBob")).unwrap();
         let mut answers = HashMap::new();
         let mut no_includes = |name: &str| Err(format!("unexpected include {name}"));
 

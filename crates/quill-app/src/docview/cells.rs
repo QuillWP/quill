@@ -48,8 +48,37 @@ impl DocView {
         if self.sel.is_empty() {
             return None;
         }
-        let paras = &self.doc.main.paras;
         let (s, e) = self.sel.range();
+        self.block_between(s, e)
+    }
+
+    /// The cells to show as selected: as `cell_block`, and also every cell
+    /// of a table selected whole, whose selection ends just past the table.
+    pub fn selected_cells(&self) -> Option<CellBlock> {
+        self.cell_block().or_else(|| {
+            let (s, e) = self.sel.range();
+            let paras = &self.doc.main.paras;
+            if s == e || e.offset != 0 || e.para == 0 || paras[e.para - 1].mark != Mark::RowEnd {
+                return None;
+            }
+            let block = self.block_between(s, Position::new(e.para - 1, 0))?;
+            block.whole_table(paras).then_some(block)
+        })
+    }
+
+    /// Whether `pos` is in a selected cell. A block of cells runs past the
+    /// range its selection covers, so the range does not say.
+    pub(super) fn in_selected_cells(&self, pos: Position) -> bool {
+        self.selected_cells().is_some_and(|block| {
+            block.rows.iter().any(|row| {
+                row.cell_of(pos.para)
+                    .is_some_and(|k| block.columns(row).contains(&k))
+            })
+        })
+    }
+
+    fn block_between(&self, s: Position, e: Position) -> Option<CellBlock> {
+        let paras = &self.doc.main.paras;
         if !paras[s.para].pap.in_table || !paras[e.para].pap.in_table {
             return None;
         }

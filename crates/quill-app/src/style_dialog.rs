@@ -519,8 +519,12 @@ pub fn describe(doc: &Document, base: Option<StyleId>, pap: &ParaProps, chp: &Ch
             "Border".into()
         });
     }
-    if pap.shading != bp.shading && pap.shading > 0 {
-        parts.push(format!("Shading: {}%", pap.shading as f32 / 10.0));
+    if (pap.shading, pap.shading_color) != (bp.shading, bp.shading_color) {
+        parts.push(match pap.shading_color {
+            Some(color) => format!("Shading: #{:06X}", color.0),
+            None if pap.shading == 0 => "Shading: None".into(),
+            None => format!("Shading: {}%", pap.shading as f32 / 10.0),
+        });
     }
     let body = parts.join(", ");
     match base {

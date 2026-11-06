@@ -283,6 +283,7 @@ impl WinState {
             actions,
             open,
             submenu: None,
+            typed: (String::new(), None),
             opened: Instant::now(),
             held: true,
         });

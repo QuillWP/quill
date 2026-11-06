@@ -722,7 +722,6 @@ pub fn renumber(doc: &mut Document, story: StoryId, first: usize, last: usize, o
 /// with a quarter-inch hanging indent. Paragraphs that already start with
 /// a bullet are left alone.
 pub fn bullet(doc: &mut Document, story: StoryId, first: usize, last: usize) {
-    let quarter = TWIPS_PER_INCH / 4;
     let paras = &doc.story(story).paras;
     let new: Vec<Paragraph> = paras[first..=last]
         .iter()
@@ -731,12 +730,7 @@ pub fn bullet(doc: &mut Document, story: StoryId, first: usize, last: usize) {
             if p.mark == Mark::RowEnd || p.text.starts_with('•') {
                 return q;
             }
-            let chp = q.chp_at(0);
-            q.insert(0, "•\t", chp);
-            if q.pap.first >= 0 {
-                q.pap.left += quarter;
-                q.pap.first = -quarter;
-            }
+            add_list_mark(&mut q, '•');
             q
         })
         .collect();
@@ -744,6 +738,53 @@ pub fn bullet(doc: &mut Document, story: StoryId, first: usize, last: usize) {
         let n = new.len();
         doc.splice(story, first, n, new);
     }
+}
+
+/// Put `mark` and a tab at the start of `p`, with a hanging indent.
+fn add_list_mark(p: &mut Paragraph, mark: char) {
+    let quarter = TWIPS_PER_INCH / 4;
+    let chp = p.chp_at(0);
+    p.insert(0, &format!("{mark}\t"), chp);
+    if p.pap.first >= 0 {
+        p.pap.left += quarter;
+        p.pap.first = -quarter;
+    }
+}
+
+/// How many bytes of `text` are a list paragraph's bullet and its tab, the
+/// two of which act as one thing when editing.
+pub fn list_mark_len(text: &str) -> Option<usize> {
+    let mark = text.chars().next()?;
+    let is_mark = matches!(
+        mark,
+        '•' | '\u{25E6}' | '\u{25AA}' | '\u{25CB}' | '\u{25A0}' | '\u{00B7}' | '-' | '*'
+    );
+    let len = mark.len_utf8();
+    (is_mark && text[len..].starts_with('\t')).then_some(len + 1)
+}
+
+/// Turn the `typed` bytes at the start of paragraph `para` into a list mark.
+pub fn start_list(doc: &mut Document, story: StoryId, para: usize, typed: usize, mark: char) {
+    let mut p = doc.story(story).paras[para].clone();
+    p.remove(0, typed);
+    add_list_mark(&mut p, mark);
+    doc.splice(story, para, 1, vec![p]);
+}
+
+/// Take the list mark and hanging indent off paragraph `para`, keeping its
+/// text. Returns the length of what went.
+pub fn end_list(doc: &mut Document, story: StoryId, para: usize) -> usize {
+    let mut p = doc.story(story).paras[para].clone();
+    let Some(len) = list_mark_len(&p.text) else {
+        return 0;
+    };
+    p.remove(0, len);
+    if p.pap.first < 0 {
+        p.pap.left = (p.pap.left + p.pap.first).max(0);
+        p.pap.first = 0;
+    }
+    doc.splice(story, para, 1, vec![p]);
+    len
 }
 
 /// Insert > Drop Cap: put the first `len` bytes of paragraph `para` in a
@@ -948,6 +989,25 @@ mod tests {
         assert_eq!(texts(&d), ["•\tone", "•\ttwo"]);
         assert_eq!(d.main.paras[0].pap.left, 360);
         assert_eq!(d.main.paras[0].pap.first, -360);
+    }
+
+    #[test]
+    fn list_marks_come_and_go_with_their_indent() {
+        assert_eq!(list_mark_len("•\tone"), Some(4));
+        assert_eq!(list_mark_len("-\tone"), Some(2));
+        assert_eq!(list_mark_len("-one"), None);
+        assert_eq!(list_mark_len("\tone"), None);
+        assert_eq!(list_mark_len(""), None);
+        let mut d = doc(&["* one"]);
+        start_list(&mut d, StoryId::Main, 0, 2, '•');
+        assert_eq!(texts(&d), ["•\tone"]);
+        assert_eq!(d.main.paras[0].pap.first, -360);
+        assert_eq!(end_list(&mut d, StoryId::Main, 0), 4);
+        assert_eq!(texts(&d), ["one"]);
+        assert_eq!(
+            (d.main.paras[0].pap.left, d.main.paras[0].pap.first),
+            (0, 0)
+        );
     }
 
     #[test]

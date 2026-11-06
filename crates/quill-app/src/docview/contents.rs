@@ -138,12 +138,105 @@ impl DocView {
 
     /// Update Table of Contents: make it again now, with the settings it
     /// was made with (or the usual ones), and keep it live.
+    /// What was typed into one made editable goes to its headings first,
+    /// in the same undo step.
     pub fn update_toc(&mut self) {
-        let o = self.doc.props.live_toc.unwrap_or_default();
-        if self.doc.existing_toc().is_none() {
+        let Some(end) = self.doc.existing_toc() else {
             return;
-        }
+        };
+        self.doc.begin("Table of Contents", self.sel);
+        let (o, told) = match self.doc.props.live_toc {
+            Some(o) => (o, None),
+            None => {
+                let o = self.options_of_toc(end);
+                (o, self.headings_from_toc(&o, end))
+            }
+        };
         self.insert_toc(o);
+        self.status = told;
+    }
+
+    /// The settings an editable table of contents was made with, which it
+    /// no longer holds, as its lines show them: the levels of its styles,
+    /// and page numbers if a line has a tab.
+    fn options_of_toc(&self, end: usize) -> TocOptions {
+        let paras = &self.doc.main.paras[..=end];
+        let level = |p: &Paragraph| self.doc.styles.toc_level(p.pap.style);
+        let levels = || paras.iter().filter_map(level);
+        TocOptions {
+            page_numbers: paras.iter().any(|p| p.text.contains(chars::TAB)),
+            from: levels().min().unwrap_or(1),
+            to: levels().max().unwrap_or(9),
+            ..TocOptions::default()
+        }
+    }
+
+    /// Give each heading the text of its line in an editable table of
+    /// contents, changing only the words that differ, so a footnote mark or
+    /// hidden text in a heading stays. Lines and headings are matched in
+    /// order, so with lines added or removed nothing can be matched and
+    /// the headings stay. Returns what to tell the person, if anything.
+    fn headings_from_toc(&mut self, o: &TocOptions, end: usize) -> Option<String> {
+        let entries = self.doc.toc_entries(o);
+        if entries.len() != end + 1 {
+            return Some("Lines were added or removed, so the headings were left alone.".into());
+        }
+        let lines: Vec<String> = self.doc.main.paras[..=end]
+            .iter()
+            .map(|p| match p.text.rsplit_once(chars::TAB) {
+                Some((text, _)) if o.page_numbers => text.trim().to_string(),
+                _ => p.text.trim().to_string(),
+            })
+            .collect();
+        let mut changed = 0;
+        for (entry, line) in entries.iter().zip(&lines) {
+            if line.is_empty() || *line == entry.text {
+                continue;
+            }
+            let para = entry.at.para;
+            let chars = quill_core::contents::visible_chars(&self.doc.main.paras[para]);
+            let new: Vec<char> = line.chars().collect();
+            let Some(&(_, first)) = chars.first() else {
+                continue;
+            };
+            let same = |a: &(char, usize), b: &char| a.0 == *b;
+            let front = chars
+                .iter()
+                .zip(&new)
+                .take_while(|(a, b)| same(a, b))
+                .count();
+            let room = chars.len().min(new.len()) - front;
+            let back = chars
+                .iter()
+                .rev()
+                .zip(new.iter().rev())
+                .take(room)
+                .take_while(|(a, b)| same(a, b))
+                .count();
+            let text = &self.doc.main.paras[para].text;
+            let after = |k: usize| {
+                let (_, at) = chars[k];
+                at + text[at..].chars().next().map_or(0, char::len_utf8)
+            };
+            let start = if front > 0 { after(front - 1) } else { first };
+            let stop = if chars.len() > front + back {
+                after(chars.len() - back - 1)
+            } else {
+                start
+            };
+            let chp = self.doc.main.paras[para].chp_at(start);
+            let at = Position::new(para, start);
+            if stop > start {
+                self.doc.delete(MAIN, at, Position::new(para, stop));
+            }
+            let words: String = new[front..new.len() - back].iter().collect();
+            self.doc.insert_text(MAIN, at, &words, chp);
+            changed += 1;
+        }
+        (changed > 0).then(|| match changed {
+            1 => "1 heading changed to match.".to_string(),
+            n => format!("{n} headings changed to match."),
+        })
     }
 
     /// Make Editable: the table of contents becomes ordinary text, kept
@@ -314,6 +407,173 @@ mod tests {
     use super::*;
 
     #[test]
+    fn editable_contents_updates_six_heading_levels_and_undoes_together() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        for (title_case, page_numbers) in
+            [(false, true), (true, true), (false, false), (true, false)]
+        {
+            let mut doc =
+                quill_core::text::from_plain_text("First\nSecond\nThird\nFourth\nFifth\nSixth");
+            for level in 1..=6 {
+                let id = doc.styles.find(&format!("heading {level}")).unwrap();
+                doc.apply_style(MAIN, level - 1, level - 1, id);
+                if title_case {
+                    doc.styles.styles[id as usize].name = format!("Heading {level}");
+                    let id = doc.styles.find(&format!("toc {level}")).unwrap();
+                    doc.styles.styles[id as usize].name = format!("TOC {level}");
+                }
+            }
+            doc.forget_history();
+            let mut v = DocView::new(doc, "Six levels".into());
+            v.update_layout(&mut fonts);
+            v.insert_toc(TocOptions {
+                to: 6,
+                page_numbers,
+                ..TocOptions::default()
+            });
+            v.update_layout(&mut fonts);
+            assert_eq!(v.doc.existing_toc(), Some(5), "title_case={title_case}");
+            v.make_toc_editable();
+            for level in 1..=6 {
+                let para = level - 1;
+                let tab = v.doc.main.paras[para]
+                    .text
+                    .find(chars::TAB)
+                    .unwrap_or(v.doc.main.paras[para].len());
+                let chp = v.doc.main.paras[para].chp_at(0);
+                v.doc.begin("Edit contents", v.sel);
+                v.doc
+                    .delete(MAIN, Position::new(para, 0), Position::new(para, tab));
+                v.doc.insert_text(
+                    MAIN,
+                    Position::new(para, 0),
+                    &format!("Renamed level {level}"),
+                    chp,
+                );
+                v.doc.commit(v.sel);
+            }
+            if title_case {
+                let bytes = quill_formats::native::write(&v.doc, 0);
+                v = DocView::new(
+                    quill_formats::native::read(&bytes).unwrap(),
+                    "Reopened contents".into(),
+                );
+                v.update_layout(&mut fonts);
+            }
+            v.update_toc();
+            v.update_layout(&mut fonts);
+            let options = v.doc.props.live_toc.unwrap();
+            assert_eq!(options.to, 6);
+            assert_eq!(options.page_numbers, page_numbers);
+            for level in 1..=6 {
+                assert_eq!(
+                    v.doc.main.paras[5 + level].text,
+                    format!("Renamed level {level}")
+                );
+                let line = &v.doc.main.paras[level - 1].text;
+                let title = line
+                    .split_once(chars::TAB)
+                    .map_or(line.as_str(), |(title, _)| title);
+                assert_eq!(title, format!("Renamed level {level}"));
+            }
+            assert_eq!(v.status.as_deref(), Some("6 headings changed to match."));
+            v.doc.undo();
+            assert!(v.doc.props.live_toc.is_none());
+            assert_eq!(v.doc.main.paras[11].text, "Sixth");
+            assert!(v.doc.main.paras[5].text.starts_with("Renamed level 6"));
+            v.doc.redo();
+            v.update_layout(&mut fonts);
+            assert_eq!(v.doc.main.paras[11].text, "Renamed level 6");
+            v.sel = Selection::caret(Position::new(11, 0));
+            v.type_text("Live ");
+            v.update_layout(&mut fonts);
+            assert!(v.doc.main.paras[5].text.starts_with("Live Renamed level 6"));
+        }
+    }
+
+    #[test]
+    fn every_level_of_an_editable_contents_reaches_its_heading() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut doc = quill_core::text::from_plain_text("One\ntext\nTwo\tParts");
+        let (h1, h2) = (
+            doc.styles.find("heading 1").unwrap(),
+            doc.styles.find("heading 2").unwrap(),
+        );
+        doc.apply_style(MAIN, 0, 0, h1);
+        doc.apply_style(MAIN, 2, 2, h2);
+        doc.forget_history();
+        let mut v = DocView::new(doc, "T".into());
+        v.update_layout(&mut fonts);
+        // Only the first two levels, which Make Editable forgets.
+        v.insert_toc(TocOptions {
+            to: 2,
+            ..TocOptions::default()
+        });
+        v.update_layout(&mut fonts);
+        v.make_toc_editable();
+        // The second line, the heading with a tab in it.
+        assert!(v.doc.main.paras[1].text.starts_with("Two Parts\t"));
+        let chp = v.doc.main.paras[1].chp_at(4);
+        v.doc.begin("t", v.sel);
+        v.doc.delete(MAIN, Position::new(1, 4), Position::new(1, 9));
+        v.doc.insert_text(MAIN, Position::new(1, 4), "Pieces", chp);
+        let sel = v.sel;
+        v.doc.commit(sel);
+        v.update_toc();
+        v.update_layout(&mut fonts);
+        let texts: Vec<&str> = v.doc.main.paras.iter().map(|p| p.text.as_str()).collect();
+        assert!(texts.contains(&"Two\tPieces"), "{texts:?}");
+        assert_eq!(v.doc.props.live_toc.unwrap().to, 2);
+        assert_eq!(v.status.as_deref(), Some("1 heading changed to match."));
+    }
+
+    #[test]
+    fn text_typed_in_an_editable_contents_reaches_its_heading() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut doc = quill_core::text::from_plain_text("First\nBody\nSecond");
+        let h1 = doc.styles.find("heading 1").unwrap();
+        doc.apply_style(MAIN, 0, 0, h1);
+        doc.apply_style(MAIN, 2, 2, h1);
+        doc.forget_history();
+        let mut v = DocView::new(doc, "T".into());
+        v.update_layout(&mut fonts);
+        v.insert_toc(TocOptions::default());
+        v.update_layout(&mut fonts);
+        v.make_toc_editable();
+        let end = v.doc.existing_toc().unwrap();
+        assert_eq!(end, 1);
+        // Change the first line, not its page number.
+        let tab = v.doc.main.paras[0].text.find(chars::TAB).unwrap();
+        v.doc.begin("t", v.sel);
+        v.doc
+            .delete(MAIN, Position::new(0, 0), Position::new(0, tab));
+        let chp = v.doc.main.paras[0].chp_at(0);
+        v.doc.insert_text(MAIN, Position::new(0, 0), "Opening", chp);
+        let sel = v.sel;
+        v.doc.commit(sel);
+
+        let texts = |v: &DocView| -> Vec<String> {
+            v.doc.main.paras.iter().map(|p| p.text.clone()).collect()
+        };
+        v.update_toc();
+        v.update_layout(&mut fonts);
+        assert!(texts(&v).contains(&"Opening".to_string()));
+        assert!(!texts(&v).contains(&"First".to_string()));
+        assert!(texts(&v).contains(&"Second".to_string()));
+        assert!(v.doc.props.live_toc.is_some());
+        assert_eq!(v.status.as_deref(), Some("1 heading changed to match."));
+        // One Undo puts the heading back.
+        v.doc.undo();
+        assert!(texts(&v).contains(&"First".to_string()));
+    }
+
+    #[test]
     fn table_of_contents_is_one_undo_step() {
         let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
             return;
@@ -414,7 +674,7 @@ mod tests {
         assert_eq!(toc(&v), "Chaxyzpter One\t1");
         v.exec(crate::commands::Cmd::UpdateToc, false, &mut clip);
         v.update_layout(&mut fonts);
-        assert_eq!(toc(&v), "Chapter One\t1");
+        assert_eq!(toc(&v), "Chaxyzpter One\t1");
         assert!(v.doc.props.live_toc.is_some());
 
         // Deleted, it is gone for good: nothing brings it back.
@@ -426,7 +686,7 @@ mod tests {
         v.exec(crate::commands::Cmd::Clear, false, &mut clip);
         v.update_layout(&mut fonts);
         assert!(v.doc.props.live_toc.is_none());
-        assert_eq!(v.doc.main.paras[0].text, "Chapter One");
+        assert_eq!(v.doc.main.paras[0].text, "Chaxyzpter One");
     }
 
     #[test]

@@ -7,7 +7,9 @@ use std::fmt::Write as _;
 
 pub use crate::html_read::{is_html, read_clipboard, read_file};
 use quill_core::para::{Paragraph, chars};
-use quill_core::props::{Align, BorderStyle, CharProps, LineSpacing, ParaProps, Underline};
+use quill_core::props::{
+    Align, BorderLine, BorderStyle, CharProps, LineSpacing, ParaProps, Rgb, Underline,
+};
 
 fn css_string(s: &str) -> String {
     let mut out = String::new();
@@ -136,7 +138,12 @@ fn paragraph_css(p: &ParaProps) -> String {
         if p.keep_together { "avoid" } else { "auto" }
     );
     let gray = 255 - (255u32 * p.shading.min(1000) as u32 / 1000);
-    let _ = write!(out, "background-color:#{gray:02x}{gray:02x}{gray:02x};");
+    let color = p.shading_color.map_or(gray * 0x010101, |c| c.0);
+    if p.shading_color.is_some() || p.shading > 0 {
+        let _ = write!(out, "background-color:#{color:06x};");
+    } else {
+        out.push_str("background-color:transparent;");
+    }
     for (edge, line) in [
         ("top", p.borders.top),
         ("right", p.borders.right),
@@ -146,21 +153,26 @@ fn paragraph_css(p: &ParaProps) -> String {
         let _ = write!(
             out,
             "border-{edge}:{};padding-{edge}:{}pt;",
-            border_css(line.style),
+            border_css(&line),
             points(line.space)
         );
     }
     out
 }
 
-fn border_css(style: BorderStyle) -> &'static str {
-    match style {
-        BorderStyle::None => "none",
+fn border_css(line: &BorderLine) -> String {
+    let kind = match line.style {
+        BorderStyle::None => return "none".to_string(),
         BorderStyle::Dotted => "0.5pt dotted",
         BorderStyle::Hairline => "0.25pt solid",
         BorderStyle::Single => "0.5pt solid",
         BorderStyle::Thick => "1.5pt solid",
         BorderStyle::Double => "1.5pt double",
+    };
+    if line.color == Rgb::BLACK {
+        kind.to_string()
+    } else {
+        format!("{kind} #{:06x}", line.color.0 & 0xFF_FFFF)
     }
 }
 
@@ -172,7 +184,7 @@ fn cell_css(cell: &quill_core::props::CellProps) -> String {
     let mut out = String::new();
     if b.top.style == b.bottom.style && b.top.style == b.left.style && b.top.style == b.right.style
     {
-        let _ = write!(out, ";border:{}", border_css(b.top.style));
+        let _ = write!(out, ";border:{}", border_css(&b.top));
     } else {
         for (edge, line) in [
             ("top", b.top),
@@ -180,10 +192,12 @@ fn cell_css(cell: &quill_core::props::CellProps) -> String {
             ("bottom", b.bottom),
             ("left", b.left),
         ] {
-            let _ = write!(out, ";border-{edge}:{}", border_css(line.style));
+            let _ = write!(out, ";border-{edge}:{}", border_css(&line));
         }
     }
-    if cell.shading > 0 {
+    if let Some(color) = cell.shading_color {
+        let _ = write!(out, ";background-color:#{:06x}", color.0);
+    } else if cell.shading > 0 {
         let gray = 255 - (255u32 * cell.shading.min(1000) as u32 / 1000);
         let _ = write!(out, ";background-color:#{gray:02x}{gray:02x}{gray:02x}");
     }

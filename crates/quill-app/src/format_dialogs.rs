@@ -65,6 +65,10 @@ pub enum Which {
     ReviewChanges,
     Footnote,
     Hyperlink(crate::link_dialog::LinkState),
+    /// The picture's size and crop.
+    Picture(crate::picture_dialog::PictureState),
+    /// A page of Replace Missing Fonts.
+    ReplaceFonts(crate::replace_fonts::ReplaceState),
     Renumber,
     /// The clipboard's text.
     Clipboard(String),
@@ -149,6 +153,7 @@ pub fn changed(which: &mut Which, d: &mut Dialog, view: &DocView, id: &str) {
     match which {
         Which::Style(st) => crate::style_dialog::changed(st, d, view, id),
         Which::Character(_) => character_changed(d, id),
+        Which::Border(st) if id == "applyto" => border_dialog::target_changed(st, d, view),
         Which::Border(st) => border_dialog::changed(st, d, id),
         Which::Section if id == "margin_numbers" => page_dialogs::margin_numbers_changed(d),
         Which::Toc | Which::Index => crate::contents_dialogs::level_changed(d, id),
@@ -435,6 +440,8 @@ fn build_character(
     };
     d.field("sp_by", &by, 296.0, 218.0, 66.0);
     d.focus("size");
+    // Left over if a window closed under its dialog.
+    crate::palette::drop_edits();
     (d, Which::Character(c))
 }
 
@@ -703,15 +710,13 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
     match which {
         Which::Style(st) => crate::style_dialog::apply(st, d, view),
         Which::Reapply(id) => crate::style_dialog::reapply_ok(*id, d, view),
+        Which::ReplaceFonts(st) => crate::replace_fonts::apply(st, d, view),
         Which::Character(base) => {
             let Some(target) = read_character(d, base, view) else {
                 return false;
             };
             let base = *base;
-            // A color chosen is a color used: the palette keeps it.
-            if target.color != base.color {
-                crate::palette::remember_used(target.color);
-            }
+            crate::palette::drop_edits();
             view.format_chars("Formatting", move |c| {
                 macro_rules! changed {
                     ($($f:ident),*) => { $( if target.$f != base.$f { c.$f = target.$f; } )* };
@@ -776,6 +781,7 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
         | Which::ReviewChanges
         | Which::Footnote
         | Which::Hyperlink(_)
+        | Which::Picture(_)
         | Which::Spelling(_)
         | Which::PrintMerge
         | Which::PrintMergeAsk(..)

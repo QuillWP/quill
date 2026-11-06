@@ -132,6 +132,8 @@ pub struct PopItem {
     pub selected: bool,
     /// A button's text; empty for a box.
     pub label: &'static str,
+    /// What the pointer shows over it.
+    pub tip: Option<String>,
 }
 
 pub struct Dialog {

@@ -15,6 +15,10 @@ const LIST: Rect = Rect {
     w: 226.0,
     h: 146.0,
 };
+/// Shown in the Keys list for a command with none. Not a key: `st.keys`
+/// stays empty, so nothing can select it or remove it.
+pub const NO_SHORTCUT: &str = "No shortcut assigned";
+
 const KEYS: Rect = Rect {
     x: 245.0,
     y: 180.0,
@@ -85,6 +89,16 @@ pub fn describe(cmd: Cmd) -> String {
         InsertRowBelow => "Inserts a row below the selected rows, across the whole table.",
         InsertColumnLeft => "Inserts a column left of the selected cells, in every row.",
         InsertColumnRight => "Inserts a column right of the selected cells, in every row.",
+        InsertCellBefore => "Inserts a cell before the selected cells, in those rows only.",
+        InsertCellAfter => "Inserts a cell after the selected cells, in those rows only.",
+        DeleteRows => "Deletes the rows holding the selected cells.",
+        DeleteColumns => "Deletes the columns holding the selected cells.",
+        DeleteCells => "Deletes the selected cells, moving the rest of each row left.",
+        MergeCells => "Merges the selected cells of each row into one.",
+        SplitCell => "Splits each selected cell in two.",
+        ReplaceFonts => {
+            "Chooses installed fonts for the fonts this document uses that are missing."
+        }
         ConvertToTable => {
             "Turns the selected tab or comma separated lines into a table, one line to a row."
         }
@@ -206,12 +220,15 @@ pub fn native_rows(d: &Dialog, id: &str) -> Vec<String> {
             .into_iter()
             .map(|cmd| cmd.name().to_string())
             .collect(),
-        "keys" => chosen
-            .map(keys_for)
-            .unwrap_or_default()
-            .iter()
-            .map(|key| crate::commands::display_key(key))
-            .collect(),
+        "keys" => match chosen {
+            Some(cmd) if keys_for(cmd).is_empty() => vec![NO_SHORTCUT.to_string()],
+            cmd => cmd
+                .map(keys_for)
+                .unwrap_or_default()
+                .iter()
+                .map(|key| crate::commands::display_key(key))
+                .collect(),
+        },
         _ => Vec::new(),
     }
 }
@@ -452,12 +469,15 @@ pub fn draw(st: &CommandsState, id: &str, r: Rect, c: &mut Canvas, label: &mut L
             st.list.draw(c, label, r, &rows);
         }
         "keys" => {
-            let keys: Vec<String> = chosen(st)
+            let mut keys: Vec<String> = chosen(st)
                 .map(keys_for)
                 .unwrap_or_default()
                 .iter()
                 .map(|key| crate::commands::display_key(key))
                 .collect();
+            if keys.is_empty() && chosen(st).is_some() {
+                keys.push(NO_SHORTCUT.to_string());
+            }
             let rows: Vec<Row> = keys
                 .iter()
                 .map(|k| Row {

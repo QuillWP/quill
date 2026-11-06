@@ -253,6 +253,17 @@ pub struct DocumentProps {
     /// and page numbers up to date, made with these settings. None once it
     /// is made editable, or when there is none.
     pub live_toc: Option<crate::contents::TocOptions>,
+    /// The view the document was saved in, to open it in again. None for
+    /// a new document, or a file that does not say.
+    pub view: Option<SavedView>,
+}
+
+/// A view a document can be saved in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SavedView {
+    Normal,
+    Outline,
+    PageLayout,
 }
 
 impl Default for DocumentProps {
@@ -279,6 +290,7 @@ impl Default for DocumentProps {
             footnote_start: 1,
             track_changes: false,
             live_toc: None,
+            view: None,
         }
     }
 }
@@ -2185,6 +2197,32 @@ impl Document {
         Position::new(at.para + 1, 0)
     }
 
+    /// Replace Fonts: text and styles in any font of `from` take font `to`.
+    /// Call it with a step open. Undo restores the text and styles of the
+    /// body, notes and annotations. Headers and footers change outside it,
+    /// since a section sharing one with the section before would otherwise
+    /// be given its own copy.
+    pub fn replace_font(&mut self, from: &[u16], to: u16) {
+        let fix = |c: &mut CharProps| {
+            if from.contains(&c.font) {
+                c.font = to;
+            }
+        };
+        self.record_sheet();
+        self.styles.styles.iter_mut().for_each(|s| fix(&mut s.chp));
+        for story in [StoryId::Main, StoryId::Notes, StoryId::Annotations] {
+            let last = self.story(story).paras.len() - 1;
+            let end = Position::new(last, self.story(story).paras[last].len());
+            self.format_chars(story, Position::new(0, 0), end, fix);
+        }
+        for story in &mut self.headers {
+            for p in &mut story.paras {
+                p.runs.iter_mut().for_each(|r| fix(&mut r.chp));
+                fix(&mut p.mark_chp);
+            }
+        }
+    }
+
     // ----- the style sheet -----
 
     /// Save the style sheet in the open undo step, before changing it.
@@ -2368,9 +2406,12 @@ fn restyle_pap(p: &ParaProps, old: &ParaProps, new: &ParaProps) -> ParaProps {
         keep_with_next,
         keep_together,
         suppress_line_numbers,
-        borders,
-        shading
+        borders
     );
+    if (p.shading, p.shading_color) == (old.shading, old.shading_color) {
+        out.shading = new.shading;
+        out.shading_color = new.shading_color;
+    }
     out
 }
 
@@ -2907,6 +2948,35 @@ mod tests {
         assert_eq!(d.styles.styles.len(), n);
         d.redo();
         assert_eq!(d.styles.find("Quote"), Some(id));
+    }
+
+    #[test]
+    fn redefining_shading_keeps_direct_fills_and_gray_overrides() {
+        let mut d = doc_with(&["Style", "Direct color", "Direct gray"]);
+        d.main.paras[1].pap.shading_color = Some(crate::Rgb(0x123456));
+        d.main.paras[2].pap.shading = 250;
+        let mut pap = d.styles.get(0).pap.clone();
+        pap.shading_color = Some(crate::Rgb(0xEBF0FA));
+        d.begin("Style", Selection::default());
+        d.redefine_style(MAIN, 0, pap, d.styles.get(0).chp);
+        d.commit(Selection::default());
+        assert_eq!(
+            d.main.paras[0].pap.shading_color,
+            Some(crate::Rgb(0xEBF0FA))
+        );
+        assert_eq!(
+            d.main.paras[1].pap.shading_color,
+            Some(crate::Rgb(0x123456))
+        );
+        assert_eq!(d.main.paras[2].pap.shading_color, None);
+        assert_eq!(d.main.paras[2].pap.shading, 250);
+        d.undo();
+        assert_eq!(d.main.paras[0].pap.shading_color, None);
+        d.redo();
+        assert_eq!(
+            d.main.paras[0].pap.shading_color,
+            Some(crate::Rgb(0xEBF0FA))
+        );
     }
 
     #[test]

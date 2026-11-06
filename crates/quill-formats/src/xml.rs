@@ -9,6 +9,19 @@ use quick_xml::events::{BytesStart, Event};
 const MAX_XML_BYTES: usize = 512 * 1024 * 1024;
 const MAX_XML_DEPTH: usize = 256;
 const MAX_XML_NODES: usize = 16_000_000;
+// Bound per-element bookkeeping (including duplicate-name checks), and
+// charge raw attribute bytes before decoding or copying their strings.
+const MAX_ELEMENT_ATTRIBUTES: usize = 256;
+const MAX_ELEMENT_ATTRIBUTE_BYTES: usize = 1024 * 1024;
+const MAX_ATTRIBUTE_BYTES: usize = 128 * 1024 * 1024;
+
+fn add_nodes(nodes: &mut usize, count: usize, max: usize) -> Result<(), String> {
+    *nodes = nodes
+        .checked_add(count)
+        .filter(|&n| n <= max)
+        .ok_or_else(|| "XML document has too many nodes".to_string())?;
+    Ok(())
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct Element {
@@ -33,9 +46,27 @@ fn local(s: &str) -> String {
 // unescape_value is deprecated in favour of an XML-version-aware call; it
 // does exactly what .docx needs.
 #[allow(deprecated)]
-fn start(e: &BytesStart) -> Result<Element, String> {
+fn start(
+    e: &BytesStart,
+    nodes: &mut usize,
+    max_nodes: usize,
+    attribute_bytes: &mut usize,
+) -> Result<Element, String> {
+    let bytes = e.attributes_raw().len();
+    if bytes > MAX_ELEMENT_ATTRIBUTE_BYTES {
+        return Err("XML element has too many attribute bytes".into());
+    }
+    *attribute_bytes = attribute_bytes
+        .checked_add(bytes)
+        .filter(|&n| n <= MAX_ATTRIBUTE_BYTES)
+        .ok_or_else(|| "XML document has too many attribute bytes".to_string())?;
+    add_nodes(nodes, 1, max_nodes)?;
     let mut attrs = Vec::new();
-    for attr in e.attributes() {
+    for (index, attr) in e.attributes().enumerate() {
+        if index >= MAX_ELEMENT_ATTRIBUTES {
+            return Err("XML element has too many attributes".into());
+        }
+        add_nodes(nodes, 1, max_nodes)?;
         let attr = attr.map_err(|e| format!("XML attribute error: {e}"))?;
         let value = attr
             .unescape_value()
@@ -68,13 +99,7 @@ fn parse_with_limits(
     let mut stack: Vec<Element> = vec![Element::default()];
     let mut buf = Vec::new();
     let mut nodes = 0usize;
-    let add_nodes = |nodes: &mut usize, count: usize| -> Result<(), String> {
-        *nodes = nodes
-            .checked_add(count)
-            .filter(|&n| n <= max_nodes)
-            .ok_or_else(|| "XML document has too many nodes".to_string())?;
-        Ok(())
-    };
+    let mut attribute_bytes = 0usize;
     // Text, character references and CDATA next to each other are one
     // text node, counted once: "a &lt; b" is one piece of text, not three.
     let add_text = |nodes: &mut usize, el: &mut Element, text: &str| -> Result<(), String> {
@@ -85,7 +110,7 @@ fn parse_with_limits(
             last.push_str(text);
             return Ok(());
         }
-        add_nodes(nodes, 1)?;
+        add_nodes(nodes, 1, max_nodes)?;
         el.children.push(Node::Text(text.to_string()));
         Ok(())
     };
@@ -95,16 +120,14 @@ fn parse_with_limits(
                 if stack.len() > max_depth {
                     return Err("XML document is nested too deeply".into());
                 }
-                let el = start(&e)?;
-                add_nodes(&mut nodes, 1 + el.attrs.len())?;
+                let el = start(&e, &mut nodes, max_nodes, &mut attribute_bytes)?;
                 stack.push(el);
             }
             Ok(Event::Empty(e)) => {
                 if stack.len() > max_depth {
                     return Err("XML document is nested too deeply".into());
                 }
-                let el = start(&e)?;
-                add_nodes(&mut nodes, 1 + el.attrs.len())?;
+                let el = start(&e, &mut nodes, max_nodes, &mut attribute_bytes)?;
                 stack.last_mut().unwrap().children.push(Node::Element(el));
             }
             Ok(Event::End(_)) => {
@@ -271,6 +294,53 @@ mod tests {
         assert!(parse_with_limits(b"<a><b><c/></b></a>", 100, 2, 100).is_err());
         assert!(parse_with_limits(b"<a><b/><c/></a>", 100, 10, 2).is_err());
         assert!(parse_with_limits(b"<root/>", 6, 10, 10).is_err());
+    }
+
+    #[test]
+    fn rejects_attributes_before_decoding_when_node_budget_is_exhausted() {
+        for xml in [
+            br#"<root a="ok" b="&bad;"/>"#.as_slice(),
+            br#"<root a="ok" b="&bad;"></root>"#.as_slice(),
+        ] {
+            assert_eq!(
+                parse_with_limits(xml, 100, 10, 2).unwrap_err(),
+                "XML document has too many nodes"
+            );
+        }
+        assert!(parse_with_limits(b"<r><a x='1'/><b y='2'/></r>", 100, 10, 5).is_ok());
+        assert!(parse_with_limits(b"<r><a x='1'/><b y='2'/></r>", 100, 10, 4).is_err());
+    }
+
+    #[test]
+    fn bounds_attribute_count_and_bytes_before_copying() {
+        let attrs: String = (0..MAX_ELEMENT_ATTRIBUTES)
+            .map(|i| format!(" a{i}='v'"))
+            .collect();
+        assert!(parse(format!("<r{attrs}/>").as_bytes()).is_ok());
+        let too_many = format!("<r{attrs} extra='&bad;'/>");
+        assert_eq!(
+            parse(too_many.as_bytes()).unwrap_err(),
+            "XML element has too many attributes"
+        );
+        let oversized = format!("<r a='{}'/>", "x".repeat(MAX_ELEMENT_ATTRIBUTE_BYTES));
+        assert_eq!(
+            parse(oversized.as_bytes()).unwrap_err(),
+            "XML element has too many attribute bytes"
+        );
+        let e = BytesStart::from_content("r a='&bad;'", 1);
+        let mut total = MAX_ATTRIBUTE_BYTES - e.attributes_raw().len();
+        let mut nodes = 0;
+        // The last bytes fit, so decoding still reports the malformed value.
+        assert!(
+            start(&e, &mut nodes, 10, &mut total)
+                .unwrap_err()
+                .contains("value error")
+        );
+        assert_eq!(total, MAX_ATTRIBUTE_BYTES);
+        assert_eq!(
+            start(&e, &mut nodes, 10, &mut total).unwrap_err(),
+            "XML document has too many attribute bytes"
+        );
     }
 
     #[test]

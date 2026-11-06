@@ -31,6 +31,8 @@ mod link_dialog;
 mod listbox;
 mod local_dictionary;
 #[cfg(target_os = "macos")]
+mod mac_alert;
+#[cfg(target_os = "macos")]
 #[cfg(target_os = "macos")]
 mod mac_dialog;
 #[cfg(target_os = "macos")]
@@ -60,6 +62,7 @@ mod pane;
 mod paste_special;
 mod pdf;
 mod pdf_font;
+mod picture_dialog;
 use quill_formats::png;
 mod app_menus;
 mod format_dialogs;
@@ -68,6 +71,7 @@ mod print_job;
 mod recent;
 mod recovery;
 mod regional;
+mod replace_fonts;
 mod review_dialog;
 mod settings;
 mod spellcheck;
@@ -85,15 +89,26 @@ use quill_layout::Catalog;
 use winit::event_loop::EventLoop;
 
 fn main() {
-    if std::env::args().any(|a| a == "--version") {
-        println!("Quill {}", env!("CARGO_PKG_VERSION"));
-        return;
+    let args: Vec<String> = std::env::args().collect();
+    match check_options(&args[1..]) {
+        Options::Run => {}
+        Options::Version => {
+            println!("Quill {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Options::Help => {
+            print!("{USAGE}");
+            return;
+        }
+        Options::Unknown(option) => {
+            eprint!("quill: unknown option {option}\n{USAGE}");
+            std::process::exit(2);
+        }
     }
     // Tracked changes are signed with Preferences' Your Name and dated in
     // local time, as Word does.
     quill_core::revision::set_author_source(|| settings::with(|s| s.name.clone()));
     quill_core::revision::set_clock(|| clock::now().change_date());
-    let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--snapshot") {
         snapshot(&args[i + 1..]);
         return;
@@ -138,6 +153,40 @@ fn main() {
     }
 }
 
+const USAGE: &str = "\
+usage: quill [FILE...]
+       quill --snapshot out.png [--size WxH] [--scale N] [--open FILE] [--script STEPS] [--settings FILE]
+
+  -h, --help    show this message
+  --version     show the version
+";
+
+/// What the command line asks for, before anything starts up.
+#[derive(Debug, PartialEq)]
+enum Options {
+    Run,
+    Version,
+    Help,
+    Unknown(String),
+}
+
+/// Read the options. `--snapshot` takes the rest of the line as its own, and
+/// older Macs pass `-psn_...` to an app started from the Finder.
+fn check_options(args: &[String]) -> Options {
+    for arg in args {
+        match arg.as_str() {
+            "--snapshot" => break,
+            "--version" => return Options::Version,
+            "-h" | "--help" => return Options::Help,
+            a if a.starts_with('-') && !a.starts_with("-psn_") => {
+                return Options::Unknown(arg.clone());
+            }
+            _ => {}
+        }
+    }
+    Options::Run
+}
+
 /// `quill --snapshot out.png [--size 720x820] [--scale 2] [--open file]
 /// [--script steps] [--settings file]`: draw a window offscreen. See
 /// `app::snapshot`. `--settings` draws with a settings file's values
@@ -175,4 +224,30 @@ fn snapshot(args: &[String]) {
     }
     let script = opt("--script").cloned().unwrap_or_default();
     app::snapshot(std::path::Path::new(out), w, h, scale, doc, &script);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(args: &[&str]) -> Options {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        check_options(&args)
+    }
+
+    #[test]
+    fn options() {
+        assert_eq!(check(&[]), Options::Run);
+        assert_eq!(check(&["a.qwp", "b.docx"]), Options::Run);
+        assert_eq!(check(&["-psn_0_12345"]), Options::Run);
+        assert_eq!(check(&["--version"]), Options::Version);
+        assert_eq!(check(&["--help"]), Options::Help);
+        assert_eq!(check(&["a.qwp", "-h"]), Options::Help);
+        assert_eq!(check(&["--nope"]), Options::Unknown("--nope".into()));
+        // The snapshot's own options are its business.
+        assert_eq!(
+            check(&["--snapshot", "o.png", "--size", "9x9"]),
+            Options::Run
+        );
+    }
 }

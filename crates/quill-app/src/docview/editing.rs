@@ -32,6 +32,7 @@ impl DocView {
         self.finish_edit(Selection::caret(end));
         if text == " " {
             self.auto_link(at);
+            self.auto_list(at);
         }
         match &mut self.repeat {
             Some(Repeatable::Text(t)) => t.push_str(&text),
@@ -93,6 +94,21 @@ impl DocView {
                 false
             }
             None => true,
+        }
+    }
+
+    /// Say in the status line which fonts pasted text gave up.
+    fn note_dropped_fonts(&mut self, dropped: &[String], font: &str) {
+        if self.status.is_none() && !dropped.is_empty() {
+            let names = dropped.join(", ");
+            let verb = if dropped.len() == 1 {
+                "isn't"
+            } else {
+                "aren't"
+            };
+            self.status = Some(format!(
+                "{names} {verb} installed, so the pasted text is in {font}."
+            ));
         }
     }
 
@@ -275,6 +291,7 @@ impl DocView {
             self.doc.main.prev_char(self.revision_edge(from, false))
         };
         let next = self.revision_edge(next, true);
+        let next = self.past_list_mark(next, forward);
         if extend {
             self.sel.anchor = self.revision_edge(self.sel.anchor, true);
         }
@@ -432,6 +449,13 @@ impl DocView {
             InsertRowBelow => crate::table_dialogs::insert_rows(self, true),
             InsertColumnLeft => crate::table_dialogs::insert_columns(self, false),
             InsertColumnRight => crate::table_dialogs::insert_columns(self, true),
+            InsertCellBefore => crate::table_dialogs::change_cells(self, "insert", "cells"),
+            InsertCellAfter => crate::table_dialogs::change_cells(self, "after", "cells"),
+            DeleteRows => crate::table_dialogs::change_cells(self, "delete", "row"),
+            DeleteColumns => crate::table_dialogs::change_cells(self, "delete", "column"),
+            DeleteCells => crate::table_dialogs::change_cells(self, "delete", "cells"),
+            MergeCells => crate::table_dialogs::change_cells(self, "merge", "cells"),
+            SplitCell => crate::table_dialogs::change_cells(self, "split", "cells"),
             ConvertToTable => crate::table_dialogs::convert_command(self),
             UpdateToc => self.update_toc(),
             MakeTocEditable => self.make_toc_editable(),
@@ -451,6 +475,13 @@ impl DocView {
             SplitWindow => return Effect::Split,
             InsertFootnote => return Effect::Dialog(DialogId::Footnote),
             Hyperlink => return Effect::Dialog(DialogId::Hyperlink),
+            PictureProperties if self.selected_picture().is_some() => {
+                return Effect::Dialog(DialogId::Picture);
+            }
+            PictureProperties => {}
+            CropInPlace => self.crop_in_place(true),
+            ResizeInPlace => self.crop_in_place(false),
+            ReplaceFonts => return Effect::ReplaceFonts,
             RemoveHyperlink => self.remove_links(),
             Spelling => return Effect::Dialog(DialogId::Spelling),
             CommandsDialog => return Effect::Dialog(DialogId::Commands),
@@ -553,6 +584,9 @@ impl DocView {
                 self.sel = Selection::new(story.start(), story.end());
                 self.reset_blink();
             }
+            Backspace | DeleteForward if self.on_list_mark(cmd == Backspace) => {
+                self.end_list_here();
+            }
             Backspace | DeleteForward | DeletePrevWord | DeleteNextWord => {
                 let (mut s, mut e) = self.sel.range();
                 let tracking = self.doc.props.track_changes;
@@ -611,9 +645,11 @@ impl DocView {
                 self.finish_edit(Selection::caret(at));
             }
             NewParagraph if self.on_row_mark() => {}
+            NewParagraph if self.on_empty_list_item() => self.end_list_here(),
             NewParagraph => {
                 self.doc.begin_typing(self.sel);
                 let at = self.delete_selection();
+                let list_mark = self.list_mark_to_carry(at);
                 let style = self.doc.main.paras[at.para].pap.style;
                 let typing = self
                     .typing_chp
@@ -628,6 +664,10 @@ impl DocView {
                 {
                     self.doc.apply_style(MAIN, at.para, at.para, style);
                 }
+                let at = match list_mark {
+                    Some((mark, chp)) => self.doc.insert_text(MAIN, at, &mark, chp),
+                    None => at,
+                };
                 self.finish_edit(Selection::caret(at));
                 self.auto_link(word_end);
             }
@@ -703,8 +743,19 @@ impl DocView {
                 }
             }
             Paste => {
-                let Some(content) = clip.get() else {
+                let Some(mut content) = clip.get() else {
                     return Effect::None;
+                };
+                let font_here = {
+                    let (s, _) = self.sel.range();
+                    let chp = self.doc.main.paras[s.para].chp_at(s.offset);
+                    self.doc.font_name(chp.font).to_string()
+                };
+                let dropped = match &mut content {
+                    Clip::Rich(rich) => {
+                        rich.drop_missing_fonts(&font_here, crate::font_names::is_installed)
+                    }
+                    _ => Vec::new(),
                 };
                 if let Clip::Picture(bytes) = content {
                     // Bytes that are not a picture Quill can read paste
@@ -727,6 +778,7 @@ impl DocView {
                     let at = self.paste_into_cells(&block, content);
                     self.finish_edit(Selection::caret(at));
                     self.undo_if_too_large("paste");
+                    self.note_dropped_fonts(&dropped, &font_here);
                     return Effect::None;
                 }
                 let at = self.delete_selection();
@@ -744,6 +796,7 @@ impl DocView {
                 };
                 self.finish_edit(Selection::caret(end));
                 self.undo_if_too_large("paste");
+                self.note_dropped_fonts(&dropped, &font_here);
             }
             PasteSpecial => return Effect::Dialog(DialogId::PasteSpecial),
             PasteText => self.paste_as(crate::paste_special::Form::Unformatted, clip),
@@ -929,6 +982,23 @@ impl DocView {
 
     /// Apply a character change to the selection, or to the insertion
     /// format when nothing is selected.
+    /// Replace Missing Fonts: each (old, new) pair of font names, as one
+    /// undo step.
+    pub fn replace_fonts(&mut self, pairs: &[(String, String)]) {
+        self.doc.begin("Replace Fonts", self.sel);
+        for (old, new) in pairs {
+            let from: Vec<u16> = (0..self.doc.fonts.len())
+                .filter_map(|id| u16::try_from(id).ok())
+                .filter(|&id| self.doc.font_name(id).eq_ignore_ascii_case(old))
+                .collect();
+            let to = self.doc.font_id(new);
+            self.doc.replace_font(&from, to);
+        }
+        self.typing_chp = None;
+        let sel = self.sel;
+        self.finish_edit(sel);
+    }
+
     pub fn format_chars(&mut self, label: &'static str, f: impl Fn(&mut CharProps)) {
         if self.sel.is_empty() {
             let mut c = self.current_chp();
@@ -1182,7 +1252,7 @@ impl DocView {
 /// Curl straight quotes, as Preferences > "Smart" Quotes does.
 /// If `word` is a web or mail address someone typed, the part of it the
 /// link covers (as a byte range) and the address to link to. It starts
-/// with http://, https://, www. or mailto: (with an @). Opening brackets
+/// with http://, https://, www. or mailto: (with an @), or a mail address. Opening brackets
 /// and quotes before it stay out of the link, as do punctuation that ends
 /// a sentence and a closing bracket the address did not open.
 pub(super) fn typed_address(word: &str) -> Option<(std::ops::Range<usize>, String)> {
@@ -1232,10 +1302,28 @@ pub(super) fn typed_address(word: &str) -> Option<(std::ops::Range<usize>, Strin
         format!("https://{text}")
     } else if rest("mailto:").is_some_and(|r| r.contains('@')) {
         text.to_string()
+    } else if is_mail_address(text) {
+        format!("mailto:{text}")
     } else {
         return None;
     };
     Some((start..start + end, url))
+}
+
+/// A bare mail address: name@domain.tld, with no spaces or odd characters.
+fn is_mail_address(text: &str) -> bool {
+    let Some((name, domain)) = text.split_once('@') else {
+        return false;
+    };
+    let in_name = |c: char| c.is_alphanumeric() || "._%+-".contains(c);
+    let in_domain = |c: char| c.is_alphanumeric() || ".-".contains(c);
+    !name.is_empty()
+        && name.chars().all(in_name)
+        && domain.chars().all(in_domain)
+        && domain.contains('.')
+        && !domain.starts_with('.')
+        && !domain.ends_with('.')
+        && !domain.contains("..")
 }
 
 pub(super) fn smart_quotes(text: &str, mut before: Option<char>) -> String {

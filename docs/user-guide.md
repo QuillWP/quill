@@ -1,7 +1,10 @@
 # Quill
 
-A small word processor inspired by Lucas's favorite word processor from 1992, written in
-Rust for macOS, Windows and Linux.
+Quill Word Processor, shortened to Quill, is inspired by Lucas's favorite
+word processor from 1992. It is built in Rust for macOS, Windows and Linux.
+The planned website is `quillwp.com`, which has not been registered.
+Current builds still display the legacy Quill name in the interface and use
+the build commands, settings paths and `.qwp` extension documented here.
 
 The original offered styles, tables, frames, pictures, footnotes, headers and
 footers, outlines, tables of contents and indexes in a 914 KB program that
@@ -31,7 +34,9 @@ strikethrough, links, bulleted and numbered lists, block quotes, code, rules, ta
 as the HTML tags <u>, <sup> and <sub>. Bullets and numbers are typed text in Quill, so a
 paragraph that starts with a bullet or a number and a tab is written as a list item. Saving
 copies the pictures into a folder beside the file (for Trip.md, a folder called
-Trip_images) and names them where they stand, so keep the folder with the file. A picture
+Trip_images) and names them where they stand, so keep the folder with the file.
+Changed pictures get new file names; existing picture files are never overwritten.
+If a picture file conflicts, saving stops and leaves the old Markdown file alone. A picture
 that the Markdown links to on the web stays a link to it, and web addresses in the text
 become links when the file is opened. In Source view the pictures stay inside the text.
 Saving as Markdown first lists
@@ -143,6 +148,16 @@ remaps fonts and imports conflicting styles under a Pasted name without changing
 existing document styles. Windows/Linux clipboard interaction still needs live
 verification on those systems.
 
+## Pictures
+
+Click a picture to select it. Drag any of its eight handles to scale it at its own
+proportions, or hold Command to stretch it in the direction pulled. Hold Control and drag a
+handle to crop: the frame moves in and the picture stays where it is. Right-click a picture
+for Properties..., Crop in Place, which makes the handles crop without Control until you
+choose Resize in Place or click elsewhere, and Resize in Place. Properties..., also Format >
+Picture..., sets the width, height and scale, with Keep Proportions, and how much to crop
+from each edge, and shows the final size as you type.
+
 ## Preferences
 
 Smart Quotes starts enabled; older off-by-default settings migrate once, and later
@@ -151,6 +166,11 @@ Open And Save includes “Save foreign files in Quill format by default”, enab
 recommended. On the first Save of an imported document this opens Save As for a
 `.qwp` copy. Turning it off permits normal Save back to the imported format; an
 explicit format chosen in Save As is respected on subsequent saves.
+
+General > Start Lists from a Typed * or - is on by default. With it, typing `* ` or `- ` at
+the start of a paragraph makes a bulleted or dashed list, and Undo gives back what was typed.
+In any list, Return starts the next item, Return on an empty item ends the list, and
+Backspace at the start of an item takes off its bullet and keeps the text.
 
 ## Platform interface
 
@@ -170,8 +190,42 @@ has been removed. A system PDF viewer is required on Windows/Linux. Ordinary
 Print and Save as PDF retain their existing platform routes.
 
 Right-click in a document for editing actions, page/section breaks, Font, and Paragraph.
-On macOS, Control-click works too. Clicking inside selected text preserves the selection;
-clicking elsewhere positions the insertion point. The toolbar's font name previews its face.
+On macOS, Control-click works too, except on a link, where it asks whether to open the
+link. Clicking inside selected text preserves the selection; clicking elsewhere positions
+the insertion point. On a link, the menu has Edit Hyperlink and Remove Hyperlink; on other
+selected text, it has Hyperlink. In a table it adds Delete (Row, Column, Cell), Insert Cell
+Before and After, Split Cell, and Merge Cells when more than one cell is selected. The
+toolbar's font name previews its face.
+
+A new table has real borders that print, thin and black unless `table_border_color` or
+`table_border_dotted` in the settings file say otherwise. Those are only the starting point:
+the table keeps its borders, and Format > Border changes them. Gridlines are a separate screen
+guide for cells with no border, as in tables from other programs, and have their own
+`table_gridline_color` and `table_gridline_dotted`.
+
+Format > Border also offers solid shading colors for paragraphs and, with Apply To:
+Cells, table cells. Imported solid RGB fills appear by name or as `#RRGGBB` and stay
+exact through native saves, DOCX, RTF, HTML, ODT and PDF output. Changing only borders
+keeps the existing fills; choosing None or a gray percentage replaces the color.
+Colored patterns and DOCX theme-only fills without a resolved RGB value still use a
+fallback and an import warning. Older app versions can open the new native files but
+ignore their added color fields and lose those colors if they save the document.
+
+
+When a document uses fonts that are not installed, the message on opening it can keep them,
+which stops the message for that document, or replace them, ten fonts to a page. Format >
+Replace Missing Fonts does the same at any time, and View > Highlight Missing Fonts marks the
+text they affect on screen. Text typed into a table of contents made editable goes to its
+headings when you choose Update Table of Contents, unless lines were added or removed.
+To rename headings through six levels, right-click the contents and choose Make Editable,
+edit the entry names, then choose Update Table of Contents to make it live again.
+The matching headings change together as one Undo step. Subsequent heading edits
+continue updating the live contents.
+
+A document opens in the view it was saved in; Preferences > View > In View is for new
+documents. The Custom row of the color palette holds the colors saved in Preferences >
+Colors, for every document, and then the colors this document uses. Pointing at a saved
+color shows its name. Preferences > Advanced has Interface Size and Smart Quotes.
 
 Windows and Linux keep Settings in File and About Quill in the rightmost Help menu.
 Their menu labels use the host UI font; macOS retains its application menu and native menus.
@@ -225,4 +279,5 @@ you can edit it in a text editor while Quill is closed. See
 Quill is available under either the [MIT license](../LICENSE-MIT) or the
 [Apache License 2.0](../LICENSE-APACHE). Packaged builds also include
 [third-party notices](../THIRD-PARTY-NOTICES.txt) generated from the locked
-Cargo dependency set.
+Cargo dependency set, listing what that platform's build uses. `Quill Licenses`, in the
+legacy `Quill` menu on the Mac, shows the MIT and Apache texts and links to those notices.

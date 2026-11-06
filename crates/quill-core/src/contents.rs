@@ -81,14 +81,20 @@ pub struct IndexEntry {
 /// The text a reader sees: no hidden text, fields or references, tabs
 /// and line breaks as spaces.
 pub fn visible_text(p: &Paragraph) -> String {
-    let mut out = String::new();
+    visible_chars(p).iter().map(|&(c, _)| c).collect()
+}
+
+/// `visible_text`, each character with where it is in the paragraph, so a
+/// change to the words can be made around marks that are not part of them.
+pub fn visible_chars(p: &Paragraph) -> Vec<(char, usize)> {
+    let mut out = Vec::new();
     for (s, e, c) in p.run_bounds() {
         if c.hidden {
             continue;
         }
-        for ch in p.text[s..e].chars() {
+        for (at, ch) in p.text[s..e].char_indices() {
             match ch {
-                chars::TAB | chars::LINE_BREAK => out.push(' '),
+                chars::TAB | chars::LINE_BREAK => out.push((' ', s + at)),
                 chars::PAGE_BREAK
                 | chars::OBJECT
                 | chars::FOOTNOTE
@@ -96,11 +102,16 @@ pub fn visible_text(p: &Paragraph) -> String {
                 | chars::FIELD_DATE
                 | chars::FIELD_TIME
                 | chars::OPTIONAL_HYPHEN => {}
-                c => out.push(c),
+                c => out.push((c, s + at)),
             }
         }
     }
-    out.trim().to_string()
+    while out.last().is_some_and(|c| c.0.is_whitespace()) {
+        out.pop();
+    }
+    let blank = out.iter().take_while(|c| c.0.is_whitespace()).count();
+    out.drain(..blank);
+    out
 }
 
 /// The hidden entries of kind `kind` ('c' or 'i') in a paragraph: the
@@ -143,7 +154,7 @@ impl Document {
     pub fn existing_toc(&self) -> Option<usize> {
         let paras = &self.main.paras;
         let end = paras.iter().position(|p| p.mark == Mark::SectionBreak)?;
-        let toc = |p: &Paragraph| self.styles.get(p.pap.style).name.starts_with("toc ");
+        let toc = |p: &Paragraph| self.styles.toc_level(p.pap.style).is_some();
         (end + 1 < paras.len() && paras[..=end].iter().all(toc)).then_some(end)
     }
 

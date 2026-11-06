@@ -386,21 +386,25 @@ fn main() {}
             None,
         );
         let (text, files) = write_with_pictures(&doc, "Trip_images");
+        assert_eq!(files.len(), 1);
+        let name = &files[0].name;
+        assert!(name.starts_with("image1-") && name.ends_with(".png"));
         assert_eq!(
             text,
-            "One ![Picture](Trip_images/image1.png) and ![Picture](Trip_images/image1.png).\n"
+            format!("One ![Picture](Trip_images/{name}) and ![Picture](Trip_images/{name}).\n")
         );
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].name, "image1.png");
         // Through save: the folder is made and the Markdown opens with the pictures.
         let dir = std::env::temp_dir().join(format!("quill-md-pictures-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("Trip 2026.md");
         crate::save(&doc, &path, crate::Format::Markdown).unwrap();
-        assert!(dir.join("Trip_2026_images/image1.png").is_file());
+        assert!(dir.join("Trip_2026_images").join(name).is_file());
         let saved = std::fs::read_to_string(&path).unwrap();
-        assert!(saved.contains("(Trip_2026_images/image1.png)"), "{saved}");
+        assert!(
+            saved.contains(&format!("(Trip_2026_images/{name})")),
+            "{saved}"
+        );
         assert!(!saved.contains("base64"));
         let (back, report) = read(&saved, Some(&dir));
         assert!(report.is_empty(), "{:?}", report.notes());
@@ -415,6 +419,52 @@ fn main() {}
         .unwrap();
         assert!(!dir.join("Plain_images").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_save_does_not_replace_pictures_used_by_the_old_markdown() {
+        let dir = std::env::temp_dir().join(format!("quill-md-failed-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Notes.md");
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let (doc, _) = read(&format!("![a](data:image/png;base64,{png})"), None);
+        crate::save(&doc, &path, crate::Format::Markdown).unwrap();
+        let (_, files) = write_with_pictures(&doc, "Notes_images");
+        let picture = dir.join("Notes_images").join(&files[0].name);
+        let original = std::fs::read(&picture).unwrap();
+        let mut changed = doc.clone();
+        let quill_core::Object::Picture(pic) = &mut changed.objects[0] else {
+            panic!("expected a picture")
+        };
+        // A PNG with trailing bytes is still readable but has different content.
+        let mut bytes = pic.data.to_vec();
+        bytes.push(0);
+        pic.data = bytes.into();
+        let (_, changed_files) = write_with_pictures(&changed, "Notes_images");
+        assert_ne!(files[0].name, changed_files[0].name);
+        // A directory at the final destination makes the final replace fail.
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(crate::save(&changed, &path, crate::Format::Markdown).is_err());
+        assert_eq!(std::fs::read(&picture).unwrap(), original);
+        // A conflicting user-owned file must also survive an otherwise valid save.
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::write(&path, b"old Markdown").unwrap();
+        std::fs::write(&picture, b"keep this existing file").unwrap();
+        assert!(crate::save(&doc, &path, crate::Format::Markdown).is_err());
+        assert_eq!(std::fs::read(&picture).unwrap(), b"keep this existing file");
+        assert_eq!(std::fs::read(&path).unwrap(), b"old Markdown");
+        #[cfg(unix)]
+        {
+            let other = dir.join("Other.md");
+            let outside = dir.join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            std::os::unix::fs::symlink(&outside, dir.join("Other_images")).unwrap();
+            assert!(crate::save(&doc, &other, crate::Format::Markdown).is_err());
+            assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

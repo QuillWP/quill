@@ -106,9 +106,15 @@ impl WinState {
             DialogId::ChangeCase => (crate::tool_dialogs::change_case(), Which::ChangeCase),
             DialogId::Footnote => (crate::tool_dialogs::footnote(), Which::Footnote),
             DialogId::Hyperlink => {
-                let (mut d, st) = crate::link_dialog::dialog(&self.view);
-                crate::link_dialog::changed(&mut d, &st);
+                let (d, st) = crate::link_dialog::dialog(&self.view);
                 (d, Which::Hyperlink(st))
+            }
+            DialogId::Picture => {
+                let Some((at, picture)) = self.view.selected_picture_copy() else {
+                    return;
+                };
+                let (d, st) = crate::picture_dialog::dialog(at, picture);
+                (d, Which::Picture(st))
             }
             DialogId::Toc => (crate::contents_dialogs::toc(), Which::Toc),
             DialogId::Index => (crate::contents_dialogs::index(), Which::Index),
@@ -239,7 +245,8 @@ impl WinState {
         let Some(rgb) = d.swatch_rgb("color") else {
             return;
         };
-        let st = crate::palette::PaletteState::new(Some(quill_core::props::Rgb(rgb)));
+        let st =
+            crate::palette::PaletteState::new(Some(quill_core::props::Rgb(rgb)), &self.view.doc);
         d.popout = Some(crate::palette::popout(&st, "color"));
         self.color_pop = Some(st);
     }
@@ -328,9 +335,9 @@ impl WinState {
             ),
             Hit::ReachedEnd => {
                 let m = if search.dir == UP {
-                    "Quill reached the beginning of the document. Continue searching at the end?"
+                    "Reached the beginning of the document. Continue searching at the end?"
                 } else {
-                    "Quill reached the end of the document. Continue searching at the beginning?"
+                    "Reached the end of the document. Continue searching at the beginning?"
                 };
                 self.alert(
                     m,
@@ -460,7 +467,7 @@ impl WinState {
                 }
                 Outcome::Changed(id) if *kind == 0 => {
                     if *id == "color" && format_dialogs::wants_palette(d) {
-                        let (palette, st) = crate::palette::palette(None);
+                        let (palette, st) = crate::palette::palette(None, &self.view.doc);
                         self.dialogs.push((Which::Palette(st), palette));
                     } else {
                         format_dialogs::character_changed(d, id);
@@ -704,6 +711,22 @@ impl WinState {
                 }
                 _ => {}
             },
+            Which::Picture(st) => match o {
+                Outcome::Changed(id) => crate::picture_dialog::changed(d, st, id),
+                Outcome::Ok => {
+                    if let Some(new) = crate::picture_dialog::read(d, st) {
+                        let (at, old) = (st.at, st.picture.clone());
+                        self.dialogs.pop();
+                        if new != old {
+                            self.view.apply_picture(at, new);
+                        }
+                    }
+                }
+                Outcome::Cancel => {
+                    self.dialogs.pop();
+                }
+                _ => {}
+            },
             Which::Hyperlink(st) => match o {
                 Outcome::Changed(_) => crate::link_dialog::changed(d, st),
                 Outcome::Ok => {
@@ -861,10 +884,10 @@ impl WinState {
                         Some((Which::Palette(ps), pd)) => {
                             crate::palette::edited(ps, pd, target, color);
                         }
-                        // From the pop-out beside a color: the color is
-                        // remembered and becomes the dialog's.
+                        // From the pop-out beside a color: it becomes the
+                        // dialog's, and is remembered if the dialog's OK is.
                         Some((_, cd)) if cd.swatch_rgb("color").is_some() => {
-                            crate::palette::remember_edit(target, color);
+                            crate::palette::hold_edit(target, color);
                             cd.set_swatch("color", color.0);
                             cd.set_label("color_hex", &crate::palette::hex(color));
                         }
@@ -929,8 +952,15 @@ impl WinState {
                 }
             }
             Outcome::Ok => {
+                let next = match which {
+                    Which::ReplaceFonts(st) => st.next_page(),
+                    _ => None,
+                };
                 if format_dialogs::apply(which, d, &mut self.view) {
                     self.dialogs.pop();
+                    if let Some((d, st)) = next {
+                        self.dialogs.push((Which::ReplaceFonts(st), d));
+                    }
                 } else if matches!(which, Which::Document) {
                     // Say why OK did nothing, as the original does.
                     self.alert(
@@ -951,6 +981,7 @@ impl WinState {
                 }
             }
             Outcome::Cancel => {
+                crate::palette::drop_edits();
                 self.dialogs.pop();
             }
             Outcome::Button("color") if matches!(which, Which::Character(_)) => {
@@ -969,7 +1000,7 @@ impl WinState {
                     Which::Character(base) => Some(base.color),
                     _ => None,
                 };
-                let (palette, st) = crate::palette::palette(start);
+                let (palette, st) = crate::palette::palette(start, &self.view.doc);
                 self.dialogs.push((Which::Palette(st), palette));
             }
             Outcome::Changed(id) => format_dialogs::changed(which, d, &self.view, id),
@@ -1031,7 +1062,7 @@ impl WinState {
                 Which::TableCells if id == "border" => {
                     let (mut d, st) = crate::border_dialog::border(&self.view);
                     d.set_selected("applyto", 1);
-                    let st = crate::border_dialog::for_cells(st, &self.view);
+                    let st = crate::border_dialog::for_cells(st, &self.view, &mut d);
                     self.dialogs.push((Which::Border(st), d));
                 }
                 Which::TableLayout => {

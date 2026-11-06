@@ -1,7 +1,8 @@
-//! Pictures in the text, as the original handles them: click one to select it
-//! (a frame with three handles), drag the corner handle to scale it at its
-//! own proportions (Command-drag to stretch it), drag a side handle to crop
-//! that edge, or Shift-drag a side handle to scale it within its crop.
+//! Pictures in the text: click one to select it (a frame with a handle on
+//! each side and corner). Drag a handle to scale the picture at its own
+//! proportions, Command-drag to stretch it in the direction pulled, and
+//! Control-drag, or drag after Crop in Place, to crop it: the picture stays
+//! where it is and only its frame moves in.
 
 use super::*;
 use quill_core::Picture;
@@ -11,9 +12,41 @@ const HANDLE: f32 = 6.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Handle {
+    Left,
     Right,
+    Top,
     Bottom,
-    Corner,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Handle {
+    const ALL: [Handle; 8] = [
+        Handle::TopLeft,
+        Handle::Top,
+        Handle::TopRight,
+        Handle::Left,
+        Handle::Right,
+        Handle::BottomLeft,
+        Handle::Bottom,
+        Handle::BottomRight,
+    ];
+
+    /// Which way the handle pulls across and down: -1, 0 or 1.
+    fn pull(self) -> (f32, f32) {
+        match self {
+            Handle::Left => (-1.0, 0.0),
+            Handle::Right => (1.0, 0.0),
+            Handle::Top => (0.0, -1.0),
+            Handle::Bottom => (0.0, 1.0),
+            Handle::TopLeft => (-1.0, -1.0),
+            Handle::TopRight => (1.0, -1.0),
+            Handle::BottomLeft => (-1.0, 1.0),
+            Handle::BottomRight => (1.0, 1.0),
+        }
+    }
 }
 
 /// A handle being dragged.
@@ -21,12 +54,17 @@ pub enum Handle {
 pub struct PicDrag {
     pub at: Position,
     pub handle: Handle,
-    pub shift: bool,
-    /// Command was down: the corner stretches instead of keeping the
-    /// picture's proportions.
+    /// Control was down, or Crop in Place is on: the frame moves in over
+    /// the picture.
+    pub crop: bool,
+    /// Command was down: stretch in the direction pulled instead of keeping
+    /// the picture's proportions.
     pub stretch: bool,
     /// The picture's frame when the drag began, in window points.
     pub start: Rect,
+    /// How far each edge can come back out, in points: what is cropped from
+    /// the left, top, right and bottom.
+    pub room: [f32; 4],
     /// Where the handle was grabbed, and where the pointer is now.
     pub from: (f32, f32),
     pub to: (f32, f32),
@@ -115,22 +153,13 @@ impl DocView {
         Some(Rect::new(x, y, w, h))
     }
 
-    fn handles(r: Rect) -> [(Handle, Rect); 3] {
+    fn handles(r: Rect) -> [(Handle, Rect); 8] {
         let h = HANDLE;
-        [
-            (
-                Handle::Right,
-                Rect::new(r.right() - h, r.y + (r.h - h) / 2.0, h, h),
-            ),
-            (
-                Handle::Bottom,
-                Rect::new(r.x + (r.w - h) / 2.0, r.bottom() - h, h, h),
-            ),
-            (
-                Handle::Corner,
-                Rect::new(r.right() - h, r.bottom() - h, h, h),
-            ),
-        ]
+        Handle::ALL.map(|handle| {
+            let (px, py) = handle.pull();
+            let at = |pull: f32, start: f32, size: f32| start + (size - h) * (pull + 1.0) / 2.0;
+            (handle, Rect::new(at(px, r.x, r.w), at(py, r.y, r.h), h, h))
+        })
     }
 
     /// The handle under a window point on the selected picture, or the one
@@ -146,32 +175,31 @@ impl DocView {
             .map(|(handle, _)| handle)
     }
 
-    /// A handle with the few points around it that still grab it.
-    fn grown(h: Rect) -> Rect {
-        Rect::new(h.x - 2.0, h.y - 2.0, h.w + 4.0, h.h + 4.0)
+    /// Whether the pointer at this window point is the crop pointer: over a
+    /// handle with Control held, or anywhere on the picture in Crop in Place.
+    pub fn picture_crop_cursor(&self, wx: f32, wy: f32) -> bool {
+        if let Some(d) = &self.pic_drag {
+            return d.crop;
+        }
+        let Some(r) = self.selected_picture().and_then(|at| self.picture_rect(at)) else {
+            return false;
+        };
+        let handle = self.picture_cursor(wx, wy).is_some();
+        (self.crop_held && handle) || (self.cropping_in_place() && (handle || r.contains(wx, wy)))
     }
 
-    /// A click on a picture: select it, or start dragging one of its
-    /// handles. Returns true if the click was the picture's.
-    pub(super) fn picture_mouse_down(&mut self, wx: f32, wy: f32, shift: bool, cmd: bool) -> bool {
-        if let Some(at) = self.selected_picture()
-            && let Some(r) = self.picture_rect(at)
-            && let Some((handle, _)) = Self::handles(r)
-                .into_iter()
-                .find(|(_, h)| Self::grown(*h).contains(wx, wy))
-        {
-            self.pic_drag = Some(PicDrag {
-                at,
-                handle,
-                shift,
-                stretch: cmd,
-                start: r,
-                from: (wx, wy),
-                to: (wx, wy),
-            });
-            self.drag_status();
-            return true;
-        }
+    /// Whether Crop in Place is on for the selected picture.
+    pub fn cropping_in_place(&self) -> bool {
+        self.pic_crop.is_some() && self.pic_crop == self.selected_picture()
+    }
+
+    /// Right-click, Crop in Place or Resize in Place.
+    pub(super) fn crop_in_place(&mut self, on: bool) {
+        self.pic_crop = self.selected_picture().filter(|_| on);
+    }
+
+    /// Select the picture at a window point, if there is one there.
+    pub fn select_picture_at(&mut self, wx: f32, wy: f32) -> bool {
         let (pos, _) = self.hit(wx, wy);
         let story = &self.doc.main;
         let candidates = [pos, story.prev_char(pos)];
@@ -192,28 +220,69 @@ impl DocView {
         false
     }
 
-    /// The frame the picture would have if the drag ended here.
-    fn dragged_rect(d: &PicDrag) -> Rect {
-        let r = d.start;
-        // Measured from the grab point, so a handle grabbed off its center
-        // does not jump.
-        let w = (r.w + d.to.0 - d.from.0).max(4.0);
-        let h = (r.h + d.to.1 - d.from.1).max(4.0);
-        match d.handle {
-            Handle::Right => Rect::new(r.x, r.y, w, r.h),
-            Handle::Bottom => Rect::new(r.x, r.y, r.w, h),
-            Handle::Corner if d.stretch => Rect::new(r.x, r.y, w, h),
-            // Keep the proportions, following whichever side the pointer
-            // has pulled further.
-            Handle::Corner => {
-                let k = (w / r.w.max(1.0)).max(h / r.h.max(1.0));
-                Rect::new(r.x, r.y, (r.w * k).max(4.0), (r.h * k).max(4.0))
-            }
-        }
+    /// A handle with the few points around it that still grab it.
+    fn grown(h: Rect) -> Rect {
+        Rect::new(h.x - 2.0, h.y - 2.0, h.w + 4.0, h.h + 4.0)
     }
 
-    /// What the status bar shows while a handle is dragged: the scale for
-    /// the corner, the size for a side.
+    /// A click on a picture: select it, or start dragging one of its
+    /// handles. Returns true if the click was the picture's.
+    pub(super) fn picture_mouse_down(&mut self, wx: f32, wy: f32, cmd: bool) -> bool {
+        if let Some(at) = self.selected_picture()
+            && let Some(r) = self.picture_rect(at)
+            && let Some((handle, _)) = Self::handles(r)
+                .into_iter()
+                .find(|(_, h)| Self::grown(*h).contains(wx, wy))
+        {
+            let cut = self.picture_at(at).map_or([0.0; 4], |p| p.crop_on_page());
+            self.pic_drag = Some(PicDrag {
+                at,
+                handle,
+                crop: self.crop_held || self.cropping_in_place(),
+                stretch: cmd,
+                start: r,
+                room: cut.map(|t| t / 20.0),
+                from: (wx, wy),
+                to: (wx, wy),
+            });
+            self.drag_status();
+            return true;
+        }
+        self.pic_crop = None;
+        self.select_picture_at(wx, wy)
+    }
+
+    /// The frame the picture would have if the drag ended here. The edges
+    /// the handle doesn't pull stay put.
+    fn dragged_rect(d: &PicDrag) -> Rect {
+        let r = d.start;
+        let (px, py) = d.handle.pull();
+        // Measured from the grab point, so a handle grabbed off its center
+        // does not jump.
+        let mut w = (r.w + (d.to.0 - d.from.0) * px).max(4.0);
+        let mut h = (r.h + (d.to.1 - d.from.1) * py).max(4.0);
+        if d.crop {
+            // Cropping can give back only what was cropped.
+            let out = |pull: f32, near: f32, far: f32| if pull < 0.0 { near } else { far };
+            w = w.min(r.w + out(px, d.room[0], d.room[2]));
+            h = h.min(r.h + out(py, d.room[1], d.room[3]));
+        } else if !d.stretch {
+            // Keep the proportions, following whichever side the pointer
+            // has pulled further.
+            let k = match (px != 0.0, py != 0.0) {
+                (true, false) => w / r.w.max(1.0),
+                (false, true) => h / r.h.max(1.0),
+                _ => (w / r.w.max(1.0)).max(h / r.h.max(1.0)),
+            };
+            (w, h) = ((r.w * k).max(4.0), (r.h * k).max(4.0));
+        }
+        let x = if px < 0.0 { r.right() - w } else { r.x };
+        let y = if py < 0.0 { r.bottom() - h } else { r.y };
+        Rect::new(x, y, w, h)
+    }
+
+    /// What the status bar shows while a handle is dragged: the scale, or
+    /// the size when cropping.
     fn drag_status(&mut self) {
         let Some(d) = self.pic_drag else {
             return;
@@ -223,18 +292,17 @@ impl DocView {
         };
         let r = Self::dragged_rect(&d);
         let (sx, sy) = pic.scale();
-        self.status = Some(match d.handle {
-            Handle::Corner => {
-                let px = (sx * r.w / d.start.w).round();
-                let py = (sy * r.h / d.start.h).round();
-                if px == py {
-                    format!("{px}%")
-                } else {
-                    format!("{px}% \u{00D7} {py}%")
-                }
+        self.status = Some(if d.crop {
+            let length = |points: f32| crate::dialog::units::length((points * 20.0).round() as i32);
+            format!("{} \u{00D7} {}", length(r.w), length(r.h))
+        } else {
+            let px = (sx * r.w / d.start.w).round();
+            let py = (sy * r.h / d.start.h).round();
+            if px == py {
+                format!("{px}%")
+            } else {
+                format!("{px}% \u{00D7} {py}%")
             }
-            Handle::Right => crate::dialog::units::length((r.w * 20.0).round() as i32),
-            Handle::Bottom => crate::dialog::units::length((r.h * 20.0).round() as i32),
         });
     }
 
@@ -261,27 +329,38 @@ impl DocView {
         if (w, h) == pic.size {
             return true;
         }
-        let new = match (d.handle, d.shift) {
-            (Handle::Corner, _) => pic.scaled_to(w, h),
-            (_, false) => pic.trimmed_to(w, h),
-            // Shift with a side handle scales the picture by that side and
-            // keeps the other side's size, cropping to it.
-            (Handle::Right, true) => {
-                let k = w as f32 / pic.size.0.max(1) as f32;
-                let big = pic.scaled_to(w, (pic.size.1 as f32 * k).round() as i32);
-                big.cropped_to(w, pic.size.1)
-            }
-            (Handle::Bottom, true) => {
-                let k = h as f32 / pic.size.1.max(1) as f32;
-                let big = pic.scaled_to((pic.size.0 as f32 * k).round() as i32, h);
-                big.cropped_to(pic.size.0, h)
-            }
+        let new = if d.crop {
+            let inward = |near: f32, far: f32, pull: f32| {
+                let by = (far - near) * 20.0;
+                if pull == 0.0 { 0.0 } else { by }
+            };
+            let (px, py) = d.handle.pull();
+            let s = d.start;
+            pic.crop_edges([
+                inward(s.x, r.x, f32::from(px < 0.0)),
+                inward(s.y, r.y, f32::from(py < 0.0)),
+                inward(r.right(), s.right(), f32::from(px > 0.0)),
+                inward(r.bottom(), s.bottom(), f32::from(py > 0.0)),
+            ])
+        } else {
+            pic.scaled_to(w, h)
         };
+        self.apply_picture(d.at, new);
+        true
+    }
+
+    /// Change the picture at `at`, as one undo step.
+    pub fn apply_picture(&mut self, at: Position, new: Picture) {
         self.doc.begin("Picture", self.sel);
-        self.doc.set_picture(MAIN, d.at, new);
+        self.doc.set_picture(MAIN, at, new);
         let sel = self.sel;
         self.finish_edit(sel);
-        true
+    }
+
+    /// The selected picture, for the Picture dialog.
+    pub fn selected_picture_copy(&self) -> Option<(Position, Picture)> {
+        let at = self.selected_picture()?;
+        Some((at, self.picture_at(at)?.clone()))
     }
 
     /// The selected picture's frame and handles, and the outline of a drag.
@@ -331,17 +410,28 @@ mod tests {
         assert_eq!(v.picture_cursor(r.right() - 3.0, r.bottom() - 3.0), None);
         v.set_selection(Selection::new(at, end));
         let corner = (r.right() - 3.0, r.bottom() - 3.0);
-        assert_eq!(v.picture_cursor(corner.0, corner.1), Some(Handle::Corner));
+        assert_eq!(
+            v.picture_cursor(corner.0, corner.1),
+            Some(Handle::BottomRight)
+        );
         let right = (r.right() - 3.0, r.y + r.h / 2.0);
         assert_eq!(v.picture_cursor(right.0, right.1), Some(Handle::Right));
         let bottom = (r.x + r.w / 2.0, r.bottom() - 3.0);
         assert_eq!(v.picture_cursor(bottom.0, bottom.1), Some(Handle::Bottom));
+        assert_eq!(
+            v.picture_cursor(r.x + 3.0, r.y + 3.0),
+            Some(Handle::TopLeft)
+        );
+        assert_eq!(
+            v.picture_cursor(r.x + 3.0, r.y + r.h / 2.0),
+            Some(Handle::Left)
+        );
         // Just outside the grab margin, and the middle of the picture.
         assert_eq!(v.picture_cursor(r.right() + 4.0, r.bottom() + 4.0), None);
-        assert_eq!(v.picture_cursor(r.x + 5.0, r.y + 5.0), None);
+        assert_eq!(v.picture_cursor(r.x + 20.0, r.y + 20.0), None);
         // While a handle is being dragged the pointer keeps its shape.
-        assert!(v.picture_mouse_down(corner.0, corner.1, false, false));
-        assert_eq!(v.picture_cursor(0.0, 0.0), Some(Handle::Corner));
+        assert!(v.picture_mouse_down(corner.0, corner.1, false));
+        assert_eq!(v.picture_cursor(0.0, 0.0), Some(Handle::BottomRight));
     }
 
     /// Insert a 64 x 48 point picture, select it and lay it out.
@@ -365,7 +455,7 @@ mod tests {
         };
         let corner = (r.right() - 3.0, r.bottom() - 3.0);
         // Pull right only: the height follows.
-        assert!(v.picture_mouse_down(corner.0, corner.1, false, false));
+        assert!(v.picture_mouse_down(corner.0, corner.1, false));
         v.picture_drag(corner.0 + r.w, corner.1);
         v.picture_mouse_up();
         let pic = v.picture_at(at).unwrap();
@@ -375,7 +465,7 @@ mod tests {
         // With Command it stretches across only.
         let r = v.picture_rect(at).unwrap();
         let corner = (r.right() - 3.0, r.bottom() - 3.0);
-        assert!(v.picture_mouse_down(corner.0, corner.1, false, true));
+        assert!(v.picture_mouse_down(corner.0, corner.1, true));
         v.picture_drag(corner.0 + 40.0, corner.1);
         v.picture_mouse_up();
         let (sx2, sy2) = v.picture_at(at).unwrap().scale();
@@ -384,17 +474,74 @@ mod tests {
     }
 
     #[test]
-    fn a_side_handle_crops_only_its_own_edge() {
+    fn a_side_handle_scales_at_the_pictures_proportions() {
         let Some((mut v, at, r)) = view_with_picture() else {
             return;
         };
+        let left = (r.x + 3.0, r.y + r.h / 2.0);
+        assert!(v.picture_mouse_down(left.0, left.1, false));
+        v.picture_drag(left.0 - r.w, left.1);
+        v.picture_mouse_up();
+        let (sx, sy) = v.picture_at(at).unwrap().scale();
+        assert!(
+            (sx - 200.0).abs() < 1.0 && (sy - 200.0).abs() < 1.0,
+            "{sx} x {sy}"
+        );
+        // With Command it stretches across only.
+        let r = v.picture_rect(at).unwrap();
         let right = (r.right() - 3.0, r.y + r.h / 2.0);
-        assert!(v.picture_mouse_down(right.0, right.1, false, false));
-        v.picture_drag(right.0 - r.w / 2.0, right.1);
+        assert!(v.picture_mouse_down(right.0, right.1, true));
+        v.picture_drag(right.0 + 40.0, right.1);
+        v.picture_mouse_up();
+        let (sx, sy) = v.picture_at(at).unwrap().scale();
+        assert!(sx > 240.0 && (sy - 200.0).abs() < 1.0, "{sx} x {sy}");
+    }
+
+    #[test]
+    fn control_crops_only_the_edges_the_handle_pulls() {
+        let Some((mut v, at, r)) = view_with_picture() else {
+            return;
+        };
+        v.crop_held = true;
+        let corner = (r.x + 3.0, r.y + 3.0);
+        assert!(v.picture_crop_cursor(corner.0, corner.1));
+        assert!(!v.picture_crop_cursor(r.x + 20.0, r.y + 20.0));
+        assert!(v.picture_mouse_down(corner.0, corner.1, false));
+        v.picture_drag(corner.0 + 32.0, corner.1 + 12.0);
+        v.picture_mouse_up();
+        let pic = v.picture_at(at).unwrap();
+        assert_eq!(pic.size, (32 * 20, 36 * 20));
+        assert!(
+            pic.crop.left > 40_000 && pic.crop.top > 20_000,
+            "{:?}",
+            pic.crop
+        );
+        assert_eq!((pic.crop.right, pic.crop.bottom), (0, 0));
+        assert!((pic.scale().0 - 100.0).abs() < 1.0);
+        // The edge can come back only as far as the picture goes.
+        let r = v.picture_rect(at).unwrap();
+        let left = (r.x + 3.0, r.y + r.h / 2.0);
+        assert!(v.picture_mouse_down(left.0, left.1, false));
+        v.picture_drag(left.0 - 500.0, left.1);
         v.picture_mouse_up();
         let pic = v.picture_at(at).unwrap();
         assert_eq!(pic.crop.left, 0);
-        assert!(pic.crop.right > 40_000, "{:?}", pic.crop);
-        assert!((pic.scale().0 - 100.0).abs() < 1.0);
+        assert_eq!(pic.size.0, 64 * 20);
+    }
+
+    #[test]
+    fn crop_in_place_needs_no_control_and_ends_on_resize_in_place() {
+        let Some((mut v, at, r)) = view_with_picture() else {
+            return;
+        };
+        v.crop_in_place(true);
+        assert!(v.picture_crop_cursor(r.x + 20.0, r.y + 20.0));
+        let right = (r.right() - 3.0, r.y + r.h / 2.0);
+        assert!(v.picture_mouse_down(right.0, right.1, false));
+        v.picture_drag(right.0 - 32.0, right.1);
+        v.picture_mouse_up();
+        assert!(v.picture_at(at).unwrap().crop.right > 40_000);
+        v.crop_in_place(false);
+        assert!(!v.picture_crop_cursor(r.x + 20.0, r.y + 20.0));
     }
 }

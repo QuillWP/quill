@@ -128,6 +128,12 @@ impl Unit {
 
 /// Quill remembers this many recent documents; the menu shows `recent_count`.
 pub const MAX_RECENT_DOCUMENTS: usize = 100;
+/// How many colors Preferences saves for every document.
+pub const MAX_NAMED_COLORS: usize = 8;
+
+/// How many documents' kept fonts are remembered, newest last.
+pub const MAX_ACCEPTED_DOCUMENTS: usize = 200;
+
 /// Slots for extra font folders in Preferences > Advanced.
 pub const MAX_FONT_FOLDERS: usize = 10;
 pub const DEFAULT_FONT_LEVELS: u8 = 4;
@@ -151,6 +157,8 @@ pub struct Settings {
     pub smart_quotes: bool,
     /// Make web and mail addresses links as they are typed.
     pub auto_links: bool,
+    /// Typing "* " or "- " at the start of a paragraph starts a list.
+    pub auto_lists: bool,
     // Spelling
     pub always_suggest: bool,
     pub spelling_as_you_type: bool,
@@ -165,6 +173,9 @@ pub struct Settings {
     /// How the gridlines look: their color, and dotted or solid.
     pub table_gridline_color: u32,
     pub table_gridline_dotted: bool,
+    /// The borders a new table starts with, which it then keeps.
+    pub table_border_color: u32,
+    pub table_border_dotted: bool,
     /// The gray round the pages in Page Layout.
     pub page_layout_color_background: u32,
     /// The line round each page in Page Layout.
@@ -243,8 +254,17 @@ pub struct Settings {
     pub toolbar_position: u8,
     /// Customized buttons: position, picture and command name.
     pub toolbar_buttons: Vec<(usize, usize, String)>,
-    /// The custom colors of the color palette, newest first, as 0xRRGGBB.
-    pub custom_colors: Vec<u32>,
+    /// Colors saved for every document, each with its name.
+    pub named_colors: Vec<(u32, String)>,
+    /// Each document's missing fonts the person chose to keep: opening
+    /// that document no longer warns about them. Kept here by path because
+    /// .docx and RTF have no place for it, and choosing should not make the
+    /// document need saving.
+    pub accepted_fonts: Vec<(PathBuf, Vec<String>)>,
+    /// View > Highlight Missing Fonts.
+    pub highlight_missing_fonts: bool,
+    /// Say where to deal with missing fonts after going on without them.
+    pub missing_font_reminder: bool,
     // Commands: (menu or key, command name) added to or taken from the original's.
     pub menu_add: Vec<(String, String)>,
     pub menu_remove: Vec<(String, String)>,
@@ -292,12 +312,14 @@ fn escape_path(path: &std::path::Path) -> String {
         .replace('%', "%25")
         .replace('\n', "%0A")
         .replace('\r', "%0D")
+        .replace('\t', "%09")
 }
 
 fn unescape_path(v: &str) -> PathBuf {
     PathBuf::from(
         v.replace("%0A", "\n")
             .replace("%0D", "\r")
+            .replace("%09", "\t")
             .replace("%25", "%"),
     )
 }
@@ -341,13 +363,17 @@ impl Default for Settings {
             ruler_foreground: 0x000000,
             toolbar_position: 0,
             toolbar_buttons: Vec::new(),
-            custom_colors: Vec::new(),
+            named_colors: Vec::new(),
+            accepted_fonts: Vec::new(),
+            highlight_missing_fonts: false,
+            missing_font_reminder: true,
             menu_add: Vec::new(),
             menu_remove: Vec::new(),
             keys_add: Vec::new(),
             keys_remove: Vec::new(),
             smart_quotes: true,
             auto_links: true,
+            auto_lists: true,
             always_suggest: true,
             spelling_as_you_type: true,
             custom_dictionary: None,
@@ -359,6 +385,8 @@ impl Default for Settings {
             table_gridlines: true,
             table_gridline_color: 0x808080,
             table_gridline_dotted: false,
+            table_border_color: 0x000000,
+            table_border_dotted: false,
             page_layout_color_background: DEFAULT_PAGE_SURROUND,
             page_layout_color_page_border: DEFAULT_PAGE_BORDER,
             text_boundaries: false,
@@ -393,6 +421,7 @@ impl Settings {
         d.props = self.document.clone();
         d.section = self.section.clone();
         d.summary.author = self.name.clone();
+        d.keep_in_bounds();
         d.forget_history();
         d
     }
@@ -408,11 +437,18 @@ impl Settings {
         put(&mut out, "unit", self.unit.abbrev().into());
         put(&mut out, "smart_quotes", b(self.smart_quotes));
         put(&mut out, "auto_links", b(self.auto_links));
+        put(&mut out, "auto_lists", b(self.auto_lists));
         put(&mut out, "formatted_clipboard", b(self.formatted_clipboard));
 
         section(&mut out, "View", Some("Preferences > View"));
         put(&mut out, "show_hidden", b(self.show_hidden));
         put(&mut out, "table_gridlines", b(self.table_gridlines));
+        put(
+            &mut out,
+            "table_border_color",
+            format!("{:06X}", self.table_border_color & 0xFF_FFFF),
+        );
+        put(&mut out, "table_border_dotted", b(self.table_border_dotted));
         put(
             &mut out,
             "table_gridline_color",
@@ -590,15 +626,23 @@ impl Settings {
             "Colors",
             Some("The custom colors of the color palette, newest first, as HTML codes"),
         );
+        for (path, fonts) in &self.accepted_fonts {
+            let line = format!("{}\t{}", escape_path(path), fonts.join("\t"));
+            put(&mut out, "accepted_fonts", line);
+        }
         put(
             &mut out,
-            "custom_colors",
-            self.custom_colors
-                .iter()
-                .map(|c| format!("#{c:06X}"))
-                .collect::<Vec<_>>()
-                .join(","),
+            "highlight_missing_fonts",
+            b(self.highlight_missing_fonts),
         );
+        put(
+            &mut out,
+            "missing_font_reminder",
+            b(self.missing_font_reminder),
+        );
+        for (color, name) in &self.named_colors {
+            put(&mut out, "named_color", format!("{color:06X}\t{name}"));
+        }
 
         section(
             &mut out,
@@ -813,12 +857,27 @@ impl Settings {
                         })
                         .collect()
                 }
-                "custom_colors" => {
-                    s.custom_colors = v
-                        .split(',')
-                        .filter_map(hex_color)
-                        .take(crate::palette::SLOTS)
-                        .collect()
+                "accepted_fonts" => {
+                    let mut parts = v.split('\t');
+                    if let Some(path) = parts.next()
+                        && s.accepted_fonts.len() < MAX_ACCEPTED_DOCUMENTS
+                    {
+                        let fonts: Vec<String> = parts.map(str::to_string).collect();
+                        if !fonts.is_empty() {
+                            s.accepted_fonts.push((unescape_path(path), fonts));
+                        }
+                    }
+                }
+                "highlight_missing_fonts" => s.highlight_missing_fonts = flag,
+                "missing_font_reminder" => s.missing_font_reminder = flag,
+                "named_color" => {
+                    // A color with no name has nothing after its tab.
+                    let (color, name) = v.split_once('\t').unwrap_or((v, ""));
+                    if let Some(color) = hex_color(color)
+                        && s.named_colors.len() < MAX_NAMED_COLORS
+                    {
+                        s.named_colors.push((color, name.to_string()));
+                    }
                 }
                 "menu_add" => s.menu_add = pairs_parse(v),
                 "menu_remove" => s.menu_remove = pairs_parse(v),
@@ -835,6 +894,7 @@ impl Settings {
                 // Migrate once; version 4 preserves an explicit opt-out.
                 "smart_quotes" => s.smart_quotes = version < 4 || flag,
                 "auto_links" => s.auto_links = flag,
+                "auto_lists" => s.auto_lists = flag,
                 "always_suggest" => s.always_suggest = flag,
                 "spelling_as_you_type" => s.spelling_as_you_type = flag,
                 "ignore_uppercase" => s.ignore_uppercase = flag,
@@ -842,6 +902,12 @@ impl Settings {
                 "formatted_clipboard" => s.formatted_clipboard = flag,
                 "show_hidden" => s.show_hidden = flag,
                 "table_gridlines" => s.table_gridlines = flag,
+                "table_border_color" => {
+                    if let Some(c) = hex_color(v) {
+                        s.table_border_color = c;
+                    }
+                }
+                "table_border_dotted" => s.table_border_dotted = flag,
                 "table_gridline_color" => {
                     if let Some(c) = hex_color(v) {
                         s.table_gridline_color = c;
@@ -1007,6 +1073,8 @@ impl Settings {
         ] {
             entries.retain(|(_, cmd)| !retired_command(cmd));
         }
+        s.document.keep_in_bounds();
+        s.section.keep_in_bounds();
         s.recent_documents.truncate(MAX_RECENT_DOCUMENTS);
         s
     }
@@ -1176,6 +1244,7 @@ mod tests {
         let s = Settings {
             smart_quotes: false,
             auto_links: false,
+            auto_lists: false,
             recent_count: 25,
             foreign_as_quill: false,
             custom_dictionary: Some(PathBuf::from("/Custom/100%\nwords.txt")),
@@ -1335,6 +1404,28 @@ mod tests {
     }
 
     #[test]
+    fn hostile_defaults_are_bounded_before_creating_or_measuring_documents() {
+        let s = Settings::from_text(
+            "doc.margin_left = 2147483647\ndoc.margin_right = 2147483647\n\
+             doc.margin_top = -2147483648\ndoc.gutter = 2147483647\n\
+             doc.default_tab = 2147483647\nsec.columns = 65535\n\
+             sec.column_spacing = 2147483647\nsec.header_from_top = -2147483648\n",
+        );
+        assert!(s.document.text_width() >= quill_core::limits::MIN_TEXT);
+        assert!(s.section.columns <= quill_core::limits::MAX_COLUMNS);
+        assert_eq!(s.document.margin_top, 0);
+        assert_eq!(s.section.header_from_top, 0);
+        let mut direct = s;
+        direct.document.margin_left = i32::MAX;
+        direct.document.margin_right = i32::MAX;
+        direct.section.columns = u16::MAX;
+        let doc = direct.new_document();
+        assert!(doc.props.text_width() >= quill_core::limits::MIN_TEXT);
+        assert!(doc.section.columns <= quill_core::limits::MAX_COLUMNS);
+        assert!(!doc.is_modified());
+    }
+
+    #[test]
     fn new_documents_use_the_defaults() {
         let mut s = Settings {
             font: "Geneva".into(),
@@ -1364,6 +1455,39 @@ mod tests {
             assert_eq!(Settings::from_text(&text).window_frame, None);
         }
     }
+    #[test]
+    fn saved_colors_keep_their_names() {
+        let s = Settings {
+            named_colors: vec![
+                (0xFF0000, "Company Color".into()),
+                (0x00FF00, String::new()),
+            ],
+            ..Default::default()
+        };
+        let back = Settings::from_text(&s.to_text());
+        assert_eq!(back.named_colors, s.named_colors);
+    }
+
+    #[test]
+    fn kept_fonts_belong_to_a_document() {
+        let mut s = Settings::default();
+        s.accepted_fonts
+            .push((PathBuf::from("/Docs/A b.qwp"), vec!["Nosuch Sans".into()]));
+        let back = Settings::from_text(&s.to_text());
+        assert_eq!(back.accepted_fonts, s.accepted_fonts);
+    }
+
+    #[test]
+    fn new_table_borders_default_to_black_and_round_trip() {
+        let s = Settings::default();
+        assert_eq!((s.table_border_color, s.table_border_dotted), (0, false));
+        assert_eq!(s.table_gridline_color, 0x808080);
+        let s = Settings::from_text("table_border_color = #336699\ntable_border_dotted = 1\n");
+        let back = Settings::from_text(&s.to_text());
+        assert_eq!(back.table_border_color, 0x336699);
+        assert!(back.table_border_dotted);
+    }
+
     #[test]
     fn gridline_look_round_trips() {
         let s = Settings::default();

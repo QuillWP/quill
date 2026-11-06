@@ -8,7 +8,7 @@ use crate::settings::{self, Unit};
 
 /// Panels: name and icon. Grammar, Thesaurus and Hyphenation have no
 /// settings in Quill yet, so their panels are left out.
-const PANELS: [&str; 7] = [
+const PANELS: [&str; 8] = [
     "General",
     "View",
     "Open And Save",
@@ -16,12 +16,21 @@ const PANELS: [&str; 7] = [
     "Spelling",
     "Toolbar",
     "Advanced",
+    "Colors",
 ];
 /// The Spelling panel, which the Spelling window's Options… opens.
 pub const DEFAULT_FONT_PANEL: usize = 3;
 pub const SPELLING_PANEL: usize = 4;
 pub const TOOLBAR_PANEL: usize = 5;
 pub const ADVANCED_PANEL: usize = 6;
+pub const COLORS_PANEL: usize = 7;
+
+const COLOR_IDS: [&str; settings::MAX_NAMED_COLORS] = [
+    "color0", "color1", "color2", "color3", "color4", "color5", "color6", "color7",
+];
+const COLOR_NAMES: [&str; settings::MAX_NAMED_COLORS] = [
+    "cname0", "cname1", "cname2", "cname3", "cname4", "cname5", "cname6", "cname7",
+];
 /// Item ids for the ten font folder slots.
 const FOLDER_ON: [&str; 10] = [
     "fon0", "fon1", "fon2", "fon3", "fon4", "fon5", "fon6", "fon7", "fon8", "fon9",
@@ -43,6 +52,8 @@ const AUTOSAVE: [(&str, u32); 6] = [
     ("Every 5 minutes", 300),
     ("Every 10 minutes", 600),
 ];
+/// How large the toolbars, ruler and dialogs are drawn, in percent.
+const INTERFACE_SIZES: [u16; 5] = [90, 100, 110, 125, 150];
 const SIZES: [&str; 11] = [
     "9", "10", "12", "14", "18", "24", "36", "48", "60", "72", "96",
 ];
@@ -51,7 +62,7 @@ const SIZES: [&str; 11] = [
 pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
     let s = settings::get();
     let height = if panel == ADVANCED_PANEL {
-        412.0
+        436.0
     } else {
         332.0
     };
@@ -78,25 +89,25 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
             let at = Unit::ALL.iter().position(|u| *u == s.unit).unwrap_or(0);
             d.popup("unit", &names, at, 139.0, 100.0, 89.0);
             d.check(
-                "smart",
-                "\u{201C}Smart\u{201D} Quotes",
-                12.0,
-                126.0,
-                s.smart_quotes,
-            );
-            d.check(
                 "autolinks",
                 "Make Typed Web and Mail Addresses Links",
                 12.0,
-                143.0,
+                126.0,
                 s.auto_links,
             );
             d.check(
                 "fmtclip",
                 "Include Formatted Text in Clipboard",
                 12.0,
-                160.0,
+                143.0,
                 s.formatted_clipboard,
+            );
+            d.check(
+                "autolists",
+                "Start Lists from a Typed * or -",
+                12.0,
+                160.0,
+                s.auto_lists,
             );
             d.text("Default Paper:", 11.0, 184.0);
             let mut papers: Vec<&str> = crate::page_dialogs::PAPERS.iter().map(|p| p.0).collect();
@@ -276,6 +287,27 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
             d.radio("tbright", "Right (Vertical)", 20.0, 155.0, 1, at == 2);
             d.button("customize", "Customize…", 9.0, 195.0, 110.0, false);
         }
+        COLORS_PANEL => {
+            d.text(
+                "Colors for every document. They lead the Custom row of the",
+                11.0,
+                40.0,
+            );
+            d.text("palette, and pointing at one shows its name.", 11.0, 56.0);
+            d.text("HTML Code", 11.0, 80.0);
+            d.text("Name", 110.0, 80.0);
+            for row in 0..settings::MAX_NAMED_COLORS {
+                let y = 98.0 + 25.0 * row as f32;
+                let (hex, name) = s
+                    .named_colors
+                    .get(row)
+                    .map_or((String::new(), ""), |(c, n)| {
+                        (crate::palette::hex(quill_core::props::Rgb(*c)), n.as_str())
+                    });
+                d.field(COLOR_IDS[row], &hex, 11.0, y, 88.0);
+                d.field(COLOR_NAMES[row], name, 110.0, y, 250.0);
+            }
+        }
         ADVANCED_PANEL => {
             d.group("Extra Font Folders", 11.0, 36.0, 420.0, 272.0);
             for slot in 0..settings::MAX_FONT_FOLDERS {
@@ -323,6 +355,20 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
                 .unwrap_or(1);
             let names: Vec<&str> = AUTOSAVE.iter().map(|a| a.0).collect();
             d.popup("autosave", &names, at, 139.0, 355.0, 150.0);
+            d.check(
+                "smart",
+                "\u{201C}Smart\u{201D} Quotes",
+                12.0,
+                412.0,
+                s.smart_quotes,
+            );
+            d.text("Interface Size:", 180.0, 412.0);
+            let names: Vec<String> = INTERFACE_SIZES.iter().map(|z| format!("{z}%")).collect();
+            let at = INTERFACE_SIZES
+                .iter()
+                .position(|z| *z == s.interface_scale)
+                .unwrap_or(1);
+            d.popup_owned("ui_size", names, at, 280.0, 409.0, 90.0);
             d.text("Documents in Open Recent (1-50):", 11.0, 386.0);
             d.field(
                 "recent_count",
@@ -448,9 +494,9 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
                     (s.document.page_width, s.document.page_height) =
                         if landscape { (h, w) } else { (w, h) };
                 }
-                s.smart_quotes = on("smart");
                 s.auto_links = on("autolinks");
                 s.formatted_clipboard = on("fmtclip");
+                s.auto_lists = on("autolists");
             });
         }
         1 => settings::update(|s| {
@@ -494,6 +540,16 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
             s.ignore_uppercase = on("upper");
             s.ignore_numbers = on("numbers");
         }),
+        COLORS_PANEL => settings::update(|s| {
+            s.named_colors = COLOR_IDS
+                .iter()
+                .zip(COLOR_NAMES)
+                .filter_map(|(hex, name)| {
+                    let c = crate::palette::parse_hex(&d.field_text(hex))?;
+                    Some((c.0, d.field_text(name).trim().to_string()))
+                })
+                .collect();
+        }),
         ADVANCED_PANEL => settings::update(|s| {
             for (slot, folder) in s.font_folders.iter_mut().enumerate() {
                 folder.enabled = on(FOLDER_ON[slot]);
@@ -502,6 +558,10 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
                 && levels <= settings::MAX_FONT_LEVELS
             {
                 s.font_folder_levels = levels;
+            }
+            s.smart_quotes = on("smart");
+            if id == "ui_size" {
+                s.interface_scale = INTERFACE_SIZES[d.selected("ui_size").min(4)];
             }
             if id == "autosave"
                 && let Some(&(_, secs)) = AUTOSAVE.get(d.selected("autosave"))
@@ -532,6 +592,18 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_colors_panel_saves_a_named_color() {
+        let mut d = preferences(COLORS_PANEL, &[]);
+        d.set_field("color0", "#FF0000");
+        d.set_field("cname0", "Company Color");
+        d.set_field("color1", "not a color");
+        changed(COLORS_PANEL, &mut d, "cname0");
+        let saved = settings::with(|s| s.named_colors.clone());
+        settings::update(|s| s.named_colors.clear());
+        assert_eq!(saved, [(0xFF0000, "Company Color".to_string())]);
+    }
 
     #[test]
     fn reopen_documents_preference_saves_and_reads_back() {

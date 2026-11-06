@@ -142,10 +142,13 @@ impl DocView {
             want[row.end] = 12.0;
             i = row.end + 1;
         }
-        // Outline view indents each paragraph by its level.
+        // Outline view indents each paragraph by its level. A table of
+        // contents keeps its width, or its page numbers would wrap at the
+        // right tab.
         if self.outline {
+            let toc_end = self.doc.existing_toc();
             for (i, w) in want.iter_mut().enumerate() {
-                if !paras[i].pap.in_table {
+                if !paras[i].pap.in_table && toc_end.is_none_or(|end| i > end) {
                     *w = (*w - self.outline_x(i).1).max(36.0);
                 }
             }
@@ -460,7 +463,7 @@ impl DocView {
         let mut endnotes = Vec::new();
         let mut y = 0.0;
         let mut pads = Vec::new();
-        let pad_marks = !self.page_view && !self.outline;
+        let pad_marks = !self.page_view;
         let mut end_notes = |y: &mut f32, after: usize| {
             for (_, ids) in end_groups.iter().filter(|g| g.0 == after) {
                 let height =
@@ -527,6 +530,10 @@ impl DocView {
                     row: None,
                 });
                 y += h;
+                if pad_marks && paras[i].mark == Mark::SectionBreak && i + 1 < n {
+                    pads.push(y);
+                    y += SECTION_PAD;
+                }
                 i += 1;
                 continue;
             }

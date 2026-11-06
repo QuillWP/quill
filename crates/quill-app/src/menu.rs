@@ -331,6 +331,61 @@ pub fn scroll_by(menu: &Menu, open: &mut OpenMenu, rows: i32) -> bool {
     changed
 }
 
+/// Scroll a tall menu until item `i` can be seen.
+fn reveal(menu: &Menu, open: &mut OpenMenu, i: usize) {
+    if !scrolls(menu, open) {
+        return;
+    }
+    let max = menu.items.len().saturating_sub(open.visible_rows) + 1;
+    open.scroll = open.scroll.min(i);
+    while open.scroll < max && item_rect(menu, open, i).is_none() {
+        open.scroll += 1;
+    }
+}
+
+/// Light the next item that can be chosen, or the last one going up. With
+/// none lit yet, the item with the check mark, so a font menu starts at the
+/// current font.
+pub fn step(menu: &Menu, open: &mut OpenMenu, down: bool) {
+    let usable = |i: &usize| {
+        let it = &menu.items[*i];
+        !it.separator && it.enabled
+    };
+    let n = menu.items.len();
+    let found = match open.hot {
+        Some(hot) if down => (hot + 1..n).find(|i| usable(i)),
+        Some(hot) => (0..hot).rev().find(|i| usable(i)),
+        None => (0..n)
+            .find(|&i| menu.items[i].checked && usable(&i))
+            .or_else(|| {
+                if down {
+                    (0..n).find(|i| usable(i))
+                } else {
+                    (0..n).rev().find(|i| usable(i))
+                }
+            }),
+    };
+    if let Some(i) = found {
+        open.hot = Some(i);
+        reveal(menu, open, i);
+    }
+}
+
+/// Light the first item that starts with `typed`. Returns whether there is
+/// one.
+pub fn jump(menu: &Menu, open: &mut OpenMenu, typed: &str) -> bool {
+    let typed = typed.to_lowercase();
+    let found = menu
+        .items
+        .iter()
+        .position(|it| !it.separator && it.enabled && it.label.to_lowercase().starts_with(&typed));
+    if let Some(i) = found {
+        open.hot = Some(i);
+        reveal(menu, open, i);
+    }
+    found.is_some()
+}
+
 pub fn draw_menu(c: &mut Canvas, label: &mut Label, menu: &Menu, open: &OpenMenu) {
     draw_menu_face(c, label, menu, open, interface_font(), BOLD);
 }
@@ -475,6 +530,48 @@ mod tests {
         let bold = Item::new("Bold", 2).checked(false);
         assert!(bold.checkable);
         assert!(!bold.checked);
+    }
+
+    #[test]
+    fn the_arrows_and_typing_keep_the_lit_item_in_view() {
+        let (mut menu, mut open) = tall_menu(40);
+        menu.items[3] = Item::separator();
+        menu.items[5] = menu.items[5].clone().enabled(false);
+        step(&menu, &mut open, true);
+        assert_eq!(open.hot, Some(0));
+        for _ in 0..4 {
+            step(&menu, &mut open, true);
+        }
+        // Over the separator and the dimmed item.
+        assert_eq!(open.hot, Some(6));
+        for i in 7..40 {
+            step(&menu, &mut open, true);
+            assert_eq!(open.hot, Some(i));
+            assert!(item_rect(&menu, &open, i).is_some(), "item {i}");
+        }
+        step(&menu, &mut open, true);
+        assert_eq!(open.hot, Some(39));
+        for i in (7..39).rev() {
+            step(&menu, &mut open, false);
+            assert_eq!(open.hot, Some(i));
+            assert!(item_rect(&menu, &open, i).is_some(), "item {i}");
+        }
+        assert!(jump(&menu, &mut open, "FONT 2"));
+        assert_eq!(open.hot, Some(2));
+        assert!(item_rect(&menu, &open, 2).is_some());
+        assert!(jump(&menu, &mut open, "font 39"));
+        assert!(item_rect(&menu, &open, 39).is_some());
+        assert!(!jump(&menu, &mut open, "palatino"));
+        assert_eq!(open.hot, Some(39));
+    }
+
+    #[test]
+    fn the_first_arrow_starts_at_the_checked_item() {
+        let (mut menu, mut open) = tall_menu(30);
+        menu.items[20] = menu.items[20].clone().checked(true);
+        step(&menu, &mut open, true);
+        assert_eq!(open.hot, Some(20));
+        assert!(item_rect(&menu, &open, 20).is_some());
     }
 
     fn tall_menu(count: usize) -> (Menu, OpenMenu) {

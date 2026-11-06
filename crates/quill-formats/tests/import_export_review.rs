@@ -37,6 +37,7 @@ fn cell_shading_and_borders_survive_docx_and_rtf() {
     let line = BorderLine {
         style: BorderStyle::Thick,
         space: 0,
+        ..Default::default()
     };
     for c in &mut props.cells {
         c.shading = 500;
@@ -119,6 +120,7 @@ fn mixed_cell_table() -> Document {
     let thick = BorderLine {
         style: BorderStyle::Thick,
         space: 0,
+        ..Default::default()
     };
     let c = &mut props.cells[0];
     c.shading = 500;

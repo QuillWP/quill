@@ -333,7 +333,7 @@ pub fn draw(
                 canvas::round_rect(c, backing(r), 4.0, HOVER);
             }
             // Buttons that can do nothing just now show faded.
-            let alpha = if live { 255 } else { 80 };
+            let alpha = if live { 255 } else { c.faded() };
             let t = &TOOLS[pic];
             let k = fit(t);
             let x = r.x + (r.w - t.grid.0 as f32 * k) / 2.0;
@@ -346,12 +346,17 @@ pub fn draw(
     c.restore_clip(clip);
 }
 
-/// The enabled button under a point, by index.
-pub fn hit(at: Place, x: f32, y: f32, s: &ToolState) -> Option<usize> {
+/// The button under a point, by index, whether it can be used now or not:
+/// a faded button still says what it is.
+pub fn button_at(at: Place, x: f32, y: f32) -> Option<usize> {
     rects(at)
         .iter()
         .position(|r| r.w > 0.0 && cell(at, *r).contains(x, y))
-        .filter(|&i| enabled(slot(i).1, s))
+}
+
+/// The enabled button under a point, by index.
+pub fn hit(at: Place, x: f32, y: f32, s: &ToolState) -> Option<usize> {
+    button_at(at, x, y).filter(|&i| enabled(slot(i).1, s))
 }
 
 /// Button `i`'s frame, for placing a menu that drops from it.

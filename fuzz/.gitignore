@@ -3,3 +3,4 @@ corpus/
 coverage/
 target/
 runs/
+word-fixtures/

@@ -126,7 +126,7 @@ fn write_to(doc: &Document, folder: Option<&str>) -> (String, Vec<PictureFile>) 
         for (n, id) in w.images.iter().enumerate() {
             if let Some(pic) = doc.picture(*id) {
                 files.push(PictureFile {
-                    name: picture_name(n, pic.format.extension()),
+                    name: picture_name(n, pic),
                     bytes: pic.data.to_vec(),
                 });
             }
@@ -154,8 +154,15 @@ fn write_to(doc: &Document, folder: Option<&str>) -> (String, Vec<PictureFile>) 
 }
 
 /// The file name of the `n`th picture (from 0) written.
-fn picture_name(n: usize, extension: &str) -> String {
-    format!("image{}.{extension}", n + 1)
+fn picture_name(n: usize, pic: &quill_core::Picture) -> String {
+    // New bytes get a new name, so preparing a save never changes the
+    // pictures referenced by the Markdown file still on disk.
+    format!(
+        "image{}-{:08x}.{}",
+        n + 1,
+        crate::zip::crc32(&pic.data),
+        pic.format.extension()
+    )
 }
 
 /// Whether a link's text is just its address, which Markdown readers make a
@@ -649,10 +656,7 @@ impl Writer<'_> {
                             out.switch(&look.marks());
                             match (&self.folder, self.doc.picture(chp.object)) {
                                 (Some(folder), Some(pic)) => {
-                                    let path = format!(
-                                        "{folder}/{}",
-                                        picture_name(n, pic.format.extension())
-                                    );
+                                    let path = format!("{folder}/{}", picture_name(n, pic));
                                     out.s
                                         .push_str(&format!("![Picture]({})", destination(&path)));
                                 }

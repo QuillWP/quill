@@ -1103,7 +1103,8 @@ impl NativeDialog {
                     }
                     Kind::Custom if matches!(control.kind, ControlKind::Table) => {
                         let rows = crate::commands_dialog::native_rows(dialog, control.id);
-                        let has_rows = !rows.is_empty();
+                        let has_rows =
+                            !rows.is_empty() && rows[0] != crate::commands_dialog::NO_SHORTCUT;
                         let changed = tables().lock().is_ok_and(|mut tables| {
                             let Some(data) =
                                 tables.iter_mut().find(|data| data.table == ptr as usize)
@@ -1118,6 +1119,10 @@ impl NativeDialog {
                         });
                         if changed {
                             let _: () = msg_send![ptr, reloadData];
+                            if control.id == "keys" && !has_rows {
+                                let none: *mut AnyObject = std::ptr::null_mut();
+                                let _: () = msg_send![ptr, deselectAll: none];
+                            }
                         }
                         let desired = crate::commands_dialog::native_selection(dialog, control.id)
                             .or_else(|| (control.id == "keys" && changed && has_rows).then_some(0));
@@ -1577,7 +1582,8 @@ unsafe fn popover_view(
                     set_swatch_picture_marked(ptr, 0xF4F4F4, frame.size, false);
                 }
                 if let Some(rgb) = item.rgb {
-                    let tip = NSString::from_str(&format!("#{:06X}", rgb & 0xFF_FFFF));
+                    let hex = format!("#{:06X}", rgb & 0xFF_FFFF);
+                    let tip = NSString::from_str(item.tip.as_deref().unwrap_or(&hex));
                     let _: () = msg_send![ptr, setToolTip: &*tip];
                 }
             } else {

@@ -11,6 +11,8 @@ pub struct RichContent {
     pub fragment: Fragment,
     fonts: Vec<String>,
     styles: StyleSheet,
+    /// Copied from another application, not from a Quill document.
+    external: bool,
 }
 
 impl RichContent {
@@ -19,7 +21,43 @@ impl RichContent {
             fragment,
             fonts: source.fonts.clone(),
             styles: source.styles.clone(),
+            external: false,
         }
+    }
+
+    /// Text from another application can name a font that is not on this
+    /// computer, such as a web font a browser downloaded for one page.
+    /// Kept, it shows in a stand-in and warns on every open, so it takes
+    /// `font`, the font where it is going, instead. Returns the names of the
+    /// fonts the text had been using. Copies within Quill keep their fonts.
+    pub fn drop_missing_fonts(
+        &mut self,
+        font: &str,
+        installed: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
+        if !self.external {
+            return Vec::new();
+        }
+        let mut used = BTreeSet::new();
+        for p in self
+            .fragment
+            .paras
+            .iter()
+            .chain(self.fragment.notes.iter().flat_map(|note| &note.paras))
+        {
+            used.extend(p.runs.iter().filter(|r| r.len > 0).map(|r| r.chp.font));
+        }
+        let mut dropped = Vec::new();
+        for (id, name) in self.fonts.iter_mut().enumerate() {
+            if installed(name) {
+                continue;
+            }
+            if u16::try_from(id).is_ok_and(|id| used.contains(&id)) && !dropped.contains(name) {
+                dropped.push(name.clone());
+            }
+            *name = font.to_string();
+        }
+        dropped
     }
 
     pub fn from_document(doc: Document, plain: Option<&str>) -> Self {
@@ -40,7 +78,10 @@ impl RichContent {
                 }
             }
         }
-        Self::new(&doc, frag)
+        Self {
+            external: true,
+            ..Self::new(&doc, frag)
+        }
     }
 
     pub fn document(&self) -> Document {
@@ -136,6 +177,60 @@ impl RichContent {
 mod tests {
     use super::*;
     use quill_core::Selection;
+
+    #[test]
+    fn pasted_text_gives_up_fonts_that_are_not_installed() {
+        let installed = |name: &str| name != "Google Sans";
+        let mut source = Document::new();
+        let web = source.font_id("Google Sans");
+        let georgia = source.font_id("Georgia");
+        let base = source.styles.get(0).chp;
+        let bold_web = quill_core::CharProps {
+            font: web,
+            bold: true,
+            ..base
+        };
+        let plain = quill_core::CharProps {
+            font: georgia,
+            ..base
+        };
+        source.main.paras[0].insert(0, "web", bold_web);
+        source.main.paras[0].insert(3, "kept", plain);
+        let fragment = source.copy(
+            StoryId::Main,
+            Position::new(0, 0),
+            Position::new(0, source.main.paras[0].len()),
+        );
+
+        // A copy within Quill keeps its fonts.
+        let mut own = RichContent::new(&source, fragment);
+        assert!(own.drop_missing_fonts("Times", installed).is_empty());
+
+        let mut rich = RichContent::from_document(source, None);
+        assert_eq!(rich.drop_missing_fonts("Times", installed), ["Google Sans"]);
+        let mut target = Document::new();
+        target.begin("Paste", Selection::default());
+        let pasted = rich.prepare(&mut target);
+        let c = pasted.paras[0].chp_of_char(0);
+        assert_eq!(target.font_name(c.font), "Times");
+        assert!(c.bold, "only the font changes");
+        let c = pasted.paras[0].chp_of_char(3);
+        assert_eq!(target.font_name(c.font), "Georgia");
+    }
+
+    #[test]
+    fn rtf_copied_from_a_browser_loses_its_web_font() {
+        let rtf = br"{\rtf1\ansi{\fonttbl\f0\fnil Google Sans;}\f0\fs24 Hello}";
+        let doc = quill_formats::rtf::read(rtf).unwrap();
+        let mut rich = RichContent::from_document(doc, Some("Hello"));
+        let dropped = rich.drop_missing_fonts("Georgia", |name| name != "Google Sans");
+        assert_eq!(dropped, ["Google Sans"]);
+        let mut target = Document::new();
+        target.begin("Paste", Selection::default());
+        let pasted = rich.prepare(&mut target);
+        let chp = pasted.paras[0].chp_of_char(0);
+        assert_eq!(target.font_name(chp.font), "Georgia");
+    }
 
     #[test]
     fn cross_document_paste_remaps_fonts_and_reuses_conflicting_styles() {

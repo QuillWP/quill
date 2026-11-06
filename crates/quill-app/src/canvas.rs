@@ -86,6 +86,17 @@ pub fn dark_ink(c: u32) -> u32 {
     c
 }
 
+/// Color `c` of a toolbar icon in dark mode. Mid grays, which turning over
+/// leaves where they were, lift so they stand out on the dark bar.
+fn dark_icon_ink(c: u32) -> u32 {
+    let d = dark_ink(c);
+    let (r, g, b) = ((d >> 16) & 255, (d >> 8) & 255, d & 255);
+    if r.max(g).max(b) - r.min(g).min(b) < 32 && (0x50..0xB8).contains(&g) {
+        return 0xB8B8B8;
+    }
+    d
+}
+
 /// Coverage-to-alpha curve that darkens light anti-aliasing a little, so
 /// black text on white does not look washed out without gamma-correct
 /// blending.
@@ -365,6 +376,12 @@ impl<'a> Canvas<'a> {
 
     /// Blend premultiplied 0xAARRGGBB pixels, `w` wide, with their top left
     /// at device pixel (`ox`, `oy`), faded to `alpha` (0-255).
+    /// How opaque a button that can't be used now is drawn. Dark mode needs
+    /// more, or a faded icon sinks into the bar.
+    pub fn faded(&self) -> u8 {
+        if self.dark { 140 } else { 80 }
+    }
+
     pub fn image(&mut self, px: &[u32], w: u32, ox: i32, oy: i32, alpha: u32) {
         let h = px.len() as i32 / w.max(1) as i32;
         for iy in 0..h {
@@ -386,7 +403,7 @@ impl<'a> Canvas<'a> {
                     // Unpremultiply, take the dark color, premultiply again.
                     let a = (s >> 24).max(1);
                     let un = |sh: u32| (((s >> sh) & 255) * 255 / a).min(255);
-                    let c = dark_ink(un(16) << 16 | un(8) << 8 | un(0));
+                    let c = dark_icon_ink(un(16) << 16 | un(8) << 8 | un(0));
                     let pre = |sh: u32| ((c >> sh) & 255) * a / 255;
                     s = a << 24 | pre(16) << 16 | pre(8) << 8 | pre(0);
                 }

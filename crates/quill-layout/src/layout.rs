@@ -195,8 +195,11 @@ pub struct BorderBox {
     pub bottom_line: BorderStyle,
     pub left_line: BorderStyle,
     pub right_line: BorderStyle,
+    /// Those lines' colors: top, bottom, left, right.
+    pub colors: [quill_core::props::Rgb; 4],
     /// Shading in tenths of a percent.
     pub shading: u16,
+    pub shading_color: Option<quill_core::props::Rgb>,
     /// Shadow preset: the right and bottom lines are drawn heavier.
     pub shadow: bool,
 }
@@ -214,7 +217,11 @@ pub fn border_width(style: BorderStyle) -> f32 {
 
 /// Whether two neighboring paragraphs share a border box.
 pub fn joins(a: &ParaProps, b: &ParaProps) -> bool {
-    a.borders == b.borders && a.left == b.left && a.right == b.right && a.shading == b.shading
+    a.borders == b.borders
+        && a.left == b.left
+        && a.right == b.right
+        && a.shading == b.shading
+        && a.shading_color == b.shading_color
 }
 
 /// Whether the paragraph above and below share this paragraph's box.
@@ -229,7 +236,7 @@ impl Joins {
     /// borders or shading has one.
     pub fn around(paras: &[Paragraph], i: usize) -> Joins {
         let pap = &paras[i].pap;
-        let boxed = !pap.borders.is_none() || pap.shading > 0;
+        let boxed = !pap.borders.is_none() || (pap.shading > 0 || pap.shading_color.is_some());
         Joins {
             above: boxed && i > 0 && joins(&paras[i - 1].pap, pap),
             below: boxed && i + 1 < paras.len() && joins(pap, &paras[i + 1].pap),
@@ -310,7 +317,7 @@ pub fn layout_paragraph_joined(
     let pt = |t: i32| t as f32 / 20.0;
     // Room for the border lines and their distance from the text.
     let b = &pap.borders;
-    let boxed = !b.is_none() || pap.shading > 0;
+    let boxed = !b.is_none() || (pap.shading > 0 || pap.shading_color.is_some());
     let edge = |l: &BorderLine| border_width(l.style) + pt(l.space);
     let (above, below) = if !boxed {
         (0.0, 0.0)
@@ -568,10 +575,11 @@ pub fn layout_paragraph_joined(
     out.glyphs = glyphs;
     out.height = y + pt(pap.after) + below;
     if boxed {
-        let (top_line, top) = if joins.above {
-            (b.between.style, border_width(b.between.style))
+        let (top_line, top, top_color) = if joins.above {
+            let line = b.between;
+            (line.style, border_width(line.style), line.color)
         } else {
-            (b.top.style, border_width(b.top.style))
+            (b.top.style, border_width(b.top.style), b.top.color)
         };
         let (bottom_line, bottom) = if joins.below {
             (BorderStyle::None, out.height)
@@ -587,7 +595,9 @@ pub fn layout_paragraph_joined(
             bottom_line,
             left_line: b.left.style,
             right_line: b.right.style,
+            colors: [top_color, b.bottom.color, b.left.color, b.right.color],
             shading: pap.shading,
+            shading_color: pap.shading_color,
             shadow: b.shadow,
         });
     }

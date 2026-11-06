@@ -5,7 +5,7 @@ use crate::zip;
 use quill_core::Document;
 use quill_core::para::{Paragraph, chars};
 use quill_core::props::{
-    Align, BorderStyle, CellProps, CharProps, LineSpacing, ParaProps, Underline, VAlign,
+    Align, BorderLine, BorderStyle, CellProps, CharProps, LineSpacing, ParaProps, Underline, VAlign,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -94,8 +94,13 @@ fn para_props(p: &ParaProps) -> String {
         LineSpacing::AtLeast(n) => format!("style:line-height-at-least=\"{}pt\"", points(n)),
     };
     let gray = 255 - (255u32 * p.shading.min(1000) as u32 / 1000);
+    let fill = if p.shading_color.is_some() || p.shading > 0 {
+        format!("#{:06x}", p.shading_color.map_or(gray * 0x010101, |c| c.0))
+    } else {
+        "transparent".into()
+    };
     format!(
-        r##"<style:paragraph-properties fo:text-align="{}" fo:margin-left="{}pt" fo:margin-right="{}pt" fo:margin-top="{}pt" fo:margin-bottom="{}pt" fo:text-indent="{}pt" {line} fo:break-before="{}" fo:keep-with-next="{}" fo:keep-together="{}" fo:background-color="#{gray:02x}{gray:02x}{gray:02x}"/>"##,
+        r##"<style:paragraph-properties fo:text-align="{}" fo:margin-left="{}pt" fo:margin-right="{}pt" fo:margin-top="{}pt" fo:margin-bottom="{}pt" fo:text-indent="{}pt" {line} fo:break-before="{}" fo:keep-with-next="{}" fo:keep-together="{}" fo:background-color="{fill}"/>"##,
         match p.align {
             Align::Left => "start",
             Align::Center => "center",
@@ -115,15 +120,16 @@ fn para_props(p: &ParaProps) -> String {
 
 /// A border as `fo:border` writes it. The widths are chosen so the reader
 /// maps each back to the same line style.
-fn border_value(style: BorderStyle) -> &'static str {
-    match style {
-        BorderStyle::None => "none",
-        BorderStyle::Dotted => "0.5pt dotted #000000",
-        BorderStyle::Hairline => "0.25pt solid #000000",
-        BorderStyle::Single => "0.5pt solid #000000",
-        BorderStyle::Thick => "3pt solid #000000",
-        BorderStyle::Double => "1.5pt double #000000",
-    }
+fn border_value(line: &BorderLine) -> String {
+    let kind = match line.style {
+        BorderStyle::None => return "none".to_string(),
+        BorderStyle::Dotted => "0.5pt dotted",
+        BorderStyle::Hairline => "0.25pt solid",
+        BorderStyle::Single => "0.5pt solid",
+        BorderStyle::Thick => "3pt solid",
+        BorderStyle::Double => "1.5pt double",
+    };
+    format!("{kind} #{:06x}", line.color.0 & 0xFF_FFFF)
 }
 
 struct Writer<'a> {
@@ -172,9 +178,11 @@ impl Writer<'_> {
             ("left", b.left),
             ("right", b.right),
         ] {
-            let _ = write!(props, r#" fo:border-{edge}="{}""#, border_value(line.style));
+            let _ = write!(props, r#" fo:border-{edge}="{}""#, border_value(&line));
         }
-        if cell.shading > 0 {
+        if let Some(color) = cell.shading_color {
+            let _ = write!(props, r##" fo:background-color="#{:06x}""##, color.0);
+        } else if cell.shading > 0 {
             let gray = 255 - (255u32 * cell.shading.min(1000) as u32 / 1000);
             let _ = write!(
                 props,

@@ -4,7 +4,7 @@
 
 use crate::dialog::{Dialog, units};
 use crate::docview::DocView;
-use quill_core::props::{BorderLine, BorderStyle, Borders, SHADING_STEPS};
+use quill_core::props::{BorderLine, BorderStyle, Borders, Rgb, SHADING_STEPS};
 
 /// Sides of the box, as bits of `BorderState::sel`.
 const TOP: u8 = 1;
@@ -26,13 +26,24 @@ const LINES: [(&str, BorderStyle); 6] = [
 #[derive(Clone, Debug)]
 pub struct BorderState {
     /// What the paragraph had, to tell whether anything changed.
-    base: (Borders, u16),
+    base: (Borders, u16, Option<Rgb>),
     pub borders: Borders,
     pub shading: u16,
+    pub shading_color: Option<Rgb>,
     /// Sides picked in the preview.
     pub sel: u8,
     /// The line style chosen in the list.
     pub line: BorderStyle,
+    /// The line color chosen.
+    pub color: Rgb,
+}
+
+/// The line colors offered: the standard ones and what the line has now,
+/// without the entry that opens the palette.
+fn color_choices(have: Rgb) -> (Vec<String>, usize) {
+    let (mut names, at) = crate::format_dialogs::color_options(Some(have), false);
+    names.pop();
+    (names, at)
 }
 
 fn side(b: &mut Borders, bit: u8) -> &mut BorderLine {
@@ -56,6 +67,68 @@ fn shading_label(v: u16) -> String {
     }
 }
 
+fn shading_choices(shading: u16, color: Option<Rgb>) -> (Vec<String>, usize) {
+    let mut names: Vec<String> = SHADING_STEPS.iter().map(|&v| shading_label(v)).collect();
+    let (colors, at) = color_choices(color.unwrap_or(Rgb::BLACK));
+    let selected = color.map_or_else(
+        || {
+            SHADING_STEPS
+                .iter()
+                .position(|&v| v == shading)
+                .unwrap_or(0)
+        },
+        |_| names.len() + at,
+    );
+    names.extend(colors);
+    (names, selected)
+}
+
+/// Refresh controls after choosing a different target for the formatting.
+fn sync_controls(st: &BorderState, d: &mut Dialog) {
+    let (names, selected) = shading_choices(st.shading, st.shading_color);
+    d.set_options("shading", names, selected);
+    let space = [
+        st.borders.top,
+        st.borders.left,
+        st.borders.bottom,
+        st.borders.right,
+    ]
+    .iter()
+    .map(|l| l.space)
+    .max()
+    .unwrap_or(0);
+    d.set_field("space", &units::points(space));
+    for (id, bit) in [
+        ("top", TOP),
+        ("bottom", BOTTOM),
+        ("left", LEFT),
+        ("right", RIGHT),
+        ("between", BETWEEN),
+    ] {
+        d.set_on(id, !side(&mut st.borders.clone(), bit).is_none());
+    }
+    let (names, at) = color_choices(st.color);
+    d.set_options("line_color", names, at);
+    d.set_selected(
+        "lines",
+        LINES
+            .iter()
+            .position(|(_, style)| *style == st.line)
+            .unwrap_or(3),
+    );
+    update_preview(st, d);
+}
+
+pub fn target_changed(st: &mut BorderState, d: &mut Dialog, view: &DocView) {
+    if d.selected("applyto") == 1 {
+        *st = for_cells(st.clone(), view, d);
+    } else {
+        let (_, fresh) = border(view);
+        *st = fresh;
+        sync_controls(st, d);
+    }
+}
+
 pub fn border(view: &DocView) -> (Dialog, BorderState) {
     let p = view.current_pap();
     let b = p.borders;
@@ -75,6 +148,18 @@ pub fn border(view: &DocView) -> (Dialog, BorderState) {
         .map(|l| l.space)
         .max()
         .unwrap_or(0);
+    // In a table the cell's own lines say which color to start from.
+    let cell = crate::table_dialogs::table_selection(view).map(|ts| {
+        let paras = &view.doc.main.paras;
+        let row = quill_core::table::row_props(paras, &ts.rows[0], view.doc.props.text_width());
+        row.cells[ts.from.min(row.cells.len() - 1)].borders
+    });
+    let color = [cell, Some(b)]
+        .into_iter()
+        .flatten()
+        .flat_map(|b| [b.top, b.bottom, b.left, b.right, b.between])
+        .find(|l| !l.is_none())
+        .map_or(Rgb::BLACK, |l| l.color);
     let mut d = Dialog::new("Border", 368.0, 248.0);
     d.group("Border", 12.0, 6.0, 149.0, 161.0);
     d.check("top", "Top", 18.0, 22.0, sel & TOP != 0);
@@ -99,14 +184,13 @@ pub fn border(view: &DocView) -> (Dialog, BorderState) {
         .unwrap_or(3);
     d.popup("lines", &line_names, line_at, 174.0, 25.0, 104.0);
     d.text_as("line_preview", "", 176.0, 58.0);
+    d.text("Color:", 176.0, 80.0);
+    let (colors, color_at) = color_choices(color);
+    d.popup_owned("line_color", colors, color_at, 174.0, 97.0, 104.0);
     d.button("ok", "OK", 304.0, 15.0, 52.0, true);
     d.button("cancel", "Cancel", 304.0, 45.0, 52.0, false);
     d.text("Shading:", 169.0, 160.0);
-    let shades: Vec<String> = SHADING_STEPS.iter().map(|&v| shading_label(v)).collect();
-    let at = SHADING_STEPS
-        .iter()
-        .position(|&v| v == p.shading)
-        .unwrap_or(0);
+    let (shades, at) = shading_choices(p.shading, p.shading_color);
     d.popup_owned("shading", shades, at, 169.0, 177.0, 113.0);
     d.text_as("swatch", "", 290.0, 180.0);
     d.text_as("applyto_label", "Apply To:", 169.0, 203.0);
@@ -118,11 +202,13 @@ pub fn border(view: &DocView) -> (Dialog, BorderState) {
     }
     d.focus("space");
     let st = BorderState {
-        base: (b, p.shading),
+        base: (b, p.shading, p.shading_color),
         borders: b,
         shading: p.shading,
+        shading_color: p.shading_color,
         sel,
         line,
+        color,
     };
     update_preview(&st, &mut d);
     (d, st)
@@ -130,21 +216,40 @@ pub fn border(view: &DocView) -> (Dialog, BorderState) {
 
 /// Start from the selected cells' borders and shading, for Apply To:
 /// Cells (Table Cells' Border… button).
-pub fn for_cells(mut st: BorderState, view: &DocView) -> BorderState {
+pub fn for_cells(mut st: BorderState, view: &DocView, d: &mut Dialog) -> BorderState {
     if let Some(ts) = crate::table_dialogs::table_selection(view) {
         let paras = &view.doc.main.paras;
         let p = quill_core::table::row_props(paras, &ts.rows[0], view.doc.props.text_width());
         let cell = &p.cells[ts.from.min(p.cells.len() - 1)];
         st.borders = cell.borders;
         st.shading = cell.shading;
-        st.base = (cell.borders, cell.shading);
+        st.shading_color = cell.shading_color;
+        st.base = (cell.borders, cell.shading, cell.shading_color);
         st.sel = 0;
+        for bit in [TOP, BOTTOM, LEFT, RIGHT, BETWEEN] {
+            let line = *side(&mut st.borders.clone(), bit);
+            if !line.is_none() {
+                if st.sel == 0 {
+                    st.line = line.style;
+                    st.color = line.color;
+                }
+                st.sel |= bit;
+            }
+        }
     }
+    sync_controls(&st, d);
     st
 }
 
 /// Put borders and shading on the selected cells.
-fn apply_to_cells(b: Borders, shading: u16, view: &mut DocView) {
+fn apply_to_cells(
+    b: Borders,
+    shading: u16,
+    shading_color: Option<Rgb>,
+    borders_changed: bool,
+    shading_changed: bool,
+    view: &mut DocView,
+) {
     let Some(ts) = crate::table_dialogs::table_selection(view) else {
         return;
     };
@@ -154,8 +259,13 @@ fn apply_to_cells(b: Borders, shading: u16, view: &mut DocView) {
         let mut p = quill_core::table::row_props(&view.doc.main.paras, row, tw);
         let n = p.cells.len();
         for k in ts.from.min(n - 1)..=ts.to.min(n - 1) {
-            p.cells[k].borders = b;
-            p.cells[k].shading = shading;
+            if borders_changed {
+                p.cells[k].borders = b;
+            }
+            if shading_changed {
+                p.cells[k].shading = shading;
+                p.cells[k].shading_color = shading_color;
+            }
         }
         view.doc.set_row(quill_core::StoryId::Main, row.end, p);
     }
@@ -167,7 +277,15 @@ fn apply_to_cells(b: Borders, shading: u16, view: &mut DocView) {
 pub fn changed(st: &mut BorderState, d: &mut Dialog, id: &str) {
     match id {
         "shading" => {
-            st.shading = SHADING_STEPS[d.selected("shading").min(SHADING_STEPS.len() - 1)];
+            if let Some(&shade) = SHADING_STEPS.get(d.selected("shading")) {
+                st.shading = shade;
+                st.shading_color = None;
+            } else if let Some(color) =
+                crate::format_dialogs::color_named(&d.selected_text("shading"))
+            {
+                st.shading = 0;
+                st.shading_color = Some(color);
+            }
         }
         "lines" => {
             st.line = LINES[d.selected("lines").min(LINES.len() - 1)].1;
@@ -184,11 +302,22 @@ pub fn changed(st: &mut BorderState, d: &mut Dialog, id: &str) {
             }
             for bit in [TOP, BOTTOM, LEFT, RIGHT, BETWEEN] {
                 if st.sel & bit != 0 {
-                    side(&mut st.borders, bit).style = st.line;
+                    let line = side(&mut st.borders, bit);
+                    line.style = st.line;
+                    line.color = st.color;
                 }
             }
             if st.borders.is_none() {
                 st.borders.shadow = false;
+            }
+        }
+        "line_color" => {
+            st.color = crate::format_dialogs::color_named(&d.selected_text("line_color"))
+                .unwrap_or(Rgb::BLACK);
+            for bit in [TOP, BOTTOM, LEFT, RIGHT, BETWEEN] {
+                if st.sel & bit != 0 {
+                    side(&mut st.borders, bit).color = st.color;
+                }
             }
         }
         "top" | "bottom" | "left" | "right" | "between" => {
@@ -208,6 +337,7 @@ pub fn changed(st: &mut BorderState, d: &mut Dialog, id: &str) {
                     } else {
                         st.line
                     };
+                    line.color = st.color;
                 } else {
                     line.style = BorderStyle::None;
                 }
@@ -239,7 +369,9 @@ fn set_preset(st: &mut BorderState, d: &mut Dialog, boxed: bool, shadow: bool) {
         let on = boxed && bit != BETWEEN;
         d.set_on(control, on);
         if on {
-            side(&mut st.borders, bit).style = st.line;
+            let line = side(&mut st.borders, bit);
+            line.style = st.line;
+            line.color = st.color;
         }
     }
     st.borders.shadow = shadow;
@@ -279,7 +411,11 @@ fn update_preview(st: &BorderState, d: &mut Dialog) {
         .find(|(_, style)| *style == st.line)
         .map_or("None", |(name, _)| *name);
     d.set_label("line_preview", &format!("{line_name} border"));
-    d.set_label("swatch", &shading_label(st.shading));
+    d.set_label(
+        "swatch",
+        &st.shading_color
+            .map_or_else(|| shading_label(st.shading), |c| format!("#{:06X}", c.0)),
+    );
     let boxed = [
         st.borders.top,
         st.borders.bottom,
@@ -296,25 +432,53 @@ fn update_preview(st: &BorderState, d: &mut Dialog) {
 /// OK: put the borders and shading on the selected paragraphs. False if
 /// From Text is not a measurement.
 pub fn apply(st: &BorderState, d: &Dialog, view: &mut DocView) -> bool {
-    let Some(space) = units::parse(&d.field_text("space"), "pt") else {
+    let old_space = [
+        st.base.0.top,
+        st.base.0.left,
+        st.base.0.bottom,
+        st.base.0.right,
+    ]
+    .iter()
+    .map(|l| l.space)
+    .max()
+    .unwrap_or(0);
+    let Some(space) = units::parse_length_from(&d.field_text("space"), old_space) else {
         return false;
     };
     let mut b = st.borders;
     for bit in [TOP, BOTTOM, LEFT, RIGHT, BETWEEN] {
+        let old = *side(&mut st.base.0.clone(), bit);
         let l = side(&mut b, bit);
-        l.space = if l.is_none() { 0 } else { space.max(0) };
+        if space != old_space || (old.is_none() && !l.is_none()) {
+            l.space = if l.is_none() { 0 } else { space.max(0) };
+        }
     }
     let shading = st.shading;
+    let shading_color = st.shading_color;
+    let borders_changed = b != st.base.0;
+    let shading_changed = (shading, shading_color) != (st.base.1, st.base.2);
     if d.selected("applyto") == 1 && d.is_enabled("applyto") {
-        if (b, shading) != st.base {
-            apply_to_cells(b, shading, view);
+        if borders_changed || shading_changed {
+            apply_to_cells(
+                b,
+                shading,
+                shading_color,
+                borders_changed,
+                shading_changed,
+                view,
+            );
         }
         return true;
     }
-    if (b, shading) != st.base {
+    if borders_changed || shading_changed {
         view.format_paras("Border", move |p| {
-            p.borders = b;
-            p.shading = shading;
+            if borders_changed {
+                p.borders = b;
+            }
+            if shading_changed {
+                p.shading = shading;
+                p.shading_color = shading_color;
+            }
         });
     }
     true
@@ -371,6 +535,101 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item.kind, crate::dialog::Kind::Custom))
         );
+    }
+
+    #[test]
+    fn unchanged_dialog_preserves_exact_fill_and_unequal_border_distances() {
+        let mut doc = Document::new();
+        let p = &mut doc.main.paras[0].pap;
+        p.shading_color = Some(Rgb(0xEBF0FA));
+        p.borders.top = BorderLine {
+            style: BorderStyle::Single,
+            space: 241,
+            ..Default::default()
+        };
+        p.borders.left = BorderLine {
+            style: BorderStyle::Single,
+            space: 122,
+            ..Default::default()
+        };
+        let original = p.clone();
+        let mut view = DocView::new(doc, "Test".into());
+        let (d, st) = border(&view);
+        assert_eq!(d.selected_text("shading"), "#EBF0FA");
+        assert!(apply(&st, &d, &mut view));
+        assert_eq!(view.doc.main.paras[0].pap, original);
+        assert_eq!(view.doc.undo_label(), None);
+    }
+
+    #[test]
+    fn border_only_edits_preserve_each_paragraphs_fill_and_undo_redo() {
+        use quill_core::{Position, Selection};
+        let mut doc = quill_core::text::from_plain_text("One\nTwo");
+        let colors = [Some(Rgb(0xEBF0FA)), Some(Rgb(0x123456))];
+        for (p, color) in doc.main.paras.iter_mut().zip(colors) {
+            p.pap.shading_color = color;
+        }
+        let mut view = DocView::new(doc, "Test".into());
+        view.set_selection(Selection::new(Position::new(0, 0), Position::new(1, 3)));
+        let (mut d, mut st) = border(&view);
+        changed(&mut st, &mut d, "p_box");
+        assert!(apply(&st, &d, &mut view));
+        assert_eq!(
+            view.doc
+                .main
+                .paras
+                .iter()
+                .map(|p| p.pap.shading_color)
+                .collect::<Vec<_>>(),
+            colors
+        );
+        assert!(!view.doc.main.paras[0].pap.borders.is_none());
+        view.doc.undo();
+        assert!(view.doc.main.paras[0].pap.borders.is_none());
+        view.doc.redo();
+        assert_eq!(view.doc.main.paras[1].pap.shading_color, colors[1]);
+        d.set_selected("shading", 0);
+        changed(&mut st, &mut d, "shading");
+        assert!(apply(&st, &d, &mut view));
+        assert!(
+            view.doc
+                .main
+                .paras
+                .iter()
+                .all(|p| p.pap.shading_color.is_none())
+        );
+    }
+
+    #[test]
+    fn cell_target_displays_its_fill_and_border_edits_keep_other_cell_colors() {
+        use quill_core::{Position, Selection, StoryId};
+        let mut doc = Document::new();
+        doc.insert_table(StoryId::Main, Position::new(0, 0), 1, 2, 3000);
+        let row = doc
+            .main
+            .paras
+            .iter_mut()
+            .find_map(|p| p.row.as_mut())
+            .unwrap();
+        row.cells[0].shading_color = Some(Rgb(0xEBF0FA));
+        row.cells[1].shading_color = Some(Rgb(0xABCDEF));
+        let mut view = DocView::new(doc, "Test".into());
+        view.set_selection(Selection::new(Position::new(0, 0), Position::new(1, 0)));
+        let (mut d, st) = border(&view);
+        d.set_selected("applyto", 1);
+        let mut st = for_cells(st, &view, &mut d);
+        assert_eq!(d.selected_text("shading"), "#EBF0FA");
+        changed(&mut st, &mut d, "p_box");
+        assert!(apply(&st, &d, &mut view));
+        let row = view
+            .doc
+            .main
+            .paras
+            .iter()
+            .find_map(|p| p.row.as_ref())
+            .unwrap();
+        assert_eq!(row.cells[0].shading_color, Some(Rgb(0xEBF0FA)));
+        assert_eq!(row.cells[1].shading_color, Some(Rgb(0xABCDEF)));
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub enum Action {
     ToggleParagraphToolbar,
     ToggleToolbar,
     ToggleRuler,
+    ToggleMissingFonts,
     ToggleFullScreen,
     /// Dock the toolbar: 0 top, 1 left, 2 right.
     ToolbarPosition(u8),
@@ -309,6 +310,9 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Replace…", Cmd::Replace),
             b.cmd("Go To…", Cmd::GoTo),
             b.cmd("Glossary…", Cmd::Glossary),
+            b.cmd("Hyperlink…", Cmd::Hyperlink).key("⌘⌥K"),
+            b.cmd("Remove Link", Cmd::RemoveHyperlink)
+                .enabled(v.has_link()),
         ],
     };
 
@@ -344,6 +348,15 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Outline", Cmd::OutlineView).checked(v.outline),
             b.cmd("Page Layout", Cmd::PageLayoutView)
                 .checked(v.page_view),
+            b.item(
+                if cx.full_screen {
+                    "Exit Full Screen"
+                } else {
+                    "Enter Full Screen"
+                },
+                Action::ToggleFullScreen,
+            )
+            .key("⌃⌘F"),
             sep(),
             b.item("Markdown", Action::None).submenu(Menu {
                 title: "Markdown".into(),
@@ -362,6 +375,8 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
                 .checked(cx.show_formatting_toolbar),
             b.item("Paragraph Toolbar", Action::ToggleParagraphToolbar)
                 .checked(cx.show_paragraph_toolbar),
+            b.item("Highlight Missing Fonts", Action::ToggleMissingFonts)
+                .checked(crate::settings::with(|s| s.highlight_missing_fonts)),
             b.item("Ruler", Action::ToggleRuler)
                 .key("⌘R")
                 .checked(cx.show_ruler),
@@ -370,15 +385,6 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Zoom In", Cmd::ZoomIn),
             b.cmd("Zoom Out", Cmd::ZoomOut),
             b.cmd("Zoom 100%", Cmd::Zoom100),
-            b.item(
-                if cx.full_screen {
-                    "Exit Full Screen"
-                } else {
-                    "Enter Full Screen"
-                },
-                Action::ToggleFullScreen,
-            )
-            .key("⌃⌘F"),
             sep(),
             b.cmd(
                 if v.show_marks { "Hide ¶" } else { "Show ¶" },
@@ -406,9 +412,6 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Reply to Annotation", Cmd::ReplyToAnnotation),
             b.cmd("Resolve Annotation", Cmd::ResolveAnnotation),
             b.cmd("Delete Annotation", Cmd::DeleteAnnotation),
-            b.cmd("Hyperlink…", Cmd::Hyperlink).key("⌘⌥K"),
-            b.cmd("Remove Link", Cmd::RemoveHyperlink)
-                .enabled(v.has_link()),
             sep(),
             b.cmd("Date", Cmd::InsertDate),
             b.cmd("Bullet", Cmd::Bullet),
@@ -440,19 +443,19 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Section…", Cmd::SectionDialog),
             b.cmd("Document Setup…", Cmd::DocumentDialog),
             b.cmd("Border…", Cmd::BorderDialog),
+            b.cmd("Replace Missing Fonts…", Cmd::ReplaceFonts),
             sep(),
             b.cmd("Table Cells…", Cmd::TableCells).enabled(in_table),
             b.cmd("Table Layout…", Cmd::TableLayout).enabled(in_table),
             b.cmd("Select Table", Cmd::SelectTable).enabled(in_table),
-            b.cmd("Insert Row Above", Cmd::InsertRowAbove)
-                .enabled(in_table),
-            b.cmd("Insert Row Below", Cmd::InsertRowBelow)
-                .enabled(in_table),
-            b.cmd("Insert Column Left", Cmd::InsertColumnLeft)
-                .enabled(in_table),
-            b.cmd("Insert Column Right", Cmd::InsertColumnRight)
-                .enabled(in_table),
+            insert_menu(&mut b).enabled(in_table),
+            delete_menu(&mut b).enabled(in_table),
+            b.cmd("Merge Cells", Cmd::MergeCells)
+                .enabled(cells_to_merge(v)),
+            b.cmd("Split Cell", Cmd::SplitCell).enabled(in_table),
             b.cmd("Frame…", Cmd::FrameDialog),
+            b.cmd("Picture…", Cmd::PictureProperties)
+                .enabled(v.selected_picture().is_some()),
             sep(),
             b.cmd("Style…", Cmd::StyleDialog),
             b.cmd("Revert To Style", Cmd::RevertToStyle),
@@ -545,6 +548,43 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
     (menus, b.actions)
 }
 
+/// Insert, with what a table can gain.
+fn insert_menu(b: &mut Builder) -> Item {
+    let items = vec![
+        b.cmd("Row Above", Cmd::InsertRowAbove),
+        b.cmd("Row Below", Cmd::InsertRowBelow),
+        b.cmd("Column Left", Cmd::InsertColumnLeft),
+        b.cmd("Column Right", Cmd::InsertColumnRight),
+        b.cmd("Cell Before", Cmd::InsertCellBefore),
+        b.cmd("Cell After", Cmd::InsertCellAfter),
+    ];
+    let menu = Menu {
+        title: "Insert".into(),
+        items,
+    };
+    b.item("Insert", Action::None).submenu(menu)
+}
+
+/// Delete, with what a table can lose.
+fn delete_menu(b: &mut Builder) -> Item {
+    let items = vec![
+        b.cmd("Row", Cmd::DeleteRows),
+        b.cmd("Column", Cmd::DeleteColumns),
+        b.cmd("Cell", Cmd::DeleteCells),
+    ];
+    let menu = Menu {
+        title: "Delete".into(),
+        items,
+    };
+    b.item("Delete", Action::None).submenu(menu)
+}
+
+/// Whether more than one cell of a row is selected, which Merge Cells needs.
+fn cells_to_merge(v: &DocView) -> bool {
+    v.selected_cells()
+        .is_some_and(|block| block.from < block.to)
+}
+
 /// Editing actions at the current selection/insertion point.
 pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (Menu, Vec<Action>) {
     let mut b = Builder {
@@ -581,6 +621,31 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
         toc_items.push(b.cmd("Delete Annotation", Cmd::DeleteAnnotation));
         toc_items.push(Item::separator());
     }
+    // On a picture: its size and crop.
+    if view.selected_picture().is_some() {
+        let cropping = view.cropping_in_place();
+        toc_items.push(b.cmd("Properties\u{2026}", Cmd::PictureProperties));
+        toc_items.push(b.cmd("Crop in Place", Cmd::CropInPlace).checked(cropping));
+        toc_items.push(
+            b.cmd("Resize in Place", Cmd::ResizeInPlace)
+                .checked(!cropping),
+        );
+        toc_items.push(Item::separator());
+    }
+    // On a link: change it or take it off. On other selected text: make one.
+    // A selection that runs past a link is new text for the dialog, but
+    // Remove Hyperlink still takes off what it holds.
+    if view.link_target().link != 0 {
+        toc_items.push(b.cmd("Edit Hyperlink\u{2026}", Cmd::Hyperlink));
+        toc_items.push(b.cmd("Remove Hyperlink", Cmd::RemoveHyperlink));
+        toc_items.push(Item::separator());
+    } else if selected {
+        toc_items.push(b.cmd("Hyperlink\u{2026}", Cmd::Hyperlink));
+        if view.has_link() {
+            toc_items.push(b.cmd("Remove Hyperlink", Cmd::RemoveHyperlink));
+        }
+        toc_items.push(Item::separator());
+    }
     // The system's Look Up for the word here, first, as Mac apps put it.
     #[cfg(target_os = "macos")]
     if let Some((s, e)) = view.word_at_caret() {
@@ -594,10 +659,12 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
     }
     // In a table: add a row or a column next to the selected cells.
     if in_table {
-        toc_items.push(b.cmd("Insert Row Above", Cmd::InsertRowAbove));
-        toc_items.push(b.cmd("Insert Row Below", Cmd::InsertRowBelow));
-        toc_items.push(b.cmd("Insert Column Left", Cmd::InsertColumnLeft));
-        toc_items.push(b.cmd("Insert Column Right", Cmd::InsertColumnRight));
+        toc_items.push(insert_menu(&mut b));
+        toc_items.push(delete_menu(&mut b));
+        if cells_to_merge(view) {
+            toc_items.push(b.cmd("Merge Cells", Cmd::MergeCells));
+        }
+        toc_items.push(b.cmd("Split Cell", Cmd::SplitCell));
         toc_items.push(Item::separator());
         let now = view.cell_alignment();
         let items = crate::docview::CELL_ALIGNMENTS
@@ -834,6 +901,82 @@ pub fn style_popup(cx: &MenuContext) -> (Menu, Vec<Action>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_menu_offers_table_changes_and_merge_with_cells_selected() {
+        use quill_core::{Position, Selection};
+        let mut view = DocView::new(quill_core::Document::new(), String::new());
+        view.doc.begin("t", view.sel);
+        view.doc
+            .insert_table(quill_core::StoryId::Main, Position::new(0, 0), 2, 2, 2000);
+        let sel = view.sel;
+        view.doc.commit(sel);
+        view.sel = Selection::caret(Position::new(0, 0));
+        let label = |view: &DocView, name: &str| {
+            let (menu, _) = context_menu(view, false, false);
+            menu.items.iter().any(|i| i.label == name)
+        };
+        assert!(label(&view, "Delete"));
+        assert!(label(&view, "Split Cell"));
+        assert!(!label(&view, "Merge Cells"));
+        view.sel = Selection::new(Position::new(0, 0), Position::new(1, 0));
+        assert!(label(&view, "Merge Cells"));
+        let (menu, actions) = context_menu(&view, false, false);
+        let delete = menu.items.iter().find(|i| i.label == "Delete").unwrap();
+        let items = &delete.submenu.as_ref().unwrap().items;
+        assert_eq!(
+            actions[items[1].id as usize],
+            Action::Cmd(Cmd::DeleteColumns)
+        );
+    }
+
+    #[test]
+    fn context_menu_offers_link_items_on_links_and_selections() {
+        use quill_core::{Link, Position, Selection};
+        let labels = |view: &DocView| -> Vec<String> {
+            let (menu, _) = context_menu(view, false, false);
+            let links = [
+                "Edit Hyperlink\u{2026}",
+                "Hyperlink\u{2026}",
+                "Remove Hyperlink",
+            ];
+            menu.items
+                .iter()
+                .filter(|i| links.contains(&i.label.as_str()))
+                .map(|i| i.label.clone())
+                .collect()
+        };
+        let mut view = DocView::new(quill_core::Document::new(), String::new());
+        view.type_text("plain linked plain");
+        // Nothing selected and no link: nothing to offer.
+        view.sel = Selection::caret(Position::new(0, 2));
+        assert!(labels(&view).is_empty());
+        view.sel = Selection::new(Position::new(0, 0), Position::new(0, 5));
+        assert_eq!(labels(&view), ["Hyperlink\u{2026}"]);
+        let target = crate::docview::LinkTarget {
+            start: Position::new(0, 6),
+            end: Position::new(0, 12),
+            text: "linked".into(),
+            link: 0,
+            within: 0,
+            color: quill_core::link::BROWSER_BLUE,
+        };
+        view.apply_link(
+            &target,
+            "linked",
+            Link::new("https://example.com"),
+            quill_core::link::BROWSER_BLUE,
+        );
+        // The insertion point in the link, and a selection inside it.
+        let on_link = ["Edit Hyperlink\u{2026}", "Remove Hyperlink"];
+        view.sel = Selection::caret(Position::new(0, 8));
+        assert_eq!(labels(&view), on_link);
+        view.sel = Selection::new(Position::new(0, 7), Position::new(0, 9));
+        assert_eq!(labels(&view), on_link);
+        // A selection running past the link.
+        view.sel = Selection::new(Position::new(0, 2), Position::new(0, 15));
+        assert_eq!(labels(&view), ["Hyperlink\u{2026}", "Remove Hyperlink"]);
+    }
 
     #[test]
     fn context_actions_follow_selection_and_clipboard_formats() {

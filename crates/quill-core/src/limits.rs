@@ -211,6 +211,10 @@ impl ParaProps {
         }
         self.tabs.sort_by_key(|t| t.pos);
         self.tabs.dedup_by_key(|t| t.pos);
+        self.shading = self.shading.min(1000);
+        if let Some(c) = &mut self.shading_color {
+            c.0 &= 0xFF_FFFF;
+        }
         borders(&mut self.borders);
         if let Some(f) = &mut self.frame {
             frame(f);
@@ -229,6 +233,10 @@ impl RowProps {
         }
         for c in &mut self.cells {
             c.width = distance(c.width);
+            c.shading = c.shading.min(1000);
+            if let Some(color) = &mut c.shading_color {
+                color.0 &= 0xFF_FFFF;
+            }
             borders(&mut c.borders);
         }
     }

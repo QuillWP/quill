@@ -3,30 +3,48 @@
 //! in bold), and so do some RTF files. Quill lists fonts by family, so such a
 //! name looked like a font that is not installed: the text showed in a
 //! stand-in and opening the file warned about it. Quill turns them into the
-//! family name with bold or italic set as the name says.
+//! family name with bold or italic set as the name says. It also knows
+//! which fonts are installed, for text pasted in a font that is not.
 
 use quill_core::{CharProps, Document};
 use quill_layout::FontVariant;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
 type Names = HashMap<String, (String, FontVariant)>;
 
-// The installed fonts' PostScript names, set when the font list is built
-// or changes. Empty until then, which leaves names as they are.
-static NAMES: RwLock<Option<Names>> = RwLock::new(None);
+struct Installed {
+    postscript: Names,
+    families: HashSet<String>,
+}
 
-/// Remembers the PostScript names of the fonts now installed.
+// What is installed, set when the font list is built or changes. Empty
+// until then, which leaves names as they are.
+static INSTALLED: RwLock<Option<Installed>> = RwLock::new(None);
+
+/// Remembers the fonts now installed.
 pub fn set(catalog: &quill_layout::Catalog) {
-    *NAMES.write().unwrap_or_else(|e| e.into_inner()) = Some(catalog.postscript_names());
+    *INSTALLED.write().unwrap_or_else(|e| e.into_inner()) = Some(Installed {
+        postscript: catalog.postscript_names(),
+        families: catalog.family_keys(),
+    });
+}
+
+/// Whether a font family of this name is installed. True until the font
+/// list is known, so nothing is thrown away on a guess.
+pub fn is_installed(name: &str) -> bool {
+    let installed = INSTALLED.read().unwrap_or_else(|e| e.into_inner());
+    installed
+        .as_ref()
+        .is_none_or(|i| i.families.contains(&name.to_lowercase()))
 }
 
 /// Rewrites `doc`'s fonts that are named by PostScript name to their
 /// family, everywhere they are used.
 pub fn use_family_names(doc: &mut Document) {
-    let names = NAMES.read().unwrap_or_else(|e| e.into_inner());
-    if let Some(names) = names.as_ref() {
-        rename(doc, names);
+    let installed = INSTALLED.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(installed) = installed.as_ref() {
+        rename(doc, &installed.postscript);
     }
 }
 

@@ -30,6 +30,9 @@ SOURCE_FILES = (
     "Cargo.toml", "Cargo.lock", ".gitignore", "README.md",
     "LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES.txt",
 )
+# The notices a package carries, for the crates its own platform builds with.
+# The THIRD-PARTY-NOTICES.txt in the source tree covers every platform.
+PACKAGE_NOTICES = ROOT / "target/notices/THIRD-PARTY-NOTICES.txt"
 EXCLUDED_DIRS = {"target", "dist", ".git", "__pycache__", "Quill.app"}
 
 
@@ -128,8 +131,10 @@ def copy_common(destination: Path, mac: bool = False) -> None:
     skip = [".DS_Store"] + (["hyph_en_US.pat", "README_hyph_en_US.txt"] if mac else [])
     shutil.copytree(ROOT / "data", destination / "data",
                     ignore=shutil.ignore_patterns(*skip))
-    for name in ("README.md", "LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES.txt"):
+    for name in ("README.md", "LICENSE-MIT", "LICENSE-APACHE"):
         shutil.copy2(ROOT / name, destination / name)
+    notices = PACKAGE_NOTICES if PACKAGE_NOTICES.exists() else ROOT / "THIRD-PARTY-NOTICES.txt"
+    shutil.copy2(notices, destination / "THIRD-PARTY-NOTICES.txt")
 
 
 def portable_package(executable: Path, output: Path, version: str,
@@ -260,7 +265,8 @@ def main() -> int:
     system, target = native_target()
     executable = build(args.check, args.debug)
     label = "-debug" if args.debug else ""
-    run(sys.executable, str(ROOT / "tools/generate-notices.py"))
+    run(sys.executable, str(ROOT / "tools/generate-notices.py"),
+        "--target", target, "--output", str(PACKAGE_NOTICES))
     if not args.dist:
         print(f"App: {dev_app(executable, version, system)}")
         if args.with_source:

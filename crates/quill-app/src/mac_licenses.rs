@@ -2,8 +2,9 @@
 //!
 //! The standard About panel shows a short summary of Quill's licensing with a
 //! link; the link opens the Licenses window, a plain scrollable, searchable
-//! text of every license Quill carries (see `licenses`). Both draw on files in
-//! the app bundle, so nothing needs the network.
+//! text of Quill's own licenses with a link to the notices file for everything
+//! else (see `licenses`). Both draw on files in the app bundle, so nothing
+//! needs the network.
 
 use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::{class, msg_send, sel};
@@ -15,6 +16,23 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static WINDOW: AtomicUsize = AtomicUsize::new(0);
 /// The object that answers a click on the About panel's link.
 static LINKS: AtomicUsize = AtomicUsize::new(0);
+
+/// Close the Licenses window if it is the one in front. Command-W comes
+/// through the menu as Close, which would otherwise close a document.
+pub fn close_if_key() -> bool {
+    let window = WINDOW.load(Ordering::Relaxed) as *mut AnyObject;
+    if window.is_null() {
+        return false;
+    }
+    // SAFETY: called on the main thread; the window is kept for good.
+    unsafe {
+        let key: bool = msg_send![window, isKeyWindow];
+        if key {
+            let _: () = msg_send![window, performClose: std::ptr::null::<AnyObject>()];
+        }
+        key
+    }
+}
 
 /// Show the Licenses window, making it the first time.
 pub fn show() {
@@ -55,16 +73,64 @@ fn make_window() -> *mut AnyObject {
         let text: *mut AnyObject = msg_send![scroll, documentView];
         let _: () = msg_send![text, setEditable: false];
         let _: () = msg_send![text, setSelectable: true];
-        let _: () = msg_send![text, setRichText: false];
+        // Rich only so the notices line can carry a link; it can't be edited.
+        let _: () = msg_send![text, setRichText: true];
         let _: () = msg_send![text, setUsesFindBar: true];
         let _: () = msg_send![text, setAutomaticLinkDetectionEnabled: false];
         let font: *mut AnyObject = msg_send![class!(NSFont), userFixedPitchFontOfSize: 11.0f64];
         let _: () = msg_send![text, setFont: font];
-        let body = NSString::from_str(&crate::licenses::text());
-        let _: () = msg_send![text, setString: &*body];
+        let body = crate::licenses::text();
+        let string = NSString::from_str(&body);
+        let _: () = msg_send![text, setString: &*string];
+        link_notices(text, &body);
+        link_addresses(text, &body);
         let _: () = msg_send![window, setContentView: scroll];
         let _: () = msg_send![window, center];
         window
+    }
+}
+
+/// Make the notices line in `body` a link to the file. The text view opens
+/// it in the system's program for text.
+fn link_notices(text: *mut AnyObject, body: &str) {
+    let line = crate::licenses::NOTICES_LINK;
+    let (Some(at), Some(path)) = (body.find(line), crate::licenses::notices_path()) else {
+        return;
+    };
+    // SAFETY: called on the main thread with live AppKit objects, using
+    // messages the classes named answer. The range lies inside `body`.
+    unsafe {
+        let path = NSString::from_str(&path.to_string_lossy());
+        let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: &*path];
+        let storage: *mut AnyObject = msg_send![text, textStorage];
+        let name = NSString::from_str("NSLink");
+        let range = NSRange::new(
+            body[..at].encode_utf16().count(),
+            line.encode_utf16().count(),
+        );
+        let _: () = msg_send![storage, addAttribute: &*name value: url range: range];
+    }
+}
+
+/// Make the web addresses in `body` links.
+fn link_addresses(text: *mut AnyObject, body: &str) {
+    // SAFETY: called on the main thread with live AppKit objects, using
+    // messages the classes named answer. Each range lies inside `body`.
+    unsafe {
+        let storage: *mut AnyObject = msg_send![text, textStorage];
+        let name = NSString::from_str("NSLink");
+        for (at, end) in crate::licenses::web_addresses(body) {
+            let address = NSString::from_str(&body[at..end]);
+            let url: *mut AnyObject = msg_send![class!(NSURL), URLWithString: &*address];
+            if url.is_null() {
+                continue;
+            }
+            let range = NSRange::new(
+                body[..at].encode_utf16().count(),
+                body[at..end].encode_utf16().count(),
+            );
+            let _: () = msg_send![storage, addAttribute: &*name value: url range: range];
+        }
     }
 }
 

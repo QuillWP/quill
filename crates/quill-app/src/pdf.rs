@@ -781,6 +781,47 @@ pub mod tests {
     }
 
     #[test]
+    fn solid_paragraph_and_cell_fills_reach_pdf_output() {
+        let Some(mut fonts) = test_fonts() else {
+            return;
+        };
+        let mut doc = quill_core::text::from_plain_text("Colored paragraph\nTable");
+        doc.main.paras[0].pap.shading_color = Some(quill_core::Rgb(0xEBF0FA));
+        doc.insert_table(
+            quill_core::StoryId::Main,
+            quill_core::Position::new(1, 0),
+            1,
+            1,
+            3000,
+        );
+        let row = doc
+            .main
+            .paras
+            .iter_mut()
+            .find_map(|p| p.row.as_mut())
+            .unwrap();
+        row.cells[0].shading_color = Some(quill_core::Rgb(0x123456));
+        let mut view = DocView::new(doc, "Solid fills".into());
+        view.update_layout(&mut fonts);
+        let pdf = write(&mut view, &mut fonts, &mut GlyphCache::default(), 0..1);
+        let streams: Vec<Vec<u8>> = pdf
+            .windows(7)
+            .enumerate()
+            .filter(|(_, w)| *w == b"stream\n")
+            .filter_map(|(at, _)| miniz_oxide::inflate::decompress_to_vec_zlib(&pdf[at + 7..]).ok())
+            .collect();
+        for color in [0xEBF0FA, 0x123456] {
+            let operator = format!("{} rg ", rgb(color));
+            assert!(
+                streams
+                    .iter()
+                    .any(|s| s.windows(operator.len()).any(|w| w == operator.as_bytes())),
+                "fill {color:06X} missing"
+            );
+        }
+    }
+
+    #[test]
     fn writes_a_wellformed_pdf() {
         let Some(fonts) = test_fonts() else { return };
         let mut fonts = fonts;
@@ -816,6 +857,37 @@ pub mod tests {
             let head = format!("{} 0 obj", i + 1);
             assert!(pdf[off..].starts_with(head.as_bytes()), "object {}", i + 1);
         }
+    }
+
+    #[test]
+    fn earlier_exports_do_not_change_font_subsets_or_glyph_positions() {
+        fn export(text: &str, fonts: &mut Fonts, cache: &mut GlyphCache) -> Vec<u8> {
+            let doc = quill_core::text::from_plain_text(text);
+            let mut view = DocView::new(doc, "Cache isolation".into());
+            view.headers_wanted = true;
+            view.update_layout(fonts);
+            let pages = view.pages.len();
+            write(&mut view, fonts, cache, 0..pages)
+        }
+
+        let Some(mut fonts) = test_fonts() else {
+            return;
+        };
+        let mut cache = GlyphCache::default();
+        let target = "Different glyph order: Zebra 987 abc.\nGreek: αβγ. Hebrew: אבג.";
+        let alone = export(target, &mut fonts, &mut cache);
+        let Some(mut fonts) = test_fonts() else {
+            return;
+        };
+        let mut cache = GlyphCache::default();
+        let first = export(
+            "•\tFirst bullet\n•\tSecond bullet\nABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            &mut fonts,
+            &mut cache,
+        );
+        assert!(first.starts_with(b"%PDF-1.4"));
+        assert_eq!(export(target, &mut fonts, &mut cache), alone);
+        assert_eq!(export(target, &mut fonts, &mut cache), alone);
     }
 
     #[test]

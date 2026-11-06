@@ -28,8 +28,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use quill_core::document::{
-    DocumentProps, FootnotePosition, LineNumbering, PageNumberFormat, SectionProps, SectionStart,
-    SummaryInfo,
+    DocumentProps, FootnotePosition, LineNumbering, PageNumberFormat, SavedView, SectionProps,
+    SectionStart, SummaryInfo,
 };
 use quill_core::notes::AnnotationInfo;
 use quill_core::props::{
@@ -50,8 +50,8 @@ const MAGIC: &[u8; 8] = b"QUILLDOC";
 const MAJOR: u16 = 1;
 /// 1.1: sections' own headers and footers. 1.2: bounded picture previews.
 /// 1.3: hyperlinks. 1.4: tracked changes, and comments' ranges, replies and
-/// resolved state. 1.5: live tables of contents.
-const MINOR: u16 = 5;
+/// resolved state. 1.5: live tables of contents. 1.6: solid shading colors.
+const MINOR: u16 = 6;
 
 /// Whether `bytes` is a `.qwp` file rather than some other ZIP (.docx).
 pub fn is_quill(bytes: &[u8]) -> bool {
@@ -309,7 +309,11 @@ fn stamp(o: &mut Out, s: &quill_core::revision::Stamp) {
 }
 
 fn border_line(o: &mut Out, b: &BorderLine) {
-    let BorderLine { style, space } = *b;
+    let BorderLine {
+        style,
+        space,
+        color,
+    } = *b;
     o.uint(
         1,
         match style {
@@ -322,6 +326,9 @@ fn border_line(o: &mut Out, b: &BorderLine) {
         },
     );
     o.int(2, space as i64);
+    if color != Rgb::BLACK {
+        o.uint(3, color.0 as u64);
+    }
 }
 
 fn borders(o: &mut Out, b: &Borders) {
@@ -419,6 +426,7 @@ fn pap(o: &mut Out, p: &ParaProps) {
         suppress_line_numbers,
         borders: b,
         shading,
+        shading_color,
         in_table,
         nest,
         frame: fr,
@@ -471,6 +479,9 @@ fn pap(o: &mut Out, p: &ParaProps) {
     o.flag(13, *suppress_line_numbers);
     o.nest(14, |o| borders(o, b));
     o.uint(15, *shading as u64);
+    if let Some(color) = shading_color {
+        o.uint(19, color.0 as u64);
+    }
     o.flag(16, *in_table);
     if *nest > 0 {
         o.uint(18, *nest as u64);
@@ -493,12 +504,16 @@ fn row(o: &mut Out, r: &RowProps) {
             width,
             borders: b,
             shading,
+            shading_color,
             valign,
         } = c;
         o.nest(1, |o| {
             o.int(1, *width as i64);
             o.nest(2, |o| borders(o, b));
             o.uint(3, *shading as u64);
+            if let Some(color) = shading_color {
+                o.uint(5, color.0 as u64);
+            }
             // Top, the default, is left out, as older files had it.
             match valign {
                 VAlign::Top => {}
@@ -613,6 +628,7 @@ fn document_props(o: &mut Out, p: &DocumentProps) {
         footnote_start,
         track_changes,
         live_toc,
+        view,
     } = p;
     o.int(1, *page_width as i64);
     o.int(2, *page_height as i64);
@@ -647,6 +663,16 @@ fn document_props(o: &mut Out, p: &DocumentProps) {
             o.uint(3, t.from as u64);
             o.uint(4, t.to as u64);
         });
+    }
+    if let Some(view) = view {
+        o.uint(
+            20,
+            match view {
+                SavedView::Normal => 0,
+                SavedView::Outline => 1,
+                SavedView::PageLayout => 2,
+            },
+        );
     }
 }
 
@@ -952,6 +978,7 @@ fn read_border_line(b: &[u8]) -> Result<BorderLine, Damaged> {
                 }
             }
             2 => l.space = i32_of(f)?,
+            3 => l.color = Rgb(uint(f)? as u32 & 0xFF_FFFF),
             _ => {}
         }
     }
@@ -1078,6 +1105,7 @@ fn read_pap(b: &[u8]) -> Result<ParaProps, Damaged> {
             13 => p.suppress_line_numbers = flag(f)?,
             14 => p.borders = read_borders(f)?,
             15 => p.shading = u16_of(f)?,
+            19 => p.shading_color = Some(Rgb(u32_of(f)? & 0xFF_FFFF)),
             16 => p.in_table = flag(f)?,
             18 => p.nest = u16_of(f)?.min(quill_core::limits::MAX_TABLE_LEVEL as u16 - 1) as u8,
             17 => p.frame = Some(read_frame(f)?),
@@ -1104,6 +1132,7 @@ fn read_row(b: &[u8]) -> Result<RowProps, Damaged> {
                         1 => c.width = i32_of(f)?,
                         2 => c.borders = read_borders(f)?,
                         3 => c.shading = u16_of(f)?,
+                        5 => c.shading_color = Some(Rgb(u32_of(f)? & 0xFF_FFFF)),
                         4 => {
                             c.valign = match u16_of(f)? {
                                 1 => VAlign::Center,
@@ -1246,6 +1275,14 @@ fn read_document_props(b: &[u8]) -> Result<DocumentProps, Damaged> {
                 }
                 t.to = t.to.max(t.from);
                 p.live_toc = Some(t);
+            }
+            20 => {
+                p.view = match uint(f)? {
+                    0 => Some(SavedView::Normal),
+                    1 => Some(SavedView::Outline),
+                    2 => Some(SavedView::PageLayout),
+                    _ => None,
+                }
             }
             _ => {}
         }

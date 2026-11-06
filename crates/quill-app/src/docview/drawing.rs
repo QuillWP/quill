@@ -26,6 +26,8 @@ pub(super) fn draw_balloon(c: &mut dyn Surface, x: f32, base: f32, advance: f32)
 /// The shading behind text an annotation is about: the balloon's yellow,
 /// paler.
 const COMMENT_SHADE: u32 = 0xFCF0C4;
+/// Behind text in a font that is not installed.
+const MISSING_FONT: u32 = 0xFFD6C8;
 
 /// How far left of the text a change bar is drawn, in points.
 const CHANGE_BAR: f32 = 9.0;
@@ -319,6 +321,8 @@ pub(super) fn draw_row(
         let area = Rect::new(ox + x0, top, x1 - x0, height);
         if selected.contains(&k) {
             c.fill(area, highlight);
+        } else if let Some(color) = cell.shading_color {
+            c.fill(area, color.0);
         } else if cell.shading > 0 {
             let v = (255.0 * (1.0 - cell.shading as f32 / 1000.0)).round() as u32;
             c.fill(area, v << 16 | v << 8 | v);
@@ -361,11 +365,17 @@ pub(super) fn draw_row(
     }
     for (k, &(_, _, x0, x1)) in row.cells.iter().enumerate() {
         let b = &row.props.cells[k].borders;
-        let k = color::BLACK;
-        hline_styled(c, b.top.style, ox + x0, ox + x1, top, k);
-        hline_styled(c, b.bottom.style, ox + x0, ox + x1, bottom, k);
-        vline_styled(c, b.left.style, ox + x0, top, bottom, k);
-        vline_styled(c, b.right.style, ox + x1, top, bottom, k);
+        hline_styled(c, b.top.style, ox + x0, ox + x1, top, b.top.color.0);
+        hline_styled(
+            c,
+            b.bottom.style,
+            ox + x0,
+            ox + x1,
+            bottom,
+            b.bottom.color.0,
+        );
+        vline_styled(c, b.left.style, ox + x0, top, bottom, b.left.color.0);
+        vline_styled(c, b.right.style, ox + x1, top, bottom, b.right.color.0);
     }
 }
 
@@ -373,27 +383,29 @@ pub(super) fn draw_row(
 pub fn draw_border_box(c: &mut dyn Surface, b: &BorderBox, ox: f32, py: f32) {
     let (l, r) = (ox + b.left, ox + b.right);
     let (t, bt) = (py + b.top, py + b.bottom);
-    if b.shading > 0 {
+    if let Some(color) = b.shading_color {
+        c.fill(Rect::new(l, t, r - l, bt - t), color.0);
+    } else if b.shading > 0 {
         let v = (255.0 * (1.0 - b.shading as f32 / 1000.0)).round() as u32;
         c.fill(Rect::new(l, t, r - l, bt - t), v << 16 | v << 8 | v);
     }
     let lw = border_width(b.left_line);
     let rw = border_width(b.right_line);
-    let k = color::BLACK;
+    let [top, bottom, left, right] = b.colors.map(|k| k.0);
     // Horizontal lines run across the side lines' width too.
     let (hx0, hx1) = (l - lw, r + rw);
-    hline_styled(c, b.top_line, hx0, hx1, t - border_width(b.top_line), k);
+    hline_styled(c, b.top_line, hx0, hx1, t - border_width(b.top_line), top);
     let bw = border_width(b.bottom_line);
-    hline_styled(c, b.bottom_line, hx0, hx1, bt, k);
-    vline_styled(c, b.left_line, l - lw, t, bt, k);
-    vline_styled(c, b.right_line, r, t, bt, k);
+    hline_styled(c, b.bottom_line, hx0, hx1, bt, bottom);
+    vline_styled(c, b.left_line, l - lw, t, bt, left);
+    vline_styled(c, b.right_line, r, t, bt, right);
     if b.shadow {
         // The Shadow preset: a second line outside the right and bottom.
         if b.right_line != BorderStyle::None {
-            c.fill(Rect::new(r + rw, t + 2.0, 1.0, bt - t), k);
+            c.fill(Rect::new(r + rw, t + 2.0, 1.0, bt - t), right);
         }
         if b.bottom_line != BorderStyle::None {
-            c.fill(Rect::new(hx0 + 2.0, bt + bw, hx1 - hx0, 1.0), k);
+            c.fill(Rect::new(hx0 + 2.0, bt + bw, hx1 - hx0, 1.0), bottom);
         }
     }
 }
@@ -694,7 +706,12 @@ impl DocView {
     ) {
         let (s, e) = self.sel.range();
         let gridlines = Gridlines::current().filter(|_| c.screen());
-        let cells = self.cell_block().filter(|_| c.screen());
+        let cells = self.selected_cells().filter(|_| c.screen());
+        let missing = if c.screen() {
+            self.missing_font_ids(fonts)
+        } else {
+            Vec::new()
+        };
         let hl = if focused {
             color::HIGHLIGHT
         } else {
@@ -752,6 +769,9 @@ impl DocView {
                     draw_border_box(c, bx, px, py);
                 }
                 let picture = self.selected_picture().is_some();
+                if !missing.is_empty() {
+                    self.mark_missing_fonts(c, para, l, px, py, &missing);
+                }
                 if c.screen()
                     && !self.sel.is_empty()
                     && cells.is_none()
@@ -783,6 +803,7 @@ impl DocView {
                 color::GRAY_DARK
             };
             let t = c.hair();
+            let whole = block.whole_table(&self.doc.main.paras);
             for b in blocks() {
                 let Some(row) = &b.row else {
                     continue;
@@ -791,6 +812,24 @@ impl DocView {
                     continue;
                 };
                 let (y0, y1) = row_span(b);
+                // A whole table has one outline, round the outside.
+                if whole {
+                    let (left, right) = (
+                        row.cells.first().map_or(0.0, |c| c.2),
+                        row.cells.last().map_or(0.0, |c| c.3),
+                    );
+                    let (x, w) = (ox + left - t, right - left + 3.0 * t);
+                    let (y, h) = (oy + y0 - t, (y1 - y0).max(0.0) + 3.0 * t);
+                    c.fill(Rect::new(x, y, t, h), edge);
+                    c.fill(Rect::new(x + w - t, y, t, h), edge);
+                    if r.first == block.rows[0].first {
+                        c.fill(Rect::new(x, y, w, t), edge);
+                    }
+                    if block.rows.last().is_some_and(|l| l.first == r.first) {
+                        c.fill(Rect::new(x, y + h - t, w, t), edge);
+                    }
+                    continue;
+                }
                 for k in block.columns(r) {
                     let (_, _, x0, x1) = row.cells[k];
                     // Border lines start on the cell's edges and run right
@@ -833,6 +872,51 @@ impl DocView {
         } else {
             color::GRAY
         };
+        Self::fill_chars(c, l, ox, py, from, to, text_len, hl);
+    }
+
+    /// The font ids to mark on screen: those not installed, when View >
+    /// Highlight Missing Fonts is on.
+    fn missing_font_ids(&self, fonts: &Fonts) -> Vec<u16> {
+        if !crate::settings::with(|s| s.highlight_missing_fonts) {
+            return Vec::new();
+        }
+        (0..self.doc.fonts.len())
+            .filter_map(|id| u16::try_from(id).ok())
+            .filter(|&id| fonts.substitute(self.doc.font_name(id)).is_some())
+            .collect()
+    }
+
+    /// Mark the text of paragraph `para` set in one of the fonts `missing`.
+    fn mark_missing_fonts(
+        &self,
+        c: &mut dyn Surface,
+        para: usize,
+        l: &ParaLayout,
+        ox: f32,
+        py: f32,
+        missing: &[u16],
+    ) {
+        let p = &self.doc.main.paras[para];
+        for (from, to, chp) in p.run_bounds() {
+            if missing.contains(&chp.font) {
+                Self::fill_chars(c, l, ox, py, from, to, p.len(), MISSING_FONT);
+            }
+        }
+    }
+
+    /// Fill behind the characters `from..to`, line by line.
+    #[allow(clippy::too_many_arguments)]
+    fn fill_chars(
+        c: &mut dyn Surface,
+        l: &ParaLayout,
+        ox: f32,
+        py: f32,
+        from: usize,
+        to: usize,
+        text_len: usize,
+        hl: u32,
+    ) {
         for (li, line) in l.lines.iter().enumerate() {
             let last = li + 1 == l.lines.len();
             let (ls, le) = (line.start, if last { text_len + 1 } else { line.end });

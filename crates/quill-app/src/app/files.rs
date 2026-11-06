@@ -3,10 +3,46 @@
 use super::*;
 use std::path::Path;
 
+/// After going on with missing fonts: where to deal with them later, until
+/// the person says not to show this. It needs the Mac's checkbox.
+fn font_reminder() {
+    #[cfg(target_os = "macos")]
+    if crate::settings::with(|s| s.missing_font_reminder)
+        && crate::mac_alert::remind(
+            "You can deal with missing fonts at any time.",
+            "View > Highlight Missing Fonts marks the text they affect, and Format > Replace \
+             Missing Fonts chooses installed fonts for them.",
+            "Don't show this reminder again",
+        )
+    {
+        crate::settings::update(|s| s.missing_font_reminder = false);
+    }
+}
+
+/// Whether two paths name one file, however each was written.
+fn same_file(a: &Path, b: &Path) -> bool {
+    a == b
+        || match (a.canonicalize(), b.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+}
+
 impl App {
-    /// Open documents in new windows. An untouched Untitled window is reused.
+    /// Open documents in new windows. An untouched Untitled window is reused,
+    /// and a document already open comes to the front instead of opening
+    /// again: two windows on one file would overwrite each other's saves.
     pub(super) fn open_files(&mut self, el: &ActiveEventLoop, paths: &[PathBuf]) {
         for path in paths {
+            let open = self.windows.iter().find(|(_, w)| {
+                let here = w.st.main_view().path.as_deref();
+                here.is_some_and(|here| same_file(here, path))
+            });
+            if let Some((_, w)) = open {
+                w.window.focus_window();
+                crate::recent::note(&mut self.recent, path);
+                continue;
+            }
             let rtf = crate::settings::with(|s| s.interpret_rtf);
             let (mut doc, report) = match quill_formats::load_reported(path, rtf) {
                 Ok(d) => d,
@@ -74,6 +110,7 @@ impl App {
                     let w = &mut self.windows[i].1;
                     w.st.close_pane();
                     w.st.view = DocView::new(doc, title.clone());
+                    w.st.view.open_in_its_view();
                     w.window.set_title(&title);
                     w.window.request_redraw();
                     i
@@ -95,6 +132,14 @@ impl App {
                 }
             }
             crate::recent::note(&mut self.recent, path);
+            let accepted = crate::settings::with(|s| {
+                let this = s.accepted_fonts.iter().find(|(p, _)| same_file(p, path));
+                this.map_or(Vec::new(), |(_, fonts)| fonts.clone())
+            });
+            let missing: Vec<_> = missing
+                .into_iter()
+                .filter(|(font, _)| !accepted.iter().any(|a| a.eq_ignore_ascii_case(font)))
+                .collect();
             if let Some(detail) = open_warning(&report, &missing, &wide) {
                 let message = if report.is_empty() && missing.is_empty() {
                     format!("\u{201c}{}\u{201d} may not look right.", file_name(path))
@@ -104,9 +149,80 @@ impl App {
                         file_name(path)
                     )
                 };
-                warn(&message, &detail);
+                if missing.is_empty() {
+                    warn(&message, &detail);
+                } else if let Some(window) = self.windows.get(i).map(|(id, _)| *id) {
+                    self.ask_about_fonts(window, path, &message, &detail, &missing);
+                }
             }
         }
+    }
+
+    /// The warning for a document with missing fonts, which offers to keep
+    /// them, so it does not come up each time, or to replace them.
+    fn ask_about_fonts(
+        &mut self,
+        window: WindowId,
+        path: &Path,
+        message: &str,
+        detail: &str,
+        missing: &[(String, String)],
+    ) {
+        let answer = super::message_box(
+            rfd::MessageLevel::Warning,
+            "Quill",
+            format!("{message}\n\n{detail}"),
+            rfd::MessageButtons::YesNoCancelCustom(
+                "OK".into(),
+                "Keep These Fonts".into(),
+                "Replace Fonts…".into(),
+            ),
+        );
+        match answer {
+            rfd::MessageDialogResult::Custom(b) if b == "Keep These Fonts" => {
+                crate::settings::update(|s| {
+                    let fonts = missing.iter().map(|(font, _)| font.clone());
+                    match s
+                        .accepted_fonts
+                        .iter_mut()
+                        .find(|(p, _)| same_file(p, path))
+                    {
+                        Some((_, kept)) => kept.extend(fonts),
+                        None => {
+                            s.accepted_fonts.push((path.to_path_buf(), fonts.collect()));
+                            let over = s
+                                .accepted_fonts
+                                .len()
+                                .saturating_sub(crate::settings::MAX_ACCEPTED_DOCUMENTS);
+                            s.accepted_fonts.drain(..over);
+                        }
+                    }
+                });
+            }
+            rfd::MessageDialogResult::Custom(b) if b == "Replace Fonts…" => {
+                self.replace_missing_fonts(window);
+            }
+            _ => font_reminder(),
+        }
+    }
+
+    /// Format > Replace Missing Fonts…
+    pub(super) fn replace_missing_fonts(&mut self, id: WindowId) {
+        self.ensure_fonts();
+        let (Some(i), Some(fonts)) = (self.index(id), self.fonts.as_ref()) else {
+            return;
+        };
+        let w = &mut self.windows[i].1;
+        let missing = missing_fonts(&w.st.main_view().doc, fonts);
+        if missing.is_empty() {
+            w.st.main_view_mut().status = Some("No fonts are missing.".into());
+            w.window.request_redraw();
+            return;
+        }
+        w.st.focus_main();
+        let (d, st) = crate::replace_fonts::dialog(&missing, &fonts.family_info());
+        w.st.dialogs.push((Which::ReplaceFonts(st), d));
+        w.window.request_redraw();
     }
 
     pub(super) fn open_dialog(&mut self, el: &ActiveEventLoop, id: Option<WindowId>) {
@@ -189,15 +305,15 @@ impl App {
         if chosen && format == Format::Docx {
             let losses = docx_word_rewrite_losses(&w.st.main_view().doc);
             if !losses.is_empty() {
-                let answer = rfd::MessageDialog::new()
-                    .set_level(rfd::MessageLevel::Warning)
-                    .set_title("Some Settings May Be Lost")
-                    .set_description(format!(
+                let answer = super::message_box(
+                    rfd::MessageLevel::Warning,
+                    "Some Settings May Be Lost",
+                    format!(
                         "Microsoft Word may remove these Quill-only settings when it resaves this file:\n\n{}\n\nSave a .qwp copy to preserve them. Save as a Word document anyway?",
                         losses.join("\n")
-                    ))
-                    .set_buttons(rfd::MessageButtons::YesNo)
-                    .show();
+                    ),
+                    rfd::MessageButtons::YesNo,
+                );
                 if answer != rfd::MessageDialogResult::Yes {
                     return false;
                 }
@@ -208,15 +324,15 @@ impl App {
             let lost = quill_formats::markdown::losses(&view.doc);
             let unwarned = lost.iter().any(|l| !view.md_warned.contains(l));
             if (chosen && !lost.is_empty()) || unwarned {
-                let answer = rfd::MessageDialog::new()
-                    .set_level(rfd::MessageLevel::Warning)
-                    .set_title("Some Features Will Be Left Out")
-                    .set_description(format!(
+                let answer = super::message_box(
+                    rfd::MessageLevel::Warning,
+                    "Some Features Will Be Left Out",
+                    format!(
                         "Markdown cannot carry these, so the saved file will leave them out:\n\n{}\n\nThe document you're editing keeps them, but the next time you open the file they will be gone. Save a .qwp copy to keep them. Save as Markdown anyway?",
                         super::markdown::bullet_list(&lost)
-                    ))
-                    .set_buttons(rfd::MessageButtons::YesNo)
-                    .show();
+                    ),
+                    rfd::MessageButtons::YesNo,
+                );
                 if answer != rfd::MessageDialogResult::Yes {
                     return false;
                 }
@@ -227,15 +343,15 @@ impl App {
             && matches!(format, Format::Odt | Format::Html | Format::Text)
             && w.st.main_view().doc.has_changes()
         {
-            let answer = rfd::MessageDialog::new()
-                .set_level(rfd::MessageLevel::Warning)
-                .set_title("Tracked Changes Will Be Accepted")
-                .set_description(format!(
+            let answer = super::message_box(
+                rfd::MessageLevel::Warning,
+                "Tracked Changes Will Be Accepted",
+                format!(
                     "{} can't hold tracked changes, so the exported file will have every change accepted. The document you're editing keeps them. Export anyway?",
                     format.name()
-                ))
-                .set_buttons(rfd::MessageButtons::YesNo)
-                .show();
+                ),
+                rfd::MessageButtons::YesNo,
+            );
             if answer != rfd::MessageDialogResult::Yes {
                 return false;
             }
@@ -255,6 +371,9 @@ impl App {
                 return false;
             }
         }
+        // The next time it opens, it opens in this view.
+        let view = w.st.main_view_mut();
+        view.doc.props.view = Some(view.current_view());
         // In Markdown source view the text is the file for Markdown, and
         // every other format gets the document the text stands for.
         let saved = {
@@ -301,19 +420,19 @@ impl App {
             return true;
         }
         w.window.focus_window();
-        let answer = rfd::MessageDialog::new()
-            .set_level(rfd::MessageLevel::Warning)
-            .set_title("Quill")
-            .set_description(format!(
+        let answer = super::message_box(
+            rfd::MessageLevel::Warning,
+            "Quill",
+            format!(
                 "Save changes to \u{201c}{}\u{201d} before closing?",
                 w.st.main_view().title
-            ))
-            .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
+            ),
+            rfd::MessageButtons::YesNoCancelCustom(
                 "Save".into(),
                 "Don\u{2019}t Save".into(),
                 "Cancel".into(),
-            ))
-            .show();
+            ),
+        );
         match answer {
             rfd::MessageDialogResult::Yes => self.save_before_close(id),
             rfd::MessageDialogResult::Custom(choice) if choice == "Save" => {
@@ -605,6 +724,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn same_file_sees_through_how_a_path_is_written() {
+        let root = std::env::temp_dir().join(format!("quill-same-file-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        let (a, b) = (root.join("a.qwp"), root.join("b.qwp"));
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        assert!(super::same_file(&a, &a));
+        assert!(super::same_file(&a, &root.join("sub/../a.qwp")));
+        assert!(!super::same_file(&a, &b));
+        // A file that has gone only matches its own path.
+        assert!(!super::same_file(&a, &root.join("gone.qwp")));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

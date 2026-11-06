@@ -288,6 +288,36 @@ impl DocView {
     }
 
     /// Switch Outline view on or off.
+    /// Open in the view the document was saved in, or for one that does
+    /// not say, the one in Preferences.
+    pub fn open_in_its_view(&mut self) {
+        use quill_core::document::SavedView;
+        let view = self.doc.props.view.unwrap_or_else(|| {
+            match crate::settings::with(|s| s.default_view) {
+                crate::settings::DefaultView::Normal => SavedView::Normal,
+                crate::settings::DefaultView::Outline => SavedView::Outline,
+                crate::settings::DefaultView::PageLayout => SavedView::PageLayout,
+            }
+        });
+        match view {
+            SavedView::Normal => {}
+            SavedView::Outline => self.set_outline(true),
+            SavedView::PageLayout => self.page_view = true,
+        }
+    }
+
+    /// The view to save in the document.
+    pub(crate) fn current_view(&self) -> quill_core::document::SavedView {
+        use quill_core::document::SavedView;
+        if self.outline {
+            SavedView::Outline
+        } else if self.page_view {
+            SavedView::PageLayout
+        } else {
+            SavedView::Normal
+        }
+    }
+
     pub fn set_outline(&mut self, on: bool) {
         if self.outline == on {
             return;

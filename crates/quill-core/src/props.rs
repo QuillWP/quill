@@ -209,6 +209,8 @@ pub struct BorderLine {
     pub style: BorderStyle,
     /// Gap between the line and the text, in twips.
     pub space: Twips,
+    /// Black also stands for "automatic" in the file formats that have it.
+    pub color: Rgb,
 }
 
 impl BorderLine {
@@ -248,6 +250,8 @@ pub struct CellProps {
     pub borders: Borders,
     /// In tenths of a percent.
     pub shading: u16,
+    /// An explicit solid background. When present, it takes precedence over shading.
+    pub shading_color: Option<Rgb>,
     /// Where the cell's text sits when the row is taller than it.
     pub valign: VAlign,
 }
@@ -351,6 +355,8 @@ pub struct ParaProps {
     pub borders: Borders,
     /// Shading in tenths of a percent (125 = 12.5%), 0 for none.
     pub shading: u16,
+    /// An explicit solid background. When present, it takes precedence over shading.
+    pub shading_color: Option<Rgb>,
     /// The paragraph is inside a table cell. Word marks every paragraph of
     /// a cell this way; the cell's last paragraph ends in a cell mark.
     pub in_table: bool,
@@ -452,6 +458,7 @@ impl Default for ParaProps {
             suppress_line_numbers: false,
             borders: Borders::default(),
             shading: 0,
+            shading_color: None,
             in_table: false,
             nest: 0,
             frame: None,

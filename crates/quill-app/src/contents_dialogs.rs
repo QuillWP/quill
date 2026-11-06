@@ -7,22 +7,46 @@ use crate::docview::DocView;
 use quill_core::LineNumbering;
 use quill_core::contents::{IndexOptions, TocOptions};
 
-/// Insert > Table of Contents.
-pub fn toc() -> Dialog {
-    let mut d = Dialog::new("Table of Contents", 360.0, 118.0);
-    d.text("Collect:", 10.0, 10.0);
-    d.radio("outline", "Outline", 70.0, 10.0, 1, true);
-    d.radio("cparas", ".C. Paragraphs", 150.0, 10.0, 1, false);
-    d.check("numbers", "Show Page Numbers", 10.0, 36.0, true);
-    d.group("Level", 10.0, 60.0, 250.0, 48.0);
-    d.radio("all", "All", 18.0, 80.0, 2, true);
-    d.radio("range", "From:", 70.0, 80.0, 2, false);
-    d.field("from", "", 128.0, 77.0, 36.0);
-    d.text("To:", 174.0, 80.0);
-    d.field("to", "", 204.0, 77.0, 36.0);
+// Contents and index share the same range controls and actions. Keep their
+// layout together so spacing and keyboard order cannot drift apart.
+fn collection_dialog(
+    title: &str,
+    choices: [(&'static str, &str); 2],
+    group: &str,
+    page_numbers: bool,
+) -> Dialog {
+    let mut d = Dialog::new(title, 360.0, 118.0);
+    d.text(
+        if page_numbers { "Collect:" } else { "Format:" },
+        10.0,
+        10.0,
+    );
+    for (i, (id, label)) in choices.into_iter().enumerate() {
+        d.radio(id, label, 70.0 + 80.0 * i as f32, 10.0, 1, i == 0);
+    }
+    if page_numbers {
+        d.check("numbers", "Show Page Numbers", 10.0, 36.0, true);
+    }
+    let y = if page_numbers { 60.0 } else { 40.0 };
+    d.group(group, 10.0, y, 250.0, 48.0);
+    d.radio("all", "All", 18.0, y + 20.0, 2, true);
+    d.radio("range", "From:", 70.0, y + 20.0, 2, false);
+    d.field("from", "", 128.0, y + 17.0, 36.0);
+    d.text("To:", 174.0, y + 20.0);
+    d.field("to", "", 204.0, y + 17.0, 36.0);
     d.button("ok", "Start", 276.0, 8.0, 74.0, true);
     d.button("cancel", "Cancel", 276.0, 34.0, 74.0, false);
     d
+}
+
+/// Insert > Table of Contents.
+pub fn toc() -> Dialog {
+    collection_dialog(
+        "Table of Contents",
+        [("outline", "Outline"), ("cparas", ".C. Paragraphs")],
+        "Level",
+        true,
+    )
 }
 
 /// Typing a level picks From/To.
@@ -55,19 +79,12 @@ pub fn read_toc(d: &Dialog) -> Option<TocOptions> {
 
 /// Insert > Index.
 pub fn index() -> Dialog {
-    let mut d = Dialog::new("Index", 360.0, 118.0);
-    d.text("Format:", 10.0, 10.0);
-    d.radio("nested", "Nested", 70.0, 10.0, 1, true);
-    d.radio("runin", "Run-in", 150.0, 10.0, 1, false);
-    d.group("Index Characters", 10.0, 40.0, 250.0, 48.0);
-    d.radio("all", "All", 18.0, 60.0, 2, true);
-    d.radio("range", "From:", 70.0, 60.0, 2, false);
-    d.field("from", "", 128.0, 57.0, 36.0);
-    d.text("To:", 174.0, 60.0);
-    d.field("to", "", 204.0, 57.0, 36.0);
-    d.button("ok", "Start", 276.0, 8.0, 74.0, true);
-    d.button("cancel", "Cancel", 276.0, 34.0, 74.0, false);
-    d
+    collection_dialog(
+        "Index",
+        [("nested", "Nested"), ("runin", "Run-in")],
+        "Index Characters",
+        false,
+    )
 }
 
 pub fn read_index(d: &Dialog) -> Option<IndexOptions> {
@@ -128,17 +145,62 @@ pub fn apply_line_numbers(d: &Dialog, view: &mut DocView) -> bool {
     else {
         return false;
     };
+    let old = view.current_section().clone();
     let from = match d.field_text("from").trim() {
         f if f.is_empty() || f.eq_ignore_ascii_case("auto") => None,
-        f => match units::parse_length(f) {
+        f => match units::parse_length_from(f, old.line_from_text.unwrap_or(0)) {
             Some(t) => Some(t.max(0)),
             None => return false,
         },
     };
     view.format_sections(|s| {
-        s.line_numbers = numbering;
-        s.line_count_by = count;
-        s.line_from_text = from;
+        if numbering != old.line_numbers {
+            s.line_numbers = numbering;
+        }
+        if count != old.line_count_by {
+            s.line_count_by = count;
+        }
+        if from != old.line_from_text {
+            s.line_from_text = from;
+        }
     });
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quill_core::para::{Mark, Paragraph};
+    use quill_core::{Document, Position, Selection};
+
+    #[test]
+    fn line_numbers_preserve_rounded_lengths_and_unedited_sections() {
+        let mut doc = Document::new();
+        doc.section.line_from_text = Some(240);
+        doc.main.paras[0].mark = Mark::SectionBreak;
+        let mut first = doc.section.clone();
+        first.line_from_text = Some(425);
+        doc.main.paras[0].section = Some(Box::new(first));
+        doc.main
+            .paras
+            .push(Paragraph::new(Default::default(), Default::default()));
+        let mut view = DocView::new(doc, "Lines".into());
+        view.sel = Selection::new(Position::new(0, 0), Position::new(1, 0));
+        let mut d = line_numbers(&view);
+        assert!(apply_line_numbers(&d, &mut view));
+        assert_eq!(view.doc.section_props_at(0).line_from_text, Some(425));
+        assert_eq!(view.doc.section_props_at(1).line_from_text, Some(240));
+        assert!(!view.doc.is_modified());
+        d.set_field("countby", "5");
+        assert!(apply_line_numbers(&d, &mut view));
+        for para in [0, 1] {
+            assert_eq!(view.doc.section_props_at(para).line_count_by, 5);
+        }
+        assert_eq!(view.doc.section_props_at(1).line_from_text, Some(240));
+        d.set_field("from", "0.5 in");
+        assert!(apply_line_numbers(&d, &mut view));
+        for para in [0, 1] {
+            assert_eq!(view.doc.section_props_at(para).line_from_text, Some(720));
+        }
+    }
 }

@@ -15,6 +15,19 @@ decoding, settings, glossary files, and print-merge data.
 
 ## Overnight campaign
 
+Combined-feature Word fixtures live in the ignored `fuzz/word-fixtures/` directory.
+`python3 tools/make_combination_seeds.py` prepares three RTF sources combining
+nested tables, cell pictures, footnotes, sections, fields and review markup.
+Open these sources in Microsoft Word and save DOCX copies under the corresponding
+`word/` folder. The sources are generated inputs; the DOCX files are Word's output.
+Retain native Word edits, round-trip copies and comparison evidence alongside them.
+
+After checking the Word files, run
+`python3 tools/make_combination_seeds.py --seed-corpus` to copy the DOCX fixtures
+into the DOCX and ZIP corpora and the RTF sources into the RTF corpus. Seed names
+use content hashes; Word lock files and macOS metadata files are excluded.
+This prepares inputs only and does not launch a fuzz campaign.
+
 Run `python3 tools/overnight_fuzz.py` from the repository root under
 `caffeinate -i` to seed the missing corpora, build all eleven targets with
 AddressSanitizer and checked arithmetic, and run each for three hours.

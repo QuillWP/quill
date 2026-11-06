@@ -17,7 +17,6 @@ use quill_core::props::{
 };
 use quill_core::{Document, Object};
 use std::collections::HashMap;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 /// Quotes and lists nested deeper than this are read as plain text.
@@ -1296,14 +1295,13 @@ impl Reader {
                 Some(base) => base.join(name),
                 None => PathBuf::from(name),
             };
-            let mut bytes = Vec::new();
-            let read = std::fs::File::open(&path)
-                .and_then(|f| f.take(MAX_PICTURE + 1).read_to_end(&mut bytes));
-            if read.is_err() || bytes.len() as u64 > MAX_PICTURE {
-                self.report.note(notes::MARKDOWN_PICTURES);
-                return None;
+            match crate::read_file_with_limit(&path, MAX_PICTURE) {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    self.report.note(notes::MARKDOWN_PICTURES);
+                    return None;
+                }
             }
-            bytes
         };
         let Some(mut pic) = crate::images::picture(bytes) else {
             self.report.note(notes::PICTURES);
@@ -1363,6 +1361,7 @@ impl Reader {
             pap.borders.left = BorderLine {
                 style: BorderStyle::Single,
                 space: QUOTE_GAP * cx.quote as i32,
+                ..Default::default()
             };
         }
         pap
@@ -1456,6 +1455,7 @@ impl Reader {
                     pap.borders.bottom = BorderLine {
                         style: BorderStyle::Single,
                         space: 0,
+                        ..Default::default()
                     };
                     out.push(Paragraph::new(pap, normal));
                 }
@@ -1509,6 +1509,7 @@ impl Reader {
         let line = BorderLine {
             style: BorderStyle::Single,
             space: 0,
+            ..Default::default()
         };
         let edge = Borders {
             top: line,

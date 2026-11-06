@@ -3,7 +3,7 @@
 
 use crate::report::{self as notes, ImportReport};
 use crate::xml::{Element, Node};
-use quill_core::document::FootnotePosition;
+use quill_core::document::{FootnotePosition, SavedView};
 use quill_core::limits::MAX_TABLE_LEVEL;
 use quill_core::para::{Mark, Paragraph, chars};
 use quill_core::props::{
@@ -1155,6 +1155,37 @@ impl Reader {
             self.std_rows[level] = StdRow::start();
             return;
         }
+        if matches!(w, "cbpat" | "clcbpat") {
+            let color = (v > 0)
+                .then(|| self.colors.get(v as usize).copied())
+                .flatten();
+            if w == "clcbpat" {
+                self.std_rows[level].cell.shading_color = color;
+            } else {
+                self.pap_mut().shading_color = color;
+            }
+            return;
+        }
+        if w == "brdrcf" {
+            let color = self.colors.get(v as usize).copied().unwrap_or(Rgb::BLACK);
+            self.std_rows[level].set_color(color);
+            let side = self.st.border;
+            let b = &mut self.pap_mut().borders;
+            match side {
+                Some(0) => b.top.color = color,
+                Some(1) => b.bottom.color = color,
+                Some(2) => b.left.color = color,
+                Some(3) => b.right.color = color,
+                Some(4) => b.between.color = color,
+                Some(5) => {
+                    for l in [&mut b.top, &mut b.bottom, &mut b.left, &mut b.right] {
+                        l.color = color;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.st.dest != Dest::Math && self.std_rows[level].word(w, v) {
             return;
         }
@@ -1586,6 +1617,14 @@ impl Reader {
             }
             "gutter" => self.doc.props.gutter = v,
             "deftab" if v > 0 => self.doc.props.default_tab = v,
+            "viewkind" => {
+                self.doc.props.view = match v {
+                    1 => Some(SavedView::PageLayout),
+                    2 => Some(SavedView::Outline),
+                    4 => Some(SavedView::Normal),
+                    _ => None,
+                }
+            }
             "widowctrl" => self.doc.props.widow_control = on,
             "margmirror" => self.doc.props.mirror_margins = true,
             "printhidden" => self.doc.props.print_hidden = on,
@@ -2094,6 +2133,18 @@ impl StdRow {
         true
     }
 
+    /// The color of the line being defined.
+    fn set_color(&mut self, color: Rgb) {
+        let b = &mut self.cell.borders;
+        match self.border {
+            Some(0) => b.top.color = color,
+            Some(1) => b.bottom.color = color,
+            Some(2) => b.left.color = color,
+            Some(3) => b.right.color = color,
+            _ => {}
+        }
+    }
+
     /// The row, once its cells have been read. None without any.
     fn finish(&mut self) -> Option<RowProps> {
         let done = std::mem::replace(self, StdRow::start());
@@ -2138,6 +2189,12 @@ fn parse_row_data(data: &str) -> Option<RowProps> {
         if cells.len() >= MAX_TABLE_ENTRIES {
             return None;
         }
+        // An optional colon suffix holds the solid fill; a semicolon
+        // before it holds the five lines' colors. Older rows omit both.
+        let (part, fill) = part.split_once(':').unwrap_or((part, ""));
+        let shading_color = fill.parse::<u32>().ok().map(|c| Rgb(c & 0xFF_FFFF));
+        let (part, colors) = part.split_once(';').unwrap_or((part, ""));
+        let colors: Vec<u32> = colors.split(',').filter_map(|c| c.parse().ok()).collect();
         let v: Vec<i32> = part
             .split(',')
             .map(str::parse)
@@ -2161,9 +2218,22 @@ fn parse_row_data(data: &str) -> Option<RowProps> {
             line.style = parse_border_style(pair[0])?;
             line.space = pair[1];
         }
+        for (line, color) in [
+            &mut borders.top,
+            &mut borders.bottom,
+            &mut borders.left,
+            &mut borders.right,
+            &mut borders.between,
+        ]
+        .into_iter()
+        .zip(colors)
+        {
+            line.color = Rgb(color & 0xFF_FFFF);
+        }
         cells.push(CellProps {
             width: v[0],
             shading: v[1] as u16,
+            shading_color,
             borders,
             valign: match v.get(13) {
                 Some(1) => quill_core::props::VAlign::Center,

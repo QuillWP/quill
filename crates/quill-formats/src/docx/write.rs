@@ -7,12 +7,12 @@
 
 use super::names;
 use crate::zip;
-use quill_core::document::{FootnotePosition, blank_header};
+use quill_core::document::{FootnotePosition, SavedView, blank_header};
 use quill_core::para::Mark;
 use quill_core::para::{Paragraph, chars};
 use quill_core::props::{
-    Align, BorderLine, BorderStyle, Borders, CharProps, LineSpacing, ParaProps, StyleId, TabAlign,
-    TabLeader, Underline,
+    Align, BorderLine, BorderStyle, Borders, CharProps, LineSpacing, ParaProps, Rgb, StyleId,
+    TabAlign, TabLeader, Underline,
 };
 use quill_core::{Document, PageNumberFormat, SectionProps, SectionStart, StoryId};
 use std::fmt::Write as _;
@@ -307,9 +307,14 @@ fn border(out: &mut String, tag: &str, b: &BorderLine, shadow: bool) {
         BorderStyle::Double => ("double", 4),
     };
     let shadow = if shadow { r#" w:shadow="1""# } else { "" };
+    let color = if b.color == Rgb::BLACK {
+        "auto".to_string()
+    } else {
+        format!("{:06X}", b.color.0 & 0xFF_FFFF)
+    };
     let _ = write!(
         out,
-        r#"<w:{tag} w:val="{val}" w:sz="{sz}" w:space="{}" w:color="auto"{shadow}/>"#,
+        r#"<w:{tag} w:val="{val}" w:sz="{sz}" w:space="{}" w:color="{color}"{shadow}/>"#,
         b.space / 20
     );
 }
@@ -442,12 +447,20 @@ fn ppr(p: &ParaProps, base: &ParaProps) -> String {
     if p.borders != base.borders {
         borders(&mut o, &p.borders);
     }
-    if p.shading != base.shading {
-        let _ = write!(
-            o,
-            r#"<w:shd w:val="{}" w:color="auto" w:fill="auto"/>"#,
-            shading_val(p.shading)
-        );
+    if p.shading != base.shading || p.shading_color != base.shading_color {
+        if let Some(color) = p.shading_color {
+            let _ = write!(
+                o,
+                r#"<w:shd w:val="clear" w:color="auto" w:fill="{:06X}"/>"#,
+                color.0
+            );
+        } else {
+            let _ = write!(
+                o,
+                r#"<w:shd w:val="{}" w:color="auto" w:fill="auto"/>"#,
+                shading_val(p.shading)
+            );
+        }
     }
     if p.tabs != base.tabs {
         o.push_str("<w:tabs>");
@@ -1274,7 +1287,13 @@ fn table(doc: &Document, ids: &[String], paras: &[Paragraph], outer: u8, out: &m
                 border(out, "right", &cell.borders.right, cell.borders.shadow);
                 out.push_str("</w:tcBorders>");
             }
-            if cell.shading > 0 {
+            if let Some(color) = cell.shading_color {
+                let _ = write!(
+                    out,
+                    r#"<w:shd w:val="clear" w:color="auto" w:fill="{:06X}"/>"#,
+                    color.0
+                );
+            } else if cell.shading > 0 {
                 let _ = write!(
                     out,
                     r#"<w:shd w:val="{}" w:color="auto" w:fill="auto"/>"#,
@@ -1391,6 +1410,14 @@ fn styles_xml(doc: &Document, ids: &[String]) -> String {
 fn settings_xml(doc: &Document) -> String {
     let p = &doc.props;
     let mut extra = String::new();
+    if let Some(view) = p.view {
+        let val = match view {
+            SavedView::Normal => "normal",
+            SavedView::Outline => "outline",
+            SavedView::PageLayout => "print",
+        };
+        let _ = write!(extra, r#"<w:view w:val="{val}"/>"#);
+    }
     if p.mirror_margins {
         extra.push_str("<w:mirrorMargins/>");
     }

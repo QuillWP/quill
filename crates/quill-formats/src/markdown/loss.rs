@@ -112,10 +112,9 @@ pub fn losses(doc: &Document) -> Vec<&'static str> {
                     || row.height != RowHeight::Auto
                     || row.indent != 0
                     || row.align != Align::Left
-                    || row
-                        .cells
-                        .iter()
-                        .any(|c| c.shading > 0 || c.valign != VAlign::Top)
+                    || row.cells.iter().any(|c| {
+                        c.shading > 0 || c.shading_color.is_some() || c.valign != VAlign::Top
+                    })
                 {
                     note(&mut found, TABLE_LAYOUT);
                 }
@@ -168,6 +167,7 @@ pub fn losses(doc: &Document) -> Vec<&'static str> {
                 .iter()
                 .enumerate()
                 .any(|(k, e)| e.style != BorderStyle::None && !(rule && k == 2))
+            || p.pap.shading_color.is_some()
             || (p.pap.shading > 0 && !code)
         {
             note(&mut found, BORDERS);

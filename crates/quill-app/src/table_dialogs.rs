@@ -4,7 +4,7 @@
 use crate::dialog::{Dialog, units};
 use crate::docview::DocView;
 use quill_core::para::Mark;
-use quill_core::props::{Align, RowHeight, RowProps, Twips, VAlign};
+use quill_core::props::{Align, BorderLine, BorderStyle, Rgb, RowHeight, RowProps, Twips, VAlign};
 use quill_core::table::{self, Convert, Row};
 use quill_core::{Position, Selection, StoryId};
 
@@ -242,6 +242,7 @@ pub fn insert_apply(st: &InsertState, d: &Dialog, view: &mut DocView) -> bool {
         let _ = (total, room, place);
     }
     view.doc.begin("Insert Table", view.sel);
+    let before = view.doc.main.paras.len();
     let at = match st.convert {
         Some((a, b)) => {
             let how = match d.radio_on(1) {
@@ -268,10 +269,49 @@ pub fn insert_apply(st: &InsertState, d: &Dialog, view: &mut DocView) -> bool {
             }
         }
     };
+    if view.doc.main.paras.len() != before {
+        border_new_table(view, at);
+    }
     view.set_selection(Selection::caret(at));
     let sel = view.sel;
     view.doc.commit(sel);
     true
+}
+
+/// The line a new table is drawn with, from settings: from then on it
+/// belongs to the table, and Format > Border changes it.
+fn new_table_line() -> BorderLine {
+    crate::settings::with(|s| BorderLine {
+        style: if s.table_border_dotted {
+            BorderStyle::Dotted
+        } else {
+            BorderStyle::Hairline
+        },
+        space: 0,
+        color: Rgb(s.table_border_color & 0xFF_FFFF),
+    })
+}
+
+/// Give the table just made at `at` its borders, in the open undo step.
+/// Rows beside it that were there already have their own, or none on
+/// purpose, and are left alone.
+pub fn border_new_table(view: &mut DocView, at: Position) {
+    let line = new_table_line();
+    let tw = view.doc.column_width_at(at.para);
+    let rows = table::table_rows(&view.doc.main.paras, at.para);
+    for row in rows.iter().filter(|r| r.first >= at.para) {
+        let mut p = table::row_props(&view.doc.main.paras, row, tw);
+        if p.cells.iter().any(|c| !c.borders.is_none()) {
+            break;
+        }
+        for cell in &mut p.cells {
+            cell.borders.top = line;
+            cell.borders.bottom = line;
+            cell.borders.left = line;
+            cell.borders.right = line;
+        }
+        view.doc.set_row(MAIN, row.end, p);
+    }
 }
 
 // ----- Convert to Table -----
@@ -350,6 +390,7 @@ pub fn convert_lines(view: &mut DocView, plan: &ConvertPlan, with_neighbors: boo
     let at = view
         .doc
         .convert_to_table(MAIN, a, b, plan.how, |n| (text_width / n as Twips).max(144));
+    border_new_table(view, at);
     view.set_selection(Selection::caret(at));
     let sel = view.sel;
     view.doc.commit(sel);
@@ -627,10 +668,6 @@ pub fn table_layout_changed(d: &mut Dialog) {
 
 /// Insert, Delete, Merge or Split Cells in Table Layout.
 pub fn table_layout_button(d: &Dialog, view: &mut DocView, id: &str) {
-    let Some(ts) = table_selection(view) else {
-        return;
-    };
-    let tw = view.doc.column_width_at(ts.rows[0].first);
     let what = if d.is_on("row") || (d.is_on("selection") && d.is_on("vert")) {
         "row"
     } else if d.is_on("column") {
@@ -638,8 +675,19 @@ pub fn table_layout_button(d: &Dialog, view: &mut DocView, id: &str) {
     } else {
         "cells"
     };
+    change_cells(view, id, what);
+}
+
+/// Change the selected cells, from Table Layout or a command: `id` is
+/// insert (before them), after, delete, merge or split, and `what` is row,
+/// column or cells.
+pub fn change_cells(view: &mut DocView, id: &str, what: &str) {
+    let Some(ts) = table_selection(view) else {
+        return;
+    };
+    let tw = view.doc.column_width_at(ts.rows[0].first);
     let label = match id {
-        "insert" => "Insert Cells",
+        "insert" | "after" => "Insert Cells",
         "delete" => "Delete Cells",
         "split" => "Split Cell",
         _ => "Merge Cells",
@@ -711,12 +759,17 @@ pub fn table_layout_button(d: &Dialog, view: &mut DocView, id: &str) {
                 let paras = &view.doc.main.paras;
                 let p = table::row_props(paras, row, tw);
                 let from = ts.from.min(row.cells.len() - 1);
-                if id == "insert" {
-                    let width = p.cells[from].width;
-                    view.doc.insert_cells(MAIN, row, &p, from, n, width);
-                } else {
-                    let to = (from + n - 1).min(row.cells.len() - 1);
-                    view.doc.delete_cells(MAIN, row, &p, from, to);
+                let to = (from + n - 1).min(row.cells.len() - 1);
+                match id {
+                    "insert" => {
+                        let width = p.cells[from].width;
+                        view.doc.insert_cells(MAIN, row, &p, from, n, width);
+                    }
+                    "after" => {
+                        let width = p.cells[to].width;
+                        view.doc.insert_cells(MAIN, row, &p, to + 1, n, width);
+                    }
+                    _ => view.doc.delete_cells(MAIN, row, &p, from, to),
                 }
             }
         }
@@ -1052,6 +1105,52 @@ mod tests {
         let r2 = table::row_at(paras, row.end + 1).unwrap();
         let p2 = table::row_props(paras, &r2, 8640);
         assert!(p2.cells.iter().all(|c| c.width == 2880));
+    }
+
+    #[test]
+    fn a_new_table_has_borders_from_the_settings() {
+        let mut v = DocView::new(Document::new(), String::new());
+        v.doc.begin("t", v.sel);
+        let at = v.doc.insert_table(MAIN, Position::new(0, 0), 2, 2, 2000);
+        border_new_table(&mut v, at);
+        let sel = v.sel;
+        v.doc.commit(sel);
+        let line = new_table_line();
+        for row in table::table_rows(&v.doc.main.paras, 0) {
+            let p = table::row_props(&v.doc.main.paras, &row, 8640);
+            assert!(p.cells.iter().all(|c| {
+                let b = c.borders;
+                [b.top, b.bottom, b.left, b.right] == [line; 4]
+            }));
+        }
+        // Changing the setting later leaves the table as it is: it holds
+        // its own color and style.
+        assert_ne!(line.style, BorderStyle::None);
+    }
+
+    #[test]
+    fn cells_go_in_before_or_after_the_one_selected() {
+        let mut v = DocView::new(Document::new(), String::new());
+        v.doc.begin("t", v.sel);
+        v.doc.insert_table(MAIN, Position::new(0, 0), 1, 2, 2000);
+        let sel = v.sel;
+        v.doc.commit(sel);
+        v.set_selection(Selection::caret(Position::new(0, 0)));
+        v.type_text("A");
+        let cell = |v: &DocView| {
+            let row = table::row_at(&v.doc.main.paras, 0).unwrap();
+            let k = row
+                .cells
+                .iter()
+                .position(|&(a, _)| v.doc.main.paras[a].text == "A")
+                .unwrap();
+            (k, row.cells.len())
+        };
+        change_cells(&mut v, "after", "cells");
+        assert_eq!(cell(&v), (0, 3));
+        v.set_selection(Selection::caret(Position::new(0, 0)));
+        change_cells(&mut v, "insert", "cells");
+        assert_eq!(cell(&v), (1, 4));
     }
 
     #[test]

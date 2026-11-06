@@ -1,6 +1,7 @@
 //! Writing Rich Text Format, in the dialect the original wrote and every word
 //! processor since reads.
 
+use quill_core::document::SavedView;
 use quill_core::para::{Mark, Paragraph, chars};
 use quill_core::props::{
     Align, BorderLine, BorderStyle, CharProps, LineSpacing, ParaProps, Rgb, RowHeight, RowProps,
@@ -208,7 +209,15 @@ pub(crate) fn dttm(date: &str) -> i32 {
     packed as u32 as i32
 }
 
-fn border(out: &mut String, side: &str, b: &BorderLine) {
+fn border(out: &mut String, side: &str, b: &BorderLine, tables: &Tables) {
+    if b.style != BorderStyle::None {
+        let _ = write!(out, "\\brdr{side}");
+        border_words(out, b, tables);
+    }
+}
+
+/// A line's style, width, space and color.
+fn border_words(out: &mut String, b: &BorderLine, tables: &Tables) {
     let (kind, width) = match b.style {
         BorderStyle::None => return,
         BorderStyle::Dotted => ("\\brdrdot", 15),
@@ -217,7 +226,11 @@ fn border(out: &mut String, side: &str, b: &BorderLine) {
         BorderStyle::Thick => ("\\brdrth", 15),
         BorderStyle::Double => ("\\brdrdb", 15),
     };
-    let _ = write!(out, "\\brdr{side}{kind}\\brdrw{width}\\brsp{}", b.space);
+    let _ = write!(out, "{kind}\\brdrw{width}\\brsp{}", b.space);
+    let color = tables.index(b.color);
+    if color > 0 {
+        let _ = write!(out, "\\brdrcf{color}");
+    }
 }
 
 /// A frame as RTF's absolute position words.
@@ -258,7 +271,7 @@ fn frame(out: &mut String, f: &quill_core::Frame) {
     }
 }
 
-fn pap(out: &mut String, p: &ParaProps) {
+fn pap(out: &mut String, p: &ParaProps, tables: &Tables) {
     let _ = write!(out, "\\s{}", p.style);
     if p.in_table {
         out.push_str("\\intbl");
@@ -323,13 +336,16 @@ fn pap(out: &mut String, p: &ParaProps) {
         }
     }
     let b = &p.borders;
-    border(out, "t", &b.top);
-    border(out, "b", &b.bottom);
-    border(out, "l", &b.left);
-    border(out, "r", &b.right);
-    border(out, "btw", &b.between);
+    border(out, "t", &b.top, tables);
+    border(out, "b", &b.bottom, tables);
+    border(out, "l", &b.left, tables);
+    border(out, "r", &b.right, tables);
+    border(out, "btw", &b.between, tables);
     if b.shadow && !b.is_none() {
         out.push_str("\\brdrsh");
+    }
+    if let Some(color) = p.shading_color {
+        let _ = write!(out, "\\cbpat{}", tables.index(color));
     }
     if p.shading > 0 {
         // RTF shading is in hundredths of a percent.
@@ -394,14 +410,14 @@ fn paragraph(
         // The end of a row is a paragraph mark with its own format, or
         // it would take the last cell's.
         out.push_str("\\pard\\plain");
-        pap(out, &p.pap);
+        pap(out, &p.pap, tables);
         out.push_str("\\plain");
         chp(out, &p.mark_chp, tables);
         match nested {
             // Programs that cannot nest tables read the group after it.
             Some(row) => {
                 out.push_str("{\\*\\nesttableprops");
-                row_definition(out, row);
+                row_definition(out, row, tables);
                 out.push_str("\\nestrow}{\\nonesttables\\par}\n");
             }
             None => out.push_str("\\row\n"),
@@ -409,7 +425,7 @@ fn paragraph(
         return;
     }
     out.push_str("\\pard\\plain");
-    pap(out, &p.pap);
+    pap(out, &p.pap, tables);
     // A hyperlink is a HYPERLINK field whose result holds its runs.
     let mut link = 0;
     let main = crate::docx::write::main_index(doc, p);
@@ -596,7 +612,7 @@ fn border_style(style: BorderStyle) -> u8 {
 
 /// Standard RTF row geometry, plus an ignorable exact Quill record for the
 /// cell border/shading details that older RTF readers vary in interpreting.
-fn row_definition(out: &mut String, row: &RowProps) {
+fn row_definition(out: &mut String, row: &RowProps, tables: &Tables) {
     let (height_kind, height, trrh) = match row.height {
         RowHeight::Auto => (0, 0, 0),
         RowHeight::AtLeast(h) => (1, h, h),
@@ -622,10 +638,27 @@ fn row_definition(out: &mut String, row: &RowProps) {
     let mut edge = row.indent - row.gap / 2;
     for cell in &row.cells {
         edge += cell.width;
+        if let Some(color) = cell.shading_color {
+            let _ = write!(out, "\\clcbpat{}", tables.index(color));
+        }
+        if cell.shading > 0 {
+            let _ = write!(out, "\\clshdng{}", cell.shading as u32 * 10);
+        }
         match cell.valign {
             quill_core::props::VAlign::Top => {}
             quill_core::props::VAlign::Center => out.push_str("\\clvertalc"),
             quill_core::props::VAlign::Bottom => out.push_str("\\clvertalb"),
+        }
+        for (word, line) in [
+            ("t", &cell.borders.top),
+            ("b", &cell.borders.bottom),
+            ("l", &cell.borders.left),
+            ("r", &cell.borders.right),
+        ] {
+            if !line.is_none() {
+                let _ = write!(out, "\\clbrdr{word}");
+                border_words(out, line, tables);
+            }
         }
         let _ = write!(out, "\\cellx{edge}");
     }
@@ -656,13 +689,23 @@ fn row_definition(out: &mut String, row: &RowProps) {
             quill_core::props::VAlign::Center => out.push_str(",1"),
             quill_core::props::VAlign::Bottom => out.push_str(",2"),
         }
+        // Then the lines' colors, when any is not black.
+        let b = &cell.borders;
+        let lines = [&b.top, &b.bottom, &b.left, &b.right, &b.between];
+        if lines.iter().any(|l| l.color != Rgb::BLACK) {
+            let colors: Vec<String> = lines.iter().map(|l| l.color.0.to_string()).collect();
+            let _ = write!(out, ";{}", colors.join(","));
+        }
+        if let Some(color) = cell.shading_color {
+            let _ = write!(out, ":{}", color.0);
+        }
     }
     out.push_str("}\n");
 }
 
 /// Before the first paragraph of a table row, the row's definition. A
 /// table inside a cell has its rows defined where they end instead.
-fn row_start(out: &mut String, doc: &Document, paras: &[Paragraph], i: usize) {
+fn row_start(out: &mut String, doc: &Document, paras: &[Paragraph], i: usize, tables: &Tables) {
     let starts_row = i == 0
         || paras[i - 1].pap.level() == 0
         || (paras[i - 1].mark == Mark::RowEnd && paras[i - 1].pap.level() == 1);
@@ -671,7 +714,7 @@ fn row_start(out: &mut String, doc: &Document, paras: &[Paragraph], i: usize) {
         && let Some(row) = quill_core::table::row_at_level(paras, i, 1)
     {
         let props = quill_core::table::row_props(paras, &row, doc.props.text_width());
-        row_definition(out, &props);
+        row_definition(out, &props, tables);
     }
 }
 
@@ -693,7 +736,7 @@ fn nested_row(doc: &Document, paras: &[Paragraph], i: usize) -> Option<RowProps>
 /// tables' rows defined as in the main text.
 fn story(out: &mut String, doc: &Document, paras: &[Paragraph], tables: &Tables, in_note: bool) {
     for (i, p) in paras.iter().enumerate() {
-        row_start(out, doc, paras, i);
+        row_start(out, doc, paras, i, tables);
         paragraph(
             out,
             doc,
@@ -772,11 +815,29 @@ pub fn write(doc: &Document) -> Vec<u8> {
         .into_iter()
         .chain(&doc.headers)
         .chain(section_headers);
+    let mut line_colors: Vec<Rgb> = Vec::new();
     for p in stories.flat_map(|s| &s.paras) {
+        line_colors.extend(p.pap.shading_color);
+        line_colors.extend(
+            p.row
+                .iter()
+                .flat_map(|r| &r.cells)
+                .filter_map(|c| c.shading_color),
+        );
         note(&p.mark_chp);
         p.runs.iter().for_each(|r| note(&r.chp));
+        let cells = p.row.iter().flat_map(|row| &row.cells);
+        for b in std::iter::once(&p.pap.borders).chain(cells.map(|c| &c.borders)) {
+            line_colors.extend([b.top, b.bottom, b.left, b.right, b.between].map(|l| l.color));
+        }
     }
     doc.styles.styles.iter().for_each(|s| note(&s.chp));
+    line_colors.extend(doc.styles.styles.iter().filter_map(|s| s.pap.shading_color));
+    for c in line_colors {
+        if !colors.contains(&c) {
+            colors.push(c);
+        }
+    }
     let tables = Tables {
         colors,
         authors,
@@ -802,7 +863,7 @@ pub fn write(doc: &Document) -> Vec<u8> {
     out.push_str("}\n{\\stylesheet");
     for s in &doc.styles.styles {
         out.push('{');
-        pap(&mut out, &s.pap);
+        pap(&mut out, &s.pap, &tables);
         if let Some(b) = s.based_on {
             let _ = write!(out, "\\sbasedon{b}");
         }
@@ -879,6 +940,14 @@ pub fn write(doc: &Document) -> Vec<u8> {
         },
         if p.mirror_margins { "\\margmirror" } else { "" },
     );
+    if let Some(view) = p.view {
+        let kind = match view {
+            SavedView::Normal => 4,
+            SavedView::Outline => 2,
+            SavedView::PageLayout => 1,
+        };
+        let _ = writeln!(out, "\\viewkind{kind}");
+    }
     if p.print_hidden {
         out.push_str("\\printhidden");
     }
@@ -905,7 +974,7 @@ pub fn write(doc: &Document) -> Vec<u8> {
     section(&mut out, doc.section_props_at(0));
     headers(&mut out, doc, section_index, &tables);
     for (i, para) in doc.main.paras.iter().enumerate() {
-        row_start(&mut out, doc, &doc.main.paras, i);
+        row_start(&mut out, doc, &doc.main.paras, i, &tables);
         paragraph(
             &mut out,
             doc,

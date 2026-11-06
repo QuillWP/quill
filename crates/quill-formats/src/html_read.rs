@@ -332,6 +332,15 @@ fn css(doc: &mut Document, frame: &mut Frame, style: &str) {
                     _ => twips().unwrap_or(0),
                 }
             }
+            "background-color" => {
+                if lower == "transparent" {
+                    p.shading_color = None;
+                    p.shading = 0;
+                } else if let Some(c) = color(value) {
+                    p.shading_color = Some(c);
+                    p.shading = 0;
+                }
+            }
             "text-align" => {
                 p.align = match lower.as_str() {
                     "right" | "end" => Align::Right,
@@ -1162,6 +1171,7 @@ impl<'a> Reader<'a> {
                     p.pap.borders.bottom = BorderLine {
                         style: BorderStyle::Single,
                         space: 0,
+                        ..Default::default()
                     };
                 }
                 self.flush(out);
@@ -1365,6 +1375,7 @@ impl<'a> Reader<'a> {
         let line = BorderLine {
             style: BorderStyle::Single,
             space: 0,
+            ..Default::default()
         };
         self.path.push(e);
         for row in rows {
@@ -1428,6 +1439,7 @@ impl<'a> Reader<'a> {
                         ..Borders::default()
                     },
                     shading: 0,
+                    shading_color: cf.pap.shading_color,
                     valign: Default::default(),
                 });
             }

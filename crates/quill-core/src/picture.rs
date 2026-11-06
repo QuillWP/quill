@@ -241,6 +241,52 @@ impl Picture {
         p.size = (width, height);
         p
     }
+
+    /// The whole picture's size on the page at its present scale, as if
+    /// nothing were cropped.
+    pub fn full_size(&self) -> (f32, f32) {
+        let c = &self.crop;
+        let whole = |shown: Twips, cut: i32| {
+            shown as f32 * CROP_WHOLE as f32 / (CROP_WHOLE - cut).max(1) as f32
+        };
+        (
+            whole(self.size.0, c.left + c.right),
+            whole(self.size.1, c.top + c.bottom),
+        )
+    }
+
+    /// How much is cropped from each edge, in twips on the page: left, top,
+    /// right, bottom.
+    pub fn crop_on_page(&self) -> [f32; 4] {
+        let (w, h) = self.full_size();
+        let c = &self.crop;
+        let on = |cut: i32, full: f32| cut as f32 * full / CROP_WHOLE as f32;
+        [on(c.left, w), on(c.top, h), on(c.right, w), on(c.bottom, h)]
+    }
+
+    /// The picture with `more` twips on the page cropped from each edge
+    /// (left, top, right, bottom), or given back if negative. The scale
+    /// stays. An edge that isn't moved, and an axis with no edge moved,
+    /// keep their exact values.
+    pub fn crop_edges(&self, more: [f32; 4]) -> Picture {
+        let (w, h) = self.full_size();
+        let mut p = self.clone();
+        let step =
+            |twips: f32, full: f32| (twips * CROP_WHOLE as f32 / full.max(1.0)).round() as i32;
+        p.crop.left += step(more[0], w);
+        p.crop.top += step(more[1], h);
+        p.crop.right += step(more[2], w);
+        p.crop.bottom += step(more[3], h);
+        if more[0] != 0.0 || more[2] != 0.0 {
+            let shown = CROP_WHOLE - p.crop.left - p.crop.right;
+            p.size.0 = ((w * shown as f32 / CROP_WHOLE as f32).round() as Twips).max(20);
+        }
+        if more[1] != 0.0 || more[3] != 0.0 {
+            let shown = CROP_WHOLE - p.crop.top - p.crop.bottom;
+            p.size.1 = ((h * shown as f32 / CROP_WHOLE as f32).round() as Twips).max(20);
+        }
+        p
+    }
 }
 
 #[cfg(test)]
@@ -263,6 +309,23 @@ mod tests {
         d.extend_from_slice(&ppm.to_be_bytes());
         d.extend_from_slice(&[1, 0, 0, 0, 0]);
         d
+    }
+
+    #[test]
+    fn cropping_edges_keeps_the_scale_and_the_full_size() {
+        let mut p = Picture::from_bytes(png_header()).unwrap();
+        p = p.scaled_to(7 * 1440, 5 * 1440);
+        let half = 720.0;
+        let c = p.crop_edges([half, half, half, half]);
+        assert_eq!(c.size, (6 * 1440, 4 * 1440));
+        let (w, h) = c.full_size();
+        assert!((w - 7.0 * 1440.0).abs() < 2.0 && (h - 5.0 * 1440.0).abs() < 2.0);
+        assert!(c.crop_on_page().iter().all(|t| (t - half).abs() < 2.0));
+        // Giving an edge back; the height keeps its exact value.
+        let back = c.crop_edges([-half, 0.0, -half, 0.0]);
+        assert_eq!(back.size.0, 7 * 1440);
+        assert_eq!(back.size.1, c.size.1);
+        assert_eq!((back.crop.left, back.crop.right), (0, 0));
     }
 
     #[test]

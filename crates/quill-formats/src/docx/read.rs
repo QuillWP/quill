@@ -9,7 +9,7 @@
 use crate::report::{self as notes, ImportReport};
 use crate::xml::{self, Element};
 use crate::zip::Archive;
-use quill_core::document::FootnotePosition;
+use quill_core::document::{FootnotePosition, SavedView};
 use quill_core::para::{Mark, Paragraph, chars};
 use quill_core::props::{
     Align, BorderLine, BorderStyle, Borders, CellProps, CharProps, LineSpacing, ParaProps, Rgb,
@@ -1124,7 +1124,7 @@ impl Reader {
                 "pageBreakBefore" => p.page_break_before = x.on(),
                 "suppressLineNumbers" => p.suppress_line_numbers = x.on(),
                 "pBdr" => p.borders = read_borders(x, &p.borders),
-                "shd" => p.shading = read_shading(x),
+                "shd" => (p.shading, p.shading_color) = read_shading(x, &mut self.report),
                 _ => {}
             }
         }
@@ -1336,6 +1336,12 @@ impl Reader {
     }
 
     fn read_settings(&mut self, e: &Element) {
+        self.doc.props.view = match e.child("view").and_then(|v| v.attr("val")) {
+            Some("normal") => Some(SavedView::Normal),
+            Some("outline") => Some(SavedView::Outline),
+            Some("print") => Some(SavedView::PageLayout),
+            _ => None,
+        };
         if let Some(v) = e.child("defaultTabStop").and_then(|t| t.int("val"))
             && v > 0
         {
@@ -1607,6 +1613,7 @@ impl Reader {
                 // for this cell, then the cell's own.
                 let mut borders = edges.for_cell(at);
                 let mut shading = 0;
+                let mut shading_color = None;
                 let mut valign = quill_core::props::VAlign::Top;
                 for pr in layers.iter().filter_map(|l| l.child("tcPr")).chain(tcpr) {
                     if let Some(v) = pr.child("vAlign") {
@@ -1620,13 +1627,14 @@ impl Reader {
                         borders = cell_borders(b, &borders, at);
                     }
                     if let Some(shd) = pr.child("shd") {
-                        shading = read_shading(shd);
+                        (shading, shading_color) = read_shading(shd, &mut self.report);
                     }
                 }
                 cells.push(CellProps {
                     width,
                     borders,
                     shading,
+                    shading_color,
                     valign,
                 });
             }
@@ -2921,6 +2929,7 @@ fn read_border(e: &Element) -> (BorderLine, bool) {
         BorderLine {
             style,
             space: e.int("space").unwrap_or(0) * 20,
+            color: e.attr("color").and_then(parse_color).unwrap_or(Rgb::BLACK),
         },
         shadow,
     )
@@ -3137,35 +3146,67 @@ fn read_borders(e: &Element, was: &Borders) -> Borders {
     }
 }
 
-/// Shading as the original's gray percentage, from a pattern or a fill color.
-fn read_shading(e: &Element) -> u16 {
+/// Solid backgrounds stay RGB; patterns use a legacy gray approximation.
+fn read_shading(e: &Element, report: &mut ImportReport) -> (u16, Option<Rgb>) {
     let val = e.attr("val").unwrap_or("clear");
-    if let Some(pct) = val.strip_prefix("pct") {
-        let n: u16 = pct.parse().unwrap_or(0);
-        // pct12 and friends mean 12.5%.
-        return match n {
-            12 => 125,
-            37 => 375,
-            62 => 625,
-            87 => 875,
-            n => n * 10,
-        };
+    if val == "nil" {
+        return (0, None);
+    }
+    let fill = e
+        .attr("fill")
+        .filter(|v| *v != "auto")
+        .and_then(parse_color);
+    let foreground = e
+        .attr("color")
+        .filter(|v| *v != "auto")
+        .and_then(parse_color);
+    if val == "clear" {
+        if fill.is_none() && e.attr("themeFill").is_some() {
+            report.note(notes::SHADING_COLORS);
+        }
+        return (0, fill);
     }
     if val == "solid" {
-        return 1000;
+        if foreground.is_none() && e.attr("themeColor").is_some() {
+            report.note(notes::SHADING_COLORS);
+        }
+        return (1000, foreground);
     }
-    match e.attr("fill").and_then(parse_color) {
-        Some(c) if e.attr("fill") != Some("auto") => {
-            let lum = (c.r() as u32 * 30 + c.g() as u32 * 59 + c.b() as u32 * 11) / 100;
-            let pct = ((255 - lum) * 1000 / 255) as u16;
+    // Colored patterns still need a pattern renderer. Keep the gray
+    // approximation and report that conversion rather than invent a fill.
+    if [fill, foreground]
+        .into_iter()
+        .flatten()
+        .any(|c| c.r() != c.g() || c.g() != c.b())
+    {
+        report.note(notes::SHADING_COLORS);
+    }
+    if let Some(pct) = val.strip_prefix("pct") {
+        let n: u16 = pct.parse().unwrap_or(0);
+        return (
+            match n {
+                12 => 125,
+                37 => 375,
+                62 => 625,
+                87 => 875,
+                n => n.min(100) * 10,
+            },
+            None,
+        );
+    }
+    if let Some(c) = fill {
+        let lum = (c.r() as u32 * 30 + c.g() as u32 * 59 + c.b() as u32 * 11) / 100;
+        let pct = ((255 - lum) * 1000 / 255) as u16;
+        return (
             quill_core::props::SHADING_STEPS
                 .iter()
                 .copied()
                 .min_by_key(|s| s.abs_diff(pct))
-                .unwrap_or(0)
-        }
-        _ => 0,
+                .unwrap_or(0),
+            None,
+        );
     }
+    (0, None)
 }
 
 /// A `w:sectPr`'s section settings (the page size and margins are the
@@ -3303,7 +3344,7 @@ mod tests {
         assert_eq!(paras[plain + 3].pap.after, 160);
         // The header row is bold and shaded, unless the table turns it off.
         assert!(paras[grid].chp_of_char(0).bold);
-        assert!(row(grid).cells[0].shading > 0);
+        assert!(row(grid).cells[0].shading_color.is_some());
         assert!(!paras[grid + 3].chp_of_char(0).bold);
         assert!(!paras[no_header].chp_of_char(0).bold);
         assert_eq!(row(no_header).cells[0].shading, 0);
@@ -3718,6 +3759,48 @@ mod tests {
                 "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "102nd"
             ]
         );
+    }
+
+    #[test]
+    fn solid_shading_preserves_colors_without_a_conversion_warning() {
+        let body = "<w:p><w:pPr><w:shd w:fill='EBF0FA'/></w:pPr><w:r><w:t>blue</w:t></w:r></w:p>\
+            <w:tbl><w:tblGrid><w:gridCol w:w='3000'/></w:tblGrid><w:tr><w:tc>\
+            <w:tcPr><w:shd w:fill='FF0000'/></w:tcPr><w:p><w:r><w:t>red cell</w:t></w:r></w:p>\
+            </w:tc></w:tr></w:tbl>";
+        let (doc, report) = read_reported(&docx(body)).unwrap();
+        assert!(report.is_empty());
+        assert_eq!(doc.main.paras[0].pap.shading_color, Some(Rgb(0xEBF0FA)));
+        let cell = doc.main.paras.iter().find_map(|p| p.row.as_ref()).unwrap();
+        assert_eq!(cell.cells[0].shading_color, Some(Rgb(0xFF0000)));
+        let gray = "<w:p><w:pPr><w:shd w:fill='808080'/></w:pPr></w:p>";
+        assert!(read_reported(&docx(gray)).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn unsupported_color_patterns_and_theme_only_fills_still_warn() {
+        let body = "<w:p><w:pPr><w:shd w:val='pct25' w:fill='FF0000'/></w:pPr></w:p>\
+            <w:p><w:pPr><w:shd w:themeFill='accent1'/></w:pPr></w:p>";
+        let (doc, report) = read_reported(&docx(body)).unwrap();
+        assert_eq!(report.notes(), [notes::SHADING_COLORS]);
+        assert_eq!(doc.main.paras[0].pap.shading, 250);
+        assert_eq!(doc.main.paras[0].pap.shading_color, None);
+    }
+
+    #[test]
+    fn excessive_shading_percentages_are_bounded_before_multiplication() {
+        for (pattern, expected) in [
+            ("pct65535", 1000),
+            ("pct100", 1000),
+            ("pct12", 125),
+            ("pct0", 0),
+        ] {
+            let body = format!(
+                "<w:p><w:pPr><w:shd w:val='{pattern}'/></w:pPr><w:r><w:t>kept</w:t></w:r></w:p>"
+            );
+            let doc = read(&docx(&body)).unwrap();
+            assert_eq!(doc.main.paras[0].pap.shading, expected);
+            assert_eq!(doc.main.paras[0].text, "kept");
+        }
     }
 
     #[test]

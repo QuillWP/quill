@@ -95,7 +95,7 @@ pub fn data_for(view: &DocView) -> Result<(String, Data), String> {
     let doc = quill_formats::load(&path).map_err(|e| {
         format!("The data document \u{201C}{name}\u{201D} could not be opened: {e}")
     })?;
-    Ok((name, Data::from_document(&doc)))
+    Ok((name, Data::from_document(&doc)?))
 }
 
 /// Start an interactive merge from the choices in the Print Merge dialog.
@@ -161,6 +161,7 @@ pub fn advance(session: &mut Session) -> Progress {
     };
     match result {
         Err(request) => Progress::Ask(request),
+        Ok((_, errors)) if !errors.is_empty() => Progress::Done(Box::new(Outcome::Checked(errors))),
         Ok((doc, errors)) => Progress::Done(Box::new(match session.destination {
             Destination::Print => Outcome::Print(doc),
             Destination::Check => Outcome::Checked(errors),
@@ -313,6 +314,32 @@ mod tests {
         assert_eq!(fields, ["Name", "City"]);
         assert!(h.modeless);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_merge_never_prints_or_opens_incomplete_letters() {
+        for destination in [Destination::Print, Destination::NewFile, Destination::Check] {
+            let mut session = Session {
+                main: quill_core::text::from_plain_text("Dear «Nmae»"),
+                data: Data {
+                    fields: vec!["Name".into()],
+                    records: vec![vec!["Ada".into()]],
+                },
+                range: None,
+                base: None,
+                destination,
+                answers: HashMap::new(),
+            };
+            let Progress::Done(outcome) = advance(&mut session) else {
+                panic!("unexpected prompt")
+            };
+            let Outcome::Checked(errors) = *outcome else {
+                panic!("incomplete letters escaped")
+            };
+            assert_eq!(errors.len(), 1);
+            assert!(check_message(&errors).contains("Nmae"));
+            assert_eq!(session.main.main.paras[0].text, "Dear «Nmae»");
+        }
     }
 
     #[test]

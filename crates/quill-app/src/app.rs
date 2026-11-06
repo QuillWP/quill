@@ -30,7 +30,7 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
-use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
+use winit::window::{CursorIcon, CustomCursor, ResizeDirection, Window, WindowId};
 
 mod commands;
 mod dialogs;
@@ -66,6 +66,8 @@ struct MenuTrack {
     open: OpenMenu,
     /// The parent item and open box for one nested menu.
     submenu: Option<(usize, OpenMenu)>,
+    /// What has been typed to jump to an item, and when.
+    typed: (String, Option<Instant>),
     opened: Instant,
     /// The button is still down from the press that opened it.
     held: bool,
@@ -299,21 +301,16 @@ pub struct Env<'a> {
 
 impl WinState {
     pub fn new(view: DocView) -> Self {
-        let (formatting, paragraph, ruler, page, zoom) = crate::settings::with(|s| {
+        let (formatting, paragraph, ruler, zoom) = crate::settings::with(|s| {
             (
                 s.open_with_formatting_toolbar,
                 s.open_with_paragraph_toolbar,
                 s.open_with_ruler,
-                s.default_view,
                 s.document_zoom as f32 / 100.0,
             )
         });
         let mut view = view;
-        match page {
-            crate::settings::DefaultView::Normal => {}
-            crate::settings::DefaultView::Outline => view.set_outline(true),
-            crate::settings::DefaultView::PageLayout => view.page_view = true,
-        }
+        view.open_in_its_view();
         WinState {
             view,
             show_formatting_toolbar: formatting,
@@ -630,6 +627,9 @@ impl WinState {
                 self.show_toolbar = crate::settings::with(|s| s.view_toolbar);
             }
             Action::ToggleRuler => self.show_ruler = !self.show_ruler,
+            Action::ToggleMissingFonts => crate::settings::update(|s| {
+                s.highlight_missing_fonts = !s.highlight_missing_fonts;
+            }),
             Action::ToggleFullScreen => return Effect::FullScreen,
             Action::ToolbarPosition(at) => crate::settings::update(|s| {
                 s.toolbar_position = at;
@@ -1087,7 +1087,7 @@ impl WinState {
             return true;
         }
         // The toolbars and ruler light the control under the pointer.
-        let hover = self.toolbar_hit(cx, cy).flatten();
+        let hover = self.toolbar_button_at(cx, cy);
         let bar = self.bar_hit(cx, cy);
         let badge = self
             .revision_badges
@@ -1252,9 +1252,10 @@ impl WinState {
             && (in_text || self.view.dragging())
         {
             return match handle {
-                Handle::Right => CursorIcon::EwResize,
-                Handle::Bottom => CursorIcon::NsResize,
-                Handle::Corner => CursorIcon::NwseResize,
+                Handle::Left | Handle::Right => CursorIcon::EwResize,
+                Handle::Top | Handle::Bottom => CursorIcon::NsResize,
+                Handle::TopLeft | Handle::BottomRight => CursorIcon::NwseResize,
+                Handle::TopRight | Handle::BottomLeft => CursorIcon::NeswResize,
             };
         }
         if in_text && let Some(kind) = self.view.border_cursor(dx, dy) {
@@ -1497,6 +1498,8 @@ pub struct App {
     #[cfg(target_os = "macos")]
     context_actions: Vec<Action>,
     fonts_scan: Option<JoinHandle<Catalog>>,
+    /// The pointer for cropping a picture, made once.
+    crop_cursor: Option<CustomCursor>,
     /// The installed fonts alone, kept so the extra font folders can be
     /// switched on and off without scanning the system again.
     system_catalog: Option<Catalog>,
@@ -1568,6 +1571,7 @@ impl App {
             recent: crate::recent::load(),
             windows: Vec::new(),
             fonts_scan: Some(fonts_scan),
+            crop_cursor: None,
             system_catalog: None,
             font_folders_loaded: FontFolders::current(),
             font_catalog: None,
@@ -1831,6 +1835,26 @@ impl App {
         paths
     }
 
+    /// If the pointer is on a link, ask whether to open it and do. False
+    /// when there is no link there.
+    fn ask_to_open_link(&mut self, id: WindowId) -> bool {
+        let Some(i) = self.index(id) else {
+            return false;
+        };
+        let w = &self.windows[i].1;
+        let (x, y) = w.cursor;
+        let Some(url) = w.st.link_at_point(x, y) else {
+            return false;
+        };
+        if ask("Open this link?", &url, "Open")
+            && let Some(i) = self.index(id)
+        {
+            self.windows[i].1.st.view.open_link(&url);
+            self.windows[i].1.window.request_redraw();
+        }
+        true
+    }
+
     /// Keeps the settings file's list of open documents current, so that
     /// after a crash Quill knows what was open. Not before startup has read
     /// the old list, and not after Quit has written the final one (its
@@ -1905,6 +1929,7 @@ impl App {
             .with_title(&title)
             .with_inner_size(size)
             .with_min_inner_size(LogicalSize::new(480.0, 240.0));
+        let mut top_left = None;
         if let Some(frame) = crate::settings::get().window_frame {
             let screens: Vec<[f64; 4]> = el
                 .available_monitors()
@@ -1928,6 +1953,7 @@ impl App {
                 attrs = attrs
                     .with_inner_size(LogicalSize::new(w, h))
                     .with_position(winit::dpi::LogicalPosition::new(x, y));
+                top_left = Some(winit::dpi::LogicalPosition::new(x, y));
             }
         }
         // The Mac takes the icon from the app bundle; elsewhere the window
@@ -1941,6 +1967,11 @@ impl App {
                 return;
             }
         };
+        // `with_position` places the Mac's content area, under the title bar,
+        // but frames are saved and compared by the window's outer corner.
+        if let Some(at) = top_left {
+            window.set_outer_position(at);
+        }
         let context = softbuffer::Context::new(window.clone()).expect("display connection");
         let surface = softbuffer::Surface::new(&context, window.clone()).expect("window surface");
         #[cfg(target_os = "macos")]
@@ -2329,6 +2360,7 @@ impl App {
             Effect::None => {}
             Effect::About => about(),
             Effect::Licenses => licenses(),
+            Effect::ReplaceFonts => self.replace_missing_fonts(id),
             Effect::OpenRecent(index) => {
                 if let Some(path) = self.recent.get(index).cloned() {
                     self.open_files(el, &[path]);
@@ -2555,6 +2587,8 @@ impl App {
             Effect::SaveAs => {
                 self.save(id, true);
             }
+            #[cfg(target_os = "macos")]
+            Effect::Close if crate::mac_licenses::close_if_key() => {}
             Effect::Close => {
                 // A Mac app stays open with no windows; elsewhere the last
                 // window closing quits.
@@ -2687,8 +2721,19 @@ impl App {
         if w.st.menu.is_some() {
             if event.logical_key == Key::Named(NamedKey::Escape) {
                 w.st.menu = None;
+            } else {
+                let fonts = self.fonts.as_mut().unwrap();
+                let mut label = Label {
+                    fonts,
+                    cache: &mut self.cache,
+                };
+                let text = event.text.as_deref();
+                let effect = w.st.menu_key(&event.logical_key, text, &mut label, clip);
                 w.window.request_redraw();
+                self.handle_effect(el, id, effect);
+                return;
             }
+            w.window.request_redraw();
             return;
         }
         let mods = Mods::from_winit(w.mods);
@@ -2916,7 +2961,23 @@ impl App {
         if w.st.mouse_move(x, y, &mut label, &env) {
             w.window.request_redraw();
         }
-        w.window.set_cursor(w.st.cursor_icon(x, y));
+        self.update_cursor(i);
+    }
+
+    /// Show the pointer for what is under it now. Holding Control over a
+    /// picture's handle changes it without the mouse moving.
+    fn update_cursor(&mut self, i: usize) {
+        let w = &mut self.windows[i].1;
+        let (x, y) = w.cursor;
+        w.st.view.crop_held = w.mods.control_key();
+        let (dx, dy) = w.st.document_point(x, y);
+        if w.st.view.picture_crop_cursor(dx, dy)
+            && let Some(crop) = &self.crop_cursor
+        {
+            w.window.set_cursor(crop.clone());
+        } else {
+            w.window.set_cursor(w.st.cursor_icon(x, y));
+        }
     }
 }
 
@@ -3013,18 +3074,15 @@ fn reopen_last_session(quit_cleanly: bool) -> Vec<PathBuf> {
             if more > 0 {
                 list.push_str(&format!("\nand {more} more"));
             }
-            let answer = rfd::MessageDialog::new()
-                .set_level(rfd::MessageLevel::Info)
-                .set_title("Quill")
-                .set_description(format!(
+            let answer = message_box(
+                rfd::MessageLevel::Info,
+                "Quill",
+                format!(
                     "Quill did not quit normally last time. Reopen the documents that \
                      were open?\n\n{list}"
-                ))
-                .set_buttons(rfd::MessageButtons::OkCancelCustom(
-                    "Reopen".into(),
-                    "Don't Reopen".into(),
-                ))
-                .show();
+                ),
+                rfd::MessageButtons::OkCancelCustom("Reopen".into(), "Don't Reopen".into()),
+            );
             matches!(answer, rfd::MessageDialogResult::Custom(ref b) if b == "Reopen")
                 || matches!(answer, rfd::MessageDialogResult::Ok)
         }
@@ -3037,17 +3095,36 @@ fn reopen_last_session(quit_cleanly: bool) -> Vec<PathBuf> {
 // vendor/winit: unpatched, a click while one is up crashes Quill. See
 // vendor/README.md before upgrading winit.
 
+/// Show a message box and wait for the answer.
+pub(crate) fn message_box(
+    level: rfd::MessageLevel,
+    title: &str,
+    text: impl AsRef<str>,
+    buttons: rfd::MessageButtons,
+) -> rfd::MessageDialogResult {
+    #[cfg(target_os = "macos")]
+    {
+        crate::mac_alert::show(level, title, text.as_ref(), buttons)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        rfd::MessageDialog::new()
+            .set_level(level)
+            .set_title(title)
+            .set_description(text.as_ref())
+            .set_buttons(buttons)
+            .show()
+    }
+}
+
 /// Ask a question with `yes` and Cancel; true for `yes`.
 pub(crate) fn ask(message: &str, detail: &str, yes: &str) -> bool {
-    let answer = rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Warning)
-        .set_title("Quill")
-        .set_description(format!("{message}\n\n{detail}"))
-        .set_buttons(rfd::MessageButtons::OkCancelCustom(
-            yes.into(),
-            "Cancel".into(),
-        ))
-        .show();
+    let answer = message_box(
+        rfd::MessageLevel::Warning,
+        "Quill",
+        format!("{message}\n\n{detail}"),
+        rfd::MessageButtons::OkCancelCustom(yes.into(), "Cancel".into()),
+    );
     matches!(answer, rfd::MessageDialogResult::Custom(ref b) if b == yes)
         || matches!(answer, rfd::MessageDialogResult::Ok)
 }
@@ -3056,16 +3133,12 @@ pub(crate) fn ask(message: &str, detail: &str, yes: &str) -> bool {
 /// Ask whether to include more than was selected: Some(true) for yes,
 /// Some(false) for the selection only, None for Cancel.
 pub(crate) fn ask_include(message: &str, detail: &str, yes: &str, no: &str) -> Option<bool> {
-    let answer = rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Info)
-        .set_title("Quill")
-        .set_description(format!("{message}\n\n{detail}"))
-        .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
-            yes.into(),
-            no.into(),
-            "Cancel".into(),
-        ))
-        .show();
+    let answer = message_box(
+        rfd::MessageLevel::Info,
+        "Quill",
+        format!("{message}\n\n{detail}"),
+        rfd::MessageButtons::YesNoCancelCustom(yes.into(), no.into(), "Cancel".into()),
+    );
     match answer {
         rfd::MessageDialogResult::Yes => Some(true),
         rfd::MessageDialogResult::No => Some(false),
@@ -3076,22 +3149,22 @@ pub(crate) fn ask_include(message: &str, detail: &str, yes: &str, no: &str) -> O
 }
 
 pub(crate) fn alert(message: &str, detail: &str) {
-    rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Error)
-        .set_title("Quill")
-        .set_description(format!("{message}\n\n{detail}"))
-        .set_buttons(rfd::MessageButtons::Ok)
-        .show();
+    message_box(
+        rfd::MessageLevel::Error,
+        "Quill",
+        format!("{message}\n\n{detail}"),
+        rfd::MessageButtons::Ok,
+    );
 }
 
 /// A warning the person should read but that does not stop anything.
 pub(crate) fn warn(message: &str, detail: &str) {
-    rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Warning)
-        .set_title("Quill")
-        .set_description(format!("{message}\n\n{detail}"))
-        .set_buttons(rfd::MessageButtons::Ok)
-        .show();
+    message_box(
+        rfd::MessageLevel::Warning,
+        "Quill",
+        format!("{message}\n\n{detail}"),
+        rfd::MessageButtons::Ok,
+    );
 }
 
 /// One click's worth of scrolling for an arrow or the gray track.
@@ -3154,8 +3227,38 @@ fn keycode_char(code: KeyCode) -> Option<char> {
     })
 }
 
+/// The crop pointer: two corner brackets, black with a white edge, 17 pixels
+/// square with its hot spot in the middle.
+fn crop_cursor(el: &ActiveEventLoop) -> Option<CustomCursor> {
+    const SIZE: u16 = 17;
+    let ink = |x: i32, y: i32| {
+        // The upper left bracket runs right and down from (4, 4), the lower
+        // right one left and up from (12, 12), each past the other's corner.
+        (y == 4 && (1..=12).contains(&x))
+            || (x == 4 && (1..=12).contains(&y))
+            || (y == 12 && (4..=15).contains(&x))
+            || (x == 12 && (4..=15).contains(&y))
+    };
+    let mut rgba = Vec::with_capacity(4 * SIZE as usize * SIZE as usize);
+    for y in 0..SIZE as i32 {
+        for x in 0..SIZE as i32 {
+            let edge = (-1..=1).any(|dy| (-1..=1).any(|dx| ink(x + dx, y + dy)));
+            rgba.extend_from_slice(match (ink(x, y), edge) {
+                (true, _) => &[0, 0, 0, 255],
+                (false, true) => &[255, 255, 255, 255],
+                _ => &[0, 0, 0, 0],
+            });
+        }
+    }
+    let source = CustomCursor::from_rgba(rgba, SIZE, SIZE, SIZE / 2, SIZE / 2).ok()?;
+    Some(el.create_custom_cursor(source))
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.crop_cursor.is_none() {
+            self.crop_cursor = crop_cursor(el);
+        }
         if !self.recovered {
             self.recovered = true;
             for (path, title, doc) in crate::recovery::load_all() {
@@ -3441,7 +3544,10 @@ impl ApplicationHandler<UserEvent> for App {
                 }
                 w.window.request_redraw();
             }
-            WindowEvent::ModifiersChanged(m) => self.windows[i].1.mods = m.state(),
+            WindowEvent::ModifiersChanged(m) => {
+                self.windows[i].1.mods = m.state();
+                self.update_cursor(i);
+            }
             WindowEvent::DroppedFile(path) => {
                 // A picture dropped on a window goes in at the insertion
                 // point; a document opens.
@@ -3487,13 +3593,35 @@ impl ApplicationHandler<UserEvent> for App {
                 button: button @ (MouseButton::Left | MouseButton::Right),
                 ..
             } => {
+                // On the Mac, Control-click on a link opens it. Anywhere
+                // else it is a right-click, and a real right-click always is.
+                let control_click = cfg!(target_os = "macos")
+                    && button == MouseButton::Left
+                    && self.windows[i].1.mods.control_key();
+                // Control on a picture's handle crops, on any system. The
+                // release goes with the press, whatever is held by then.
+                let w = &mut self.windows[i].1;
+                w.st.view.crop_held = w.mods.control_key();
+                let (dx, dy) = w.st.document_point(w.cursor.0, w.cursor.1);
+                let crop = button == MouseButton::Left
+                    && (w.st.view.picture_dragging()
+                        || (w.st.view.crop_held && w.st.view.picture_cursor(dx, dy).is_some()));
+                if !crop
+                    && control_click
+                    && state == ElementState::Pressed
+                    && self.ask_to_open_link(id)
+                {
+                    return;
+                }
                 let was_resizing = self.windows[i].1.st.review_resize.is_some();
                 self.mouse_button(
                     el,
                     id,
                     state,
                     button == MouseButton::Right
-                        || (cfg!(target_os = "macos") && self.windows[i].1.mods.control_key()),
+                        || (!crop
+                            && cfg!(target_os = "macos")
+                            && self.windows[i].1.mods.control_key()),
                 );
                 // A divider drag changes no command state. Native menu work
                 // here stalls the first frame of the drag and the release.
