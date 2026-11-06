@@ -63,6 +63,15 @@ pub fn snapshot(
         match kind {
             // Draw as macOS dark mode does.
             "dark" => st.dark = true,
+            // Let idle jobs run, as they do between native window events.
+            "idle" => {
+                let duration = Duration::from_millis(arg.parse::<u64>().unwrap_or(800).min(5000));
+                let until = Instant::now() + duration;
+                while Instant::now() < until {
+                    std::thread::sleep(Duration::from_millis(10));
+                    st.tick();
+                }
+            }
             "type" => {
                 if st.zoom_edit.is_some() {
                     st.zoom_text(arg);
@@ -123,6 +132,7 @@ pub fn snapshot(
                     Effect::OpenNote(story, note) => st.open_note_in(story, note),
                     Effect::ReplyToAnnotation => st.annotation_command(true),
                     Effect::ResolveAnnotation => st.annotation_command(false),
+                    Effect::DeleteAnnotation => st.delete_annotation(),
                     _ => {}
                 },
                 None => eprintln!("quill: unknown command {arg}"),

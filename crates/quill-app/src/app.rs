@@ -135,9 +135,12 @@ pub struct WinState {
     pub show_formatting_toolbar: bool,
     pub show_paragraph_toolbar: bool,
     pub show_ruler: bool,
+    /// Whether the window fills the screen (View > Enter Full Screen).
+    pub full_screen: bool,
     tab_type: TabAlign,
     menu: Option<MenuTrack>,
     scroll_press: Option<(ScrollPart, f32, f32)>,
+    horizontal_press: Option<(ScrollPart, f32, f32)>,
     scale_drag: Option<ScaleDrag>,
     /// Open dialogs and what they are for; the last is in front (Tabs can
     /// open over Paragraph, as in the original).
@@ -309,9 +312,11 @@ impl WinState {
             show_formatting_toolbar: formatting,
             show_paragraph_toolbar: paragraph,
             show_ruler: ruler,
+            full_screen: false,
             tab_type: TabAlign::Left,
             menu: None,
             scroll_press: None,
+            horizontal_press: None,
             scale_drag: None,
             dialogs: Vec::new(),
             vscroll: Rect::default(),
@@ -450,6 +455,43 @@ impl WinState {
 
     /// The scroll wheel: lists in a window under the pointer scroll by
     /// rows, otherwise the text scrolls.
+    fn horizontal_bar(&self) -> Rect {
+        Rect::new(
+            210.0,
+            self.height - BAR,
+            (self.width - self.right_gutter() - 210.0).max(0.0),
+            BAR,
+        )
+    }
+
+    fn horizontal_step(&mut self, part: ScrollPart) {
+        let v = self.main_view_mut();
+        let page = (v.area.w - 24.0).max(16.0);
+        let dx = match part {
+            ScrollPart::LineUp => -16.0,
+            ScrollPart::LineDown => 16.0,
+            ScrollPart::PageUp => -page,
+            ScrollPart::PageDown => page,
+            ScrollPart::Thumb => 0.0,
+        };
+        v.scroll_sideways(dx);
+    }
+
+    fn wheel_horizontal(&mut self, dx: f32) {
+        if !self.dialogs.is_empty() || self.menu.is_some() || dx == 0.0 {
+            return;
+        }
+        let (x, y) = self.pointer;
+        let amount = dx / self.view_zoom();
+        if self.pane.as_ref().is_some_and(|p| p.bounds.contains(x, y)) {
+            if let Some(v) = self.pane_view_mut() {
+                v.scroll_sideways(amount);
+            }
+        } else {
+            self.main_view_mut().scroll_sideways(amount);
+        }
+    }
+
     pub fn wheel(&mut self, dy: f32) {
         let (cx, cy) = self.pointer;
         if let Some(t) = &mut self.menu {
@@ -571,6 +613,7 @@ impl WinState {
                 self.show_toolbar = crate::settings::with(|s| s.view_toolbar);
             }
             Action::ToggleRuler => self.show_ruler = !self.show_ruler,
+            Action::ToggleFullScreen => return Effect::FullScreen,
             Action::ToolbarPosition(at) => crate::settings::update(|s| {
                 s.toolbar_position = at;
                 s.view_toolbar = true;
@@ -650,6 +693,18 @@ impl WinState {
             return Effect::None;
         }
         if self.zoom_edit.is_some() && !self.commit_zoom() {
+            return Effect::None;
+        }
+        if !self.native_scrollbars && self.horizontal_bar().contains(cx, cy) {
+            let v = self.main_view();
+            let max = v.max_scroll_x();
+            let frac = if max > 0.0 { v.scroll_x / max } else { 0.0 };
+            if max > 0.0
+                && let Some(part) = chrome::scroll_hit(self.horizontal_bar(), frac, false, cx, cy)
+            {
+                self.horizontal_press = Some((part, cx, v.scroll_x));
+                self.horizontal_step(part);
+            }
             return Effect::None;
         }
         if self.review_divider_hit(cx, cy) {
@@ -1007,6 +1062,12 @@ impl WinState {
             }
             return true;
         }
+        if let Some((ScrollPart::Thumb, start, scroll)) = self.horizontal_press {
+            let span = (self.horizontal_bar().w - 3.0 * BAR).max(1.0);
+            let max = self.main_view().max_scroll_x();
+            self.main_view_mut().scroll_x = (scroll + (cx - start) / span * max).clamp(0.0, max);
+            return true;
+        }
         // The toolbars and ruler light the control under the pointer.
         let hover = self.toolbar_hit(cx, cy).flatten();
         let bar = self.bar_hit(cx, cy);
@@ -1049,13 +1110,10 @@ impl WinState {
         }
         if self.view.dragging() {
             let area = self.view.area;
-            if dy < area.y {
-                self.view.scroll_by(dy - area.y);
-            } else if dy > area.bottom() {
-                self.view.scroll_by(dy - area.bottom());
-            }
-            self.view
-                .mouse_drag(dx, dy.clamp(area.y, area.bottom() - 1.0));
+            self.view.mouse_drag(
+                dx.clamp(area.x, area.right() - 1.0),
+                dy.clamp(area.y, area.bottom() - 1.0),
+            );
             return true;
         }
         lit
@@ -1106,6 +1164,7 @@ impl WinState {
         }
         self.view.mouse_up();
         self.scroll_press = None;
+        self.horizontal_press = None;
         if self.scale_drag.take().is_some() {
             self.view.end_ruler_drag();
         }
@@ -1181,7 +1240,54 @@ impl WinState {
 
     /// Called on a timer while a scroll arrow or track is held. Returns true when
     /// something moved.
+    fn selection_scroll(&mut self, advance: bool) -> bool {
+        if !self.view.dragging() || !self.dialogs.is_empty() || self.menu.is_some() {
+            return false;
+        }
+        let (x, y) = self.document_point(self.pointer.0 * self.ui, self.pointer.1 * self.ui);
+        let area = self.view.area;
+        if area.w <= 1.0 || area.h <= 1.0 {
+            return false;
+        }
+        let outside = |p: f32, a: f32, b: f32| {
+            if p < a {
+                p - a
+            } else if p > b {
+                p - b
+            } else {
+                0.0
+            }
+        };
+        let dx = outside(x, area.x, area.right());
+        let dy = outside(y, area.y, area.bottom());
+        if dx == 0.0 && dy == 0.0 {
+            return false;
+        }
+        if advance {
+            self.view.scroll_sideways(dx.clamp(-48.0, 48.0));
+            self.view.scroll_by(dy.clamp(-48.0, 48.0));
+            self.view.mouse_drag(
+                x.clamp(area.x, area.right() - 1.0),
+                y.clamp(area.y, area.bottom() - 1.0),
+            );
+        }
+        true
+    }
+
     fn tick(&mut self) -> bool {
+        let mut spelling_changed = self.view.check_live_spelling();
+        if let Some(pane) = &mut self.pane {
+            spelling_changed |= pane.other.check_live_spelling();
+        }
+        if let Some((part, _, _)) = self.horizontal_press
+            && part != ScrollPart::Thumb
+        {
+            self.horizontal_step(part);
+            return true;
+        }
+        if self.selection_scroll(true) {
+            return true;
+        }
         if let Some(t) = &mut self.tip
             && !t.shown
             && Instant::now() >= t.due
@@ -1195,7 +1301,7 @@ impl WinState {
             scroll_step(&mut self.view, part);
             return true;
         }
-        false
+        spelling_changed
     }
 }
 
@@ -1559,6 +1665,7 @@ impl App {
                 v.title.clone(),
                 Port {
                     scroll_y: v.scroll_y,
+                    scroll_x: v.scroll_x,
                     sel: v.sel,
                     upstream: v.upstream,
                 },
@@ -1582,6 +1689,10 @@ impl App {
     /// Remember where window `i` is and how big, for the next window.
     fn remember_frame(&self, i: usize) {
         let w = &self.windows[i].1.window;
+        // A full-screen window's size is the screen's, not the one to reopen at.
+        if w.fullscreen().is_some() {
+            return;
+        }
         let k = w.scale_factor();
         let Ok(at) = w.outer_position() else {
             return;
@@ -1852,7 +1963,16 @@ impl App {
                         enabled: max > 0.0,
                     })
             };
-            scrollbars.sync(state, other, w.st.ui);
+            let v = w.st.main_view();
+            let max = v.max_scroll_x();
+            let horizontal = crate::mac_widgets::ScrollbarState {
+                frame: w.st.horizontal_bar(),
+                value: if max > 0.0 { v.scroll_x / max } else { 0.0 },
+                proportion: v.area.w / (v.area.w + max).max(1.0),
+                hidden: max <= 0.0 || w.st.horizontal_bar().w < 3.0 * BAR,
+                enabled: max > 0.0,
+            };
+            scrollbars.sync(state, other, horizontal, w.st.ui);
         }
     }
 
@@ -2139,6 +2259,17 @@ impl App {
                 }
             }
             Effect::Mirror => self.mirror(el, id),
+            Effect::FullScreen => {
+                if let Some(i) = self.index(id) {
+                    let w = &self.windows[i].1.window;
+                    // On the Mac, Borderless is the system's own full screen,
+                    // in a space of its own, as the green button gives.
+                    w.set_fullscreen(match w.fullscreen() {
+                        Some(_) => None,
+                        None => Some(winit::window::Fullscreen::Borderless(None)),
+                    });
+                }
+            }
             Effect::ChooseMergeData => {
                 let file = rfd::FileDialog::new()
                     .set_title("Open Data Document")
@@ -2174,6 +2305,12 @@ impl App {
                 if let Some(i) = self.index(id) {
                     let reply = matches!(effect, Effect::ReplyToAnnotation);
                     self.windows[i].1.st.annotation_command(reply);
+                    self.windows[i].1.window.request_redraw();
+                }
+            }
+            Effect::DeleteAnnotation => {
+                if let Some(i) = self.index(id) {
+                    self.windows[i].1.st.delete_annotation();
                     self.windows[i].1.window.request_redraw();
                 }
             }
@@ -2362,6 +2499,10 @@ impl App {
                 w.st.show_ruler = !w.st.show_ruler;
             }
             w.window.request_redraw();
+            return;
+        }
+        if code == Some(KeyCode::KeyF) && mods.cmd && mods.ctrl && !mods.shift && !mods.opt {
+            self.effect(el, id, Effect::FullScreen);
             return;
         }
         let cmd = if code == Some(KeyCode::NumpadEnter) && mods.shift && !mods.cmd {
@@ -2926,7 +3067,15 @@ impl ApplicationHandler<UserEvent> for App {
                 w.window.request_redraw();
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
-                self.windows[i].1.window.request_redraw();
+                // Entering or leaving full screen, by menu or green button,
+                // resizes the window.
+                let w = &mut self.windows[i].1;
+                let full = w.window.fullscreen().is_some();
+                w.window.request_redraw();
+                if w.st.full_screen != full {
+                    w.st.full_screen = full;
+                    self.sync_menus();
+                }
             }
             WindowEvent::Focused(f) => {
                 if f {
@@ -2948,7 +3097,10 @@ impl ApplicationHandler<UserEvent> for App {
                     .extension()
                     .and_then(|e| e.to_str())
                     .map(|e| e.to_ascii_lowercase());
-                if matches!(ext.as_deref(), Some("png" | "jpg" | "jpeg")) {
+                if matches!(
+                    ext.as_deref(),
+                    Some("png" | "jpg" | "jpeg" | "gif" | "tif" | "tiff" | "bmp" | "webp")
+                ) {
                     self.insert_picture_file(id, &path);
                 } else {
                     self.open_files(el, &[path]);
@@ -3027,7 +3179,16 @@ impl ApplicationHandler<UserEvent> for App {
                     let save = line || phase == TouchPhase::Ended;
                     w.st.zoom_at(1.1f64.powf(-dy as f64 / 48.0), w.st.pointer.1, save);
                 } else {
-                    w.st.wheel(dy);
+                    let dx = match delta {
+                        MouseScrollDelta::LineDelta(x, _) => -x * 48.0,
+                        MouseScrollDelta::PixelDelta(p) => -(p.x / w.window.scale_factor()) as f32,
+                    };
+                    if w.mods.shift_key() && dx.abs() < 0.01 {
+                        w.st.wheel_horizontal(dy);
+                    } else {
+                        w.st.wheel_horizontal(dx);
+                        w.st.wheel(dy);
+                    }
                 }
                 w.window.request_redraw();
             }
@@ -3046,10 +3207,13 @@ impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         // Holding a scroll arrow or track keeps scrolling; otherwise wake for the
         // caret's blink and sleep the rest of the time.
-        let holding = self
-            .windows
-            .iter()
-            .any(|(_, w)| w.st.scroll_press.is_some_and(|p| p.0 != ScrollPart::Thumb));
+        let holding = self.windows.iter_mut().any(|(_, w)| {
+            w.st.scroll_press.is_some_and(|p| p.0 != ScrollPart::Thumb)
+                || w.st
+                    .horizontal_press
+                    .is_some_and(|p| p.0 != ScrollPart::Thumb)
+                || (w.focused && w.st.selection_scroll(false))
+        });
         if holding {
             el.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(60),
@@ -3070,6 +3234,20 @@ impl ApplicationHandler<UserEvent> for App {
             .filter_map(|(_, w)| w.st.tip.as_ref().filter(|t| !t.shown).map(|t| t.due))
             .min();
         let next = tip.map_or(next, |t| t.min(next));
+        let spelling = self
+            .windows
+            .iter()
+            .flat_map(|(_, w)| {
+                [
+                    w.st.view.live_spelling_deadline(),
+                    w.st.pane
+                        .as_ref()
+                        .and_then(|p| p.other.live_spelling_deadline()),
+                ]
+            })
+            .flatten()
+            .min();
+        let next = spelling.map_or(next, |t| t.min(next));
         el.set_control_flow(ControlFlow::WaitUntil(next));
     }
 }
@@ -3986,6 +4164,7 @@ mod tests {
             Port::default(),
             Port {
                 scroll_y: 0.0,
+                scroll_x: 0.0,
                 sel: Selection::caret(Position::new(0, 7)),
                 upstream: false,
             },
@@ -4028,5 +4207,132 @@ mod tests {
             ),
             Some([148.0, 98.0, 900.0, 700.0])
         );
+    }
+    #[test]
+    fn stationary_selection_drag_keeps_scrolling_until_release() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let doc = quill_core::text::from_plain_text(&"A paragraph for selection.\n".repeat(150));
+        let mut state = WinState::new(DocView::new(doc, "Selection".into()));
+        state.document_zoom = 1.0;
+        state.ui = 1.0;
+        paint_editor(&mut state, 720, 480, &mut fonts);
+        let a = state.view.area;
+        state.view.mouse_down(a.x + 40.0, a.y + 30.0, false, false);
+        let anchor = state.view.sel.anchor;
+        state.pointer = (a.x + 40.0, a.bottom() + 40.0);
+        for _ in 0..5 {
+            assert!(state.selection_scroll(true));
+        }
+        assert!(state.view.scroll_y >= 190.0);
+        assert_eq!(state.view.sel.anchor, anchor);
+        assert!(state.view.sel.focus > anchor);
+        state.view.mouse_up();
+        let y = state.view.scroll_y;
+        assert!(!state.selection_scroll(true));
+        assert_eq!(state.view.scroll_y, y);
+    }
+
+    #[test]
+    fn horizontal_pan_keeps_page_hit_testing_and_shared_ports_aligned() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut state = WinState::new(DocView::new(
+            quill_core::text::from_plain_text("Hello world"),
+            "Pan".into(),
+        ));
+        state.document_zoom = 1.0;
+        state.view.page_view = true;
+        paint_editor(&mut state, 420, 480, &mut fonts);
+        let a = state.view.area;
+        let x = state.view.text_left_window() + 12.0;
+        let y = a.y + crate::docview::PAGE_GAP + 72.0 + 4.0;
+        let before = state.view.hit(x, y);
+        state.view.scroll_sideways(100.0);
+        assert_eq!(state.view.scroll_x, 100.0);
+        assert_eq!(state.view.hit(x - 100.0, y), before);
+        let mut port = Port::default();
+        state.view.swap_port(&mut port);
+        assert_eq!(port.scroll_x, 100.0);
+        assert_eq!(state.view.scroll_x, 0.0);
+        state.view.swap_port(&mut port);
+        state.view.area.w = 1200.0;
+        state.view.scroll_sideways(0.0);
+        assert_eq!(state.view.scroll_x, 0.0);
+    }
+    #[test]
+    fn deleting_a_comment_from_its_focused_editor_preserves_text_for_undo() {
+        use quill_core::{StoryId, notes::AnnotationInfo};
+        let mut doc = quill_core::text::from_plain_text("Body text");
+        let id = doc.insert_annotation(
+            Position::new(0, 4),
+            Default::default(),
+            AnnotationInfo::default(),
+        );
+        doc.forget_history(); // A loaded document, before editing the comment.
+        let mut state = WinState::new(DocView::new(doc, "Comments".into()));
+        state.open_note_in(StoryId::Annotations, id);
+        state.view.type_text("Edited comment");
+        state.delete_annotation();
+        assert!(state.pane.is_none());
+        assert_eq!(state.view.doc.main.paras[0].text, "Body text");
+        assert!(state.view.doc.annotation_ranges().is_empty());
+        state.view.doc.undo();
+        assert!(state.view.doc.annotation_mark(id).is_some());
+        assert!(
+            state
+                .view
+                .doc
+                .annotation_text(id)
+                .contains("Edited comment")
+        );
+    }
+    #[test]
+    fn horizontal_scrollbar_click_drag_and_release_pan_the_document() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut state = WinState::new(DocView::new(Document::new(), "Horizontal".into()));
+        state.document_zoom = 1.0;
+        state.view.page_view = true;
+        paint_editor(&mut state, 420, 480, &mut fonts);
+        let bar = state.horizontal_bar();
+        let env = Env {
+            font_names: &[],
+            font_families: &[],
+            recent: &[],
+            windows: &[],
+        };
+        let mut cache = GlyphCache::new();
+        let mut clip = Clipboard::new();
+        let mut label = Label {
+            fonts: &mut fonts,
+            cache: &mut cache,
+        };
+        state.mouse_down(
+            bar.right() - 4.0,
+            bar.y + 8.0,
+            Mods::default(),
+            &mut label,
+            &env,
+            &mut clip,
+        );
+        assert!(state.main_view().scroll_x > 0.0);
+        state.mouse_up(bar.right() - 4.0, bar.y + 8.0, &mut clip);
+        state.main_view_mut().scroll_x = 0.0;
+        state.mouse_down(
+            bar.x + BAR + 4.0,
+            bar.y + 8.0,
+            Mods::default(),
+            &mut label,
+            &env,
+            &mut clip,
+        );
+        state.mouse_move(bar.right() - BAR - 8.0, bar.y + 8.0, &mut label, &env);
+        assert!(state.main_view().scroll_x > 50.0);
+        state.mouse_up(bar.right() - BAR - 8.0, bar.y + 8.0, &mut clip);
+        assert!(state.horizontal_press.is_none());
     }
 }

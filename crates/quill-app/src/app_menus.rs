@@ -26,6 +26,7 @@ pub enum Action {
     ToggleParagraphToolbar,
     ToggleToolbar,
     ToggleRuler,
+    ToggleFullScreen,
     /// Dock the toolbar: 0 top, 1 left, 2 right.
     ToolbarPosition(u8),
     CustomizeToolbar,
@@ -98,6 +99,7 @@ pub struct MenuContext<'a> {
     pub show_formatting_toolbar: bool,
     pub show_paragraph_toolbar: bool,
     pub show_ruler: bool,
+    pub full_screen: bool,
     pub recent: &'a [PathBuf],
     /// Window titles, and which one is this window.
     pub windows: &'a [(String, bool)],
@@ -243,6 +245,7 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
         b.cmd("Summary Info…", Cmd::SummaryInfo),
         sep(),
         b.cmd("Page Setup…", Cmd::PageSetup),
+        b.cmd("Document Setup…", Cmd::DocumentDialog),
         b.cmd("Print…", Cmd::Print),
         b.cmd("Save as PDF…", Cmd::SavePdf),
         b.cmd("Print Merge…", Cmd::PrintMerge),
@@ -328,6 +331,15 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
                 .key("⌘R")
                 .checked(cx.show_ruler),
             b.cmd("Print Merge Helper…", Cmd::PrintMergeHelper),
+            b.item(
+                if cx.full_screen {
+                    "Exit Full Screen"
+                } else {
+                    "Enter Full Screen"
+                },
+                Action::ToggleFullScreen,
+            )
+            .key("⌃⌘F"),
             sep(),
             b.cmd(
                 if v.show_marks { "Hide ¶" } else { "Show ¶" },
@@ -354,6 +366,7 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Annotation…", Cmd::InsertAnnotation),
             b.cmd("Reply to Annotation", Cmd::ReplyToAnnotation),
             b.cmd("Resolve Annotation", Cmd::ResolveAnnotation),
+            b.cmd("Delete Annotation", Cmd::DeleteAnnotation),
             b.cmd("Hyperlink…", Cmd::Hyperlink).key("⌘⌥K"),
             b.cmd("Remove Link", Cmd::RemoveHyperlink)
                 .enabled(v.has_link()),
@@ -386,7 +399,7 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Character…", Cmd::CharacterDialog),
             b.cmd("Paragraph…", Cmd::ParagraphDialog),
             b.cmd("Section…", Cmd::SectionDialog),
-            b.cmd("Document…", Cmd::DocumentDialog),
+            b.cmd("Document Setup…", Cmd::DocumentDialog),
             b.cmd("Border…", Cmd::BorderDialog),
             sep(),
             b.cmd("Table Cells…", Cmd::TableCells).enabled(in_table),
@@ -510,6 +523,13 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
         }
         toc_items.push(Item::separator());
     }
+    // By an annotation or in the text it is about.
+    if view.annotation_here().is_some() {
+        toc_items.push(b.cmd("Reply to Annotation", Cmd::ReplyToAnnotation));
+        toc_items.push(b.cmd("Resolve Annotation", Cmd::ResolveAnnotation));
+        toc_items.push(b.cmd("Delete Annotation", Cmd::DeleteAnnotation));
+        toc_items.push(Item::separator());
+    }
     let menu = Menu {
         title: String::new(),
         items: toc_items
@@ -584,6 +604,7 @@ pub fn default_menu(cmd: Cmd) -> Option<String> {
                 show_formatting_toolbar: true,
                 show_paragraph_toolbar: true,
                 show_ruler: true,
+                full_screen: false,
                 recent: &[],
                 windows: &[],
             };
@@ -760,6 +781,7 @@ mod tests {
             show_formatting_toolbar: true,
             show_paragraph_toolbar: true,
             show_ruler: true,
+            full_screen: false,
             recent: &[],
             windows: &[],
         };
@@ -872,6 +894,7 @@ mod tests {
             show_formatting_toolbar: true,
             show_paragraph_toolbar: true,
             show_ruler: true,
+            full_screen: false,
             recent: &[],
             windows: &[],
         };
@@ -903,6 +926,7 @@ mod tests {
             show_formatting_toolbar: true,
             show_paragraph_toolbar: true,
             show_ruler: true,
+            full_screen: false,
             recent: &recent,
             windows: &[],
         };
@@ -926,6 +950,7 @@ mod tests {
             show_formatting_toolbar: true,
             show_paragraph_toolbar: true,
             show_ruler: true,
+            full_screen: false,
             recent: &[],
             windows: &[],
         };

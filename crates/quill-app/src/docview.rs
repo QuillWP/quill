@@ -26,6 +26,7 @@ mod frames;
 mod language;
 mod layout_engine;
 mod link;
+mod live_spelling;
 mod memory;
 pub use language::HyphenSpot;
 mod notes;
@@ -102,6 +103,10 @@ pub enum Effect {
     /// open it again). The window finds which: it may be in the pane.
     ReplyToAnnotation,
     ResolveAnnotation,
+    /// Delete the annotation here and its replies.
+    DeleteAnnotation,
+    /// Fill the screen with the window, or put it back.
+    FullScreen,
 }
 
 /// What each window on a shared document keeps for itself: where it is
@@ -109,6 +114,7 @@ pub enum Effect {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Port {
     pub scroll_y: f32,
+    pub scroll_x: f32,
     pub sel: Selection,
     pub upstream: bool,
 }
@@ -212,6 +218,7 @@ pub struct DocView {
     /// The paragraphs last drawn, first and past the last: a few ranges,
     /// newest first, for the two panes of a split window and Print Preview.
     drawn: Vec<(usize, usize)>,
+    spelling: live_spelling::LiveSpelling,
     tops: Vec<f32>,
     /// Where each paragraph's text starts across, from the left margin:
     /// 0 outside tables, the cell's text edge inside them.
@@ -282,6 +289,7 @@ pub struct DocView {
     hf: std::collections::HashMap<(StoryId, usize, u32), Vec<ParaLayout>>,
     hf_dirty: bool,
     pub scroll_y: f32,
+    pub scroll_x: f32,
     /// The text area on screen, set each frame.
     pub area: Rect,
     caret_since: Instant,
@@ -333,6 +341,7 @@ impl DocView {
             layouts: Vec::new(),
             keep_all: false,
             drawn: Vec::new(),
+            spelling: live_spelling::LiveSpelling::default(),
             tops: Vec::new(),
             xs: Vec::new(),
             widths: Vec::new(),
@@ -369,6 +378,7 @@ impl DocView {
             hf: std::collections::HashMap::new(),
             hf_dirty: true,
             scroll_y: 0.0,
+            scroll_x: 0.0,
             area: Rect::default(),
             caret_since: Instant::now(),
             composing: None,
@@ -435,6 +445,7 @@ impl DocView {
     /// window's, when the document moves between windows.
     pub fn swap_port(&mut self, port: &mut Port) {
         std::mem::swap(&mut self.scroll_y, &mut port.scroll_y);
+        std::mem::swap(&mut self.scroll_x, &mut port.scroll_x);
         std::mem::swap(&mut self.sel, &mut port.sel);
         std::mem::swap(&mut self.upstream, &mut port.upstream);
         self.clamp_selection();
@@ -518,7 +529,7 @@ impl DocView {
     /// View x of a page's left edge: centered when the window is wide enough.
     fn page_left(&self) -> f32 {
         let (pw, _) = self.page_size();
-        ((self.area.w - pw) / 2.0).max(PAGE_GAP).floor()
+        ((self.area.w - pw) / 2.0).max(PAGE_GAP).floor() - self.scroll_x
     }
 
     /// View y of page `k`'s top edge.
@@ -533,7 +544,7 @@ impl DocView {
             let p = &self.doc.props;
             self.page_left() + (p.margin_left + p.gutter) as f32 / 20.0
         } else {
-            TEXT_LEFT
+            TEXT_LEFT - self.scroll_x
         }
     }
 
@@ -636,6 +647,21 @@ impl DocView {
 
     // ----- scrolling -----
 
+    pub fn max_scroll_x(&self) -> f32 {
+        let width = if self.page_view {
+            self.page_size().0 + 2.0 * PAGE_GAP
+        } else {
+            self.laid_out_width + TEXT_LEFT + 24.0
+        };
+        (width - self.area.w).max(0.0)
+    }
+
+    pub fn scroll_sideways(&mut self, dx: f32) {
+        if dx.is_finite() {
+            self.scroll_x = (self.scroll_x + dx).clamp(0.0, self.max_scroll_x());
+        }
+    }
+
     pub fn scroll_by(&mut self, dy: f32) {
         let max = (self.total_height() - self.area.h).max(0.0);
         self.scroll_y = (self.scroll_y + dy).clamp(0.0, max);
@@ -650,7 +676,15 @@ impl DocView {
         if self.layouts.iter().any(Option::is_none) || self.area.h <= 0.0 {
             return;
         }
-        let (_, y, h) = self.caret_geometry(self.sel.focus, self.upstream);
+        // Geometry excludes scrolling. Reveal the moving endpoint horizontally too.
+        let (x, y, h) = self.caret_geometry(self.sel.focus, self.upstream);
+        self.scroll_sideways(0.0);
+        let visible_x = self.to_window(x, y).0;
+        if visible_x < self.area.x + 8.0 {
+            self.scroll_sideways(visible_x - self.area.x - 8.0);
+        } else if visible_x > self.area.right() - 8.0 {
+            self.scroll_sideways(visible_x - self.area.right() + 8.0);
+        }
         let y = self.to_view(y);
         let top = self.scroll_y;
         let view = self.area.h;
@@ -1165,5 +1199,26 @@ mod tests {
         v.sel = Selection::caret(Position::new(7, 5));
         v.exec(Cmd::Paste, false, &mut clip);
         assert_eq!(shape(&v), format!("Before {table} Aftera b"));
+    }
+
+    #[test]
+    fn a_row_taller_than_the_page_carries_on_over_the_next() {
+        let mut fonts = quill_layout::Fonts::new(quill_layout::Catalog::scan_system());
+        if fonts.family_names().is_empty() {
+            return;
+        }
+        let mut clip = Clipboard::new();
+        let mut v = with_table(&mut clip);
+        v.sel = Selection::caret(Position::new(2, 1));
+        v.type_text(&"A line of the tall cell\n".repeat(120));
+        v.page_view = true;
+        v.area = Rect::new(0.0, 0.0, 800.0, 600.0);
+        v.update_layout(&mut fonts);
+        let p = &v.doc.props;
+        let height = (p.page_height - p.margin_top - p.margin_bottom) as f32 / 20.0;
+        assert!(v.pages.len() >= 3, "{} pages", v.pages.len());
+        for b in &v.bands {
+            assert!(b.end - b.y <= height + 0.5, "{b:?} runs off its page");
+        }
     }
 }

@@ -340,6 +340,59 @@ impl Document {
         Some(self.insert_annotation(Position::new(at.para, after), chp, info))
     }
 
+    /// Delete annotation `id` and its replies: their marks go from the text
+    /// and the text they were about is no longer marked. Returns where the
+    /// first mark was.
+    pub fn delete_annotation(&mut self, id: u32) -> Option<Position> {
+        let at = self.annotation_mark(id)?;
+        // The annotation, and every reply under it however deep.
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (&child, info) in &self.annotation_info {
+            if let Some(parent) = info.parent {
+                children.entry(parent).or_default().push(child);
+            }
+        }
+        let mut ids = std::collections::HashSet::new();
+        let mut pending = vec![id];
+        while let Some(next) = pending.pop() {
+            if ids.insert(next) {
+                pending.extend(children.get(&next).into_iter().flatten().copied());
+            }
+        }
+        for i in 0..self.main.paras.len() {
+            let p = &self.main.paras[i];
+            if !p.runs.iter().any(|r| ids.contains(&r.chp.comment)) {
+                continue;
+            }
+            let mut p = p.clone();
+            let n = p.len();
+            p.format_range(0, n, &mut |c| {
+                if ids.contains(&c.comment) {
+                    c.comment = 0;
+                }
+            });
+            self.splice(StoryId::Main, i, 1, vec![p]);
+        }
+        // Marks last to first, so earlier positions stay put.
+        let mut marks: Vec<Position> = Vec::new();
+        for (i, p) in self.main.paras.iter().enumerate() {
+            for (off, c) in p.text.char_indices() {
+                if c == chars::ANNOTATION && ids.contains(&p.chp_of_char(off).object) {
+                    marks.push(Position::new(i, off));
+                }
+            }
+        }
+        for m in marks.into_iter().rev() {
+            let end = Position::new(m.para, m.offset + chars::ANNOTATION.len_utf8());
+            // Comments are review metadata: removing one must also work
+            // while body text is being tracked. Do not leave a deleted mark.
+            let mut p = self.main.paras[m.para].clone();
+            p.remove(m.offset, end.offset);
+            self.splice(StoryId::Main, m.para, 1, vec![p]);
+        }
+        Some(at)
+    }
+
     /// The annotation a thread of replies starts with.
     pub fn thread_start(&self, mut id: u32) -> u32 {
         for _ in 0..64 {
@@ -558,5 +611,69 @@ mod tests {
         let b = d.insert_note(Position::new(0, 7), CharProps::default(), None);
         let labels = d.note_labels(None);
         assert_eq!((labels[&a].as_str(), labels[&b].as_str()), ("*", "1"));
+    }
+
+    #[test]
+    fn deleting_an_annotation_takes_its_replies_and_undo_brings_them_back() {
+        let mut d = doc();
+        let sel = crate::Selection::default();
+        d.begin("Annotation", sel);
+        let a = d.insert_annotation_on(
+            Position::new(0, 4),
+            Position::new(0, 7),
+            CharProps::default(),
+            AnnotationInfo::default(),
+        );
+        let reply = d.insert_reply(a, AnnotationInfo::default()).unwrap();
+        let other = d.insert_annotation(
+            Position::new(0, 0),
+            CharProps::default(),
+            AnnotationInfo::default(),
+        );
+        d.commit(sel);
+        let before = d.main.paras[0].clone();
+        assert_eq!(annotation_ids(&d.annotations.paras), [other, a, reply]);
+        d.begin("Delete Annotation", sel);
+        d.delete_annotation(a);
+        d.commit(sel);
+        let p = &d.main.paras[0];
+        assert_eq!(p.text.replace(chars::ANNOTATION, "#"), "#One two three");
+        assert!(p.runs.iter().all(|r| r.chp.comment == 0));
+        assert_eq!(annotation_ids(&d.annotations.paras), [other]);
+        d.undo();
+        assert_eq!(d.main.paras[0], before);
+        assert_eq!(annotation_ids(&d.annotations.paras), [other, a, reply]);
+    }
+    #[test]
+    fn delete_annotation_removes_deep_threads_even_with_tracking_on() {
+        let mut d = doc();
+        let sel = crate::Selection::default();
+        d.begin("Comments", sel);
+        let root = d.insert_annotation_on(
+            Position::new(0, 0),
+            Position::new(0, 3),
+            CharProps::default(),
+            AnnotationInfo::default(),
+        );
+        let mut parent = root;
+        for _ in 0..80 {
+            parent = d.insert_reply(parent, AnnotationInfo::default()).unwrap();
+        }
+        d.commit(sel);
+        let before = d.main.clone();
+        let notes = d.annotations.clone();
+        d.props.track_changes = true;
+        d.begin("Delete Annotation", sel);
+        d.delete_annotation(root);
+        d.commit(sel);
+        assert_eq!(d.main.paras[0].text, "One two three");
+        assert!(annotation_ids(&d.annotations.paras).is_empty());
+        assert!(d.annotation_ranges().is_empty());
+        assert!(!d.has_changes());
+        d.undo();
+        assert_eq!(d.main, before);
+        assert_eq!(d.annotations, notes);
+        d.redo();
+        assert!(d.annotation_ranges().is_empty());
     }
 }

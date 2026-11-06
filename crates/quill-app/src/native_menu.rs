@@ -210,6 +210,18 @@ impl NativeItem {
 /// macOS adds an AutoFill submenu (contacts and passwords) to every app's
 /// Edit menu. A word processor has no use for it, so it comes out each
 /// time AppKit adds it: when the menu bar is set, and again later on.
+/// View has its own Enter Full Screen, which follows the window it acts on;
+/// keep AppKit from adding a second one at the bottom of the menu.
+fn no_system_full_screen_item() {
+    use objc2_06::runtime::AnyObject;
+    use objc2_06::{class, msg_send};
+    unsafe {
+        let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let key = NSString::from_str("NSFullScreenMenuItemEverywhere");
+        let _: () = msg_send![defaults, setBool: false, forKey: &*key];
+    }
+}
+
 fn keep_autofill_out() {
     use block2::RcBlock;
     use objc2_06::runtime::AnyObject;
@@ -389,6 +401,7 @@ impl NativeMenu {
             bar.append(&sub)?;
         }
         keep_autofill_out();
+        no_system_full_screen_item();
         bar.init_for_nsapp();
         self._bar = bar;
         self.items = items;

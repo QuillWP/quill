@@ -190,6 +190,7 @@ commands! {
     InsertAnnotation,
     ReplyToAnnotation,
     ResolveAnnotation,
+    DeleteAnnotation,
     ViewAnnotations,
     CommandsDialog,
     PrintMerge,
@@ -231,7 +232,7 @@ impl Cmd {
             CharacterDialog => "Character…",
             ParagraphDialog => "Paragraph…",
             SectionDialog => "Section…",
-            DocumentDialog => "Document…",
+            DocumentDialog => "Document Setup…",
             BorderDialog => "Border…",
             InsertTable => "Table…",
             TableCells => "Table Cells…",
@@ -376,6 +377,7 @@ impl Cmd {
             InsertAnnotation => "Annotation…",
             ReplyToAnnotation => "Reply to Annotation",
             ResolveAnnotation => "Resolve Annotation",
+            DeleteAnnotation => "Delete Annotation",
             CommandsDialog => "Commands…",
             PrintMerge => "Print Merge…",
             PrintMergeHelper => "Print Merge Helper…",
@@ -586,14 +588,16 @@ fn default_lookup(key: &Key, physical_char: Option<char>, mods: Mods) -> Option<
         (K::Named(N::ArrowRight), false, _, false) => Right,
         (K::Named(N::ArrowUp), false, _, false) => Up,
         (K::Named(N::ArrowDown), false, _, false) => Down,
+        // ⌘⇧ selects to the start or end of the line, as on any Mac.
+        (K::Named(N::ArrowLeft), true, true, false) => LineStart,
+        (K::Named(N::ArrowRight), true, true, false) => LineEnd,
         // The original moves by word with ⌘; Option and (off the Mac) Control do
         // the same, as modern systems expect.
-        (K::Named(N::ArrowLeft), true, _, false) | (K::Named(N::ArrowLeft), false, _, true) => {
+        (K::Named(N::ArrowLeft), true, false, false) | (K::Named(N::ArrowLeft), false, _, true) => {
             WordLeft
         }
-        (K::Named(N::ArrowRight), true, _, false) | (K::Named(N::ArrowRight), false, _, true) => {
-            WordRight
-        }
+        (K::Named(N::ArrowRight), true, false, false)
+        | (K::Named(N::ArrowRight), false, _, true) => WordRight,
         (K::Named(N::ArrowUp), true, _, _) | (K::Named(N::ArrowUp), false, _, true) => ParaUp,
         (K::Named(N::ArrowDown), true, _, _) | (K::Named(N::ArrowDown), false, _, true) => ParaDown,
         (K::Named(N::Home), false, _, _) => LineStart,
@@ -905,5 +909,24 @@ mod tests {
         };
         let c = lookup(&Key::Named(NamedKey::ArrowLeft), None, shift).unwrap();
         assert!(c.is_movement());
+    }
+
+    #[test]
+    fn command_arrows_move_by_word_and_with_shift_to_the_line_ends() {
+        let cmd = Mods {
+            cmd: true,
+            ..Default::default()
+        };
+        let cmd_shift = Mods {
+            cmd: true,
+            shift: true,
+            ..Default::default()
+        };
+        let left = Key::Named(NamedKey::ArrowLeft);
+        let right = Key::Named(NamedKey::ArrowRight);
+        assert_eq!(lookup(&left, None, cmd), Some(Cmd::WordLeft));
+        assert_eq!(lookup(&right, None, cmd), Some(Cmd::WordRight));
+        assert_eq!(lookup(&left, None, cmd_shift), Some(Cmd::LineStart));
+        assert_eq!(lookup(&right, None, cmd_shift), Some(Cmd::LineEnd));
     }
 }

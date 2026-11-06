@@ -434,6 +434,15 @@ impl DocView {
         id
     }
 
+    /// Delete annotation `id` and its replies, leaving the insertion point
+    /// where its mark was.
+    pub fn delete_annotation(&mut self, id: u32) {
+        let sel = self.sel;
+        self.doc.begin("Delete Annotation", sel);
+        let at = self.doc.delete_annotation(id).unwrap_or(sel.focus);
+        self.finish_edit(Selection::caret(at));
+    }
+
     /// What the annotations pane shows beside a mark: who wrote it and
     /// when, and whether it is a reply or resolved.
     pub(super) fn caption(&self, id: u32) -> String {

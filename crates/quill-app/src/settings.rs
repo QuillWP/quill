@@ -16,6 +16,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const SETTINGS_VERSION: u16 = 4;
 
+// Shared defaults also compile in the parser-only fuzzing library.
+/// Neutral light gray behind the pages, configurable in settings.
+pub const DEFAULT_PAGE_SURROUND: u32 = 0xE4E4E4;
+/// Slightly darker page outline, configurable in settings.
+pub const DEFAULT_PAGE_BORDER: u32 = 0xBBBBBB;
+
 /// The view documents open in (Preferences > View).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DefaultView {
@@ -95,6 +101,7 @@ pub struct Settings {
     pub smart_quotes: bool,
     // Spelling
     pub always_suggest: bool,
+    pub spelling_as_you_type: bool,
     pub custom_dictionary: Option<PathBuf>,
     pub words_to_system: bool,
     pub ignore_uppercase: bool,
@@ -271,6 +278,7 @@ impl Default for Settings {
             keys_remove: Vec::new(),
             smart_quotes: true,
             always_suggest: true,
+            spelling_as_you_type: true,
             custom_dictionary: None,
             words_to_system: false,
             ignore_uppercase: true,
@@ -280,8 +288,8 @@ impl Default for Settings {
             table_gridlines: true,
             table_gridline_color: 0x808080,
             table_gridline_dotted: false,
-            page_layout_color_background: crate::canvas::color::PAGE_SURROUND,
-            page_layout_color_page_border: crate::canvas::color::PAGE_BORDER,
+            page_layout_color_background: DEFAULT_PAGE_SURROUND,
+            page_layout_color_page_border: DEFAULT_PAGE_BORDER,
             text_boundaries: false,
             default_view: DefaultView::Normal,
             open_with_ruler: true,
@@ -444,6 +452,11 @@ impl Settings {
 
         section(&mut out, "Spelling", Some("Preferences > Spelling"));
         put(&mut out, "always_suggest", b(self.always_suggest));
+        put(
+            &mut out,
+            "spelling_as_you_type",
+            b(self.spelling_as_you_type),
+        );
         put(&mut out, "ignore_uppercase", b(self.ignore_uppercase));
         put(&mut out, "ignore_numbers", b(self.ignore_numbers));
         put(&mut out, "words_to_system", b(self.words_to_system));
@@ -493,6 +506,8 @@ impl Settings {
             Some("Saved by Use As Default; lengths in twips, 1440 to the inch"),
         );
         let d = &self.document;
+        put(&mut out, "doc.page_width", d.page_width.to_string());
+        put(&mut out, "doc.page_height", d.page_height.to_string());
         put(&mut out, "doc.margin_left", d.margin_left.to_string());
         put(&mut out, "doc.margin_right", d.margin_right.to_string());
         put(&mut out, "doc.margin_top", d.margin_top.to_string());
@@ -585,7 +600,10 @@ impl Settings {
     /// Read settings written by `to_text`. Unknown or broken lines are
     /// skipped, so an old or hand-edited file still loads.
     pub fn from_text(text: &str) -> Settings {
-        let mut s = Settings::default();
+        Self::from_text_with_defaults(text, Settings::default())
+    }
+
+    fn from_text_with_defaults(text: &str, mut s: Settings) -> Self {
         let version = text
             .lines()
             .filter_map(|line| line.split_once('='))
@@ -694,6 +712,7 @@ impl Settings {
                 // Migrate once; version 4 preserves an explicit opt-out.
                 "smart_quotes" => s.smart_quotes = version < 4 || flag,
                 "always_suggest" => s.always_suggest = flag,
+                "spelling_as_you_type" => s.spelling_as_you_type = flag,
                 "ignore_uppercase" => s.ignore_uppercase = flag,
                 "ignore_numbers" => s.ignore_numbers = flag,
                 "formatted_clipboard" => s.formatted_clipboard = flag,
@@ -752,6 +771,8 @@ impl Settings {
                     s.font = v.into()
                 }
                 "size" => s.size = v.parse().unwrap_or(24u16).clamp(2, 3276),
+                "doc.page_width" => d.page_width = num(d.page_width).clamp(1440, 31680),
+                "doc.page_height" => d.page_height = num(d.page_height).clamp(1440, 31680),
                 "doc.margin_left" => d.margin_left = num(d.margin_left),
                 "doc.margin_right" => d.margin_right = num(d.margin_right),
                 "doc.margin_top" => d.margin_top = num(d.margin_top),
@@ -886,10 +907,18 @@ pub fn write_user_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), Strin
 
 /// Load the settings file and save changes from now on.
 pub fn load() {
+    let (w, h, metric) = crate::regional::detect();
+    let mut defaults = Settings {
+        unit: if metric { Unit::Cm } else { Unit::Inch },
+        ..Default::default()
+    };
+    defaults.document.page_width = w;
+    defaults.document.page_height = h;
+    CURRENT.with(|c| *c.borrow_mut() = defaults);
     if let Some(p) = path()
         && let Ok(text) = std::fs::read_to_string(&p)
     {
-        let s = Settings::from_text(&text);
+        let s = Settings::from_text_with_defaults(&text, get());
         // Write the file back in its full layout when it is missing
         // settings or laid out by hand, so every setting shows with its
         // current value.
@@ -1222,5 +1251,27 @@ mod tests {
             Settings::from_text("open_page_layout = 0\n").default_view,
             DefaultView::Normal
         );
+    }
+    #[test]
+    fn regional_seeds_preserve_saved_units_and_new_document_paper() {
+        let mut german = Settings {
+            unit: Unit::Cm,
+            ..Default::default()
+        };
+        german.document.page_width = 11906;
+        german.document.page_height = 16838;
+        let seeded = Settings::from_text_with_defaults("name = Ada\n", german.clone());
+        assert_eq!(seeded.unit, Unit::Cm);
+        assert_eq!(seeded.new_document().props.page_width, 11906);
+        let mut chosen = Settings {
+            unit: Unit::Pica,
+            ..Default::default()
+        };
+        chosen.document.page_width = 14400;
+        chosen.document.page_height = 18000;
+        let loaded = Settings::from_text_with_defaults(&chosen.to_text(), german);
+        assert_eq!(loaded.unit, Unit::Pica);
+        assert_eq!(loaded.new_document().props.page_width, 14400);
+        assert_eq!(loaded.document.page_height, 18000);
     }
 }

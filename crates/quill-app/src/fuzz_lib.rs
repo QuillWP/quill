@@ -12,4 +12,5 @@ pub mod app {
 pub mod glossary_file;
 pub mod image;
 pub use quill_formats::png;
+pub mod regional;
 pub mod settings;

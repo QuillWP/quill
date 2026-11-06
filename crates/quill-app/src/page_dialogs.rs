@@ -14,7 +14,7 @@ const FOOTNOTE_POSITIONS: [(&str, FootnotePosition); 4] = [
 
 pub fn document(view: &DocView) -> Dialog {
     let p = &view.doc.props;
-    let mut d = Dialog::new("Document", 501.0, 185.0);
+    let mut d = Dialog::new("Document Setup", 501.0, 185.0);
     d.group("Margins", 10.0, 7.0, 359.0, 87.0);
     d.text("Left:", 15.0, 25.0);
     d.field("left", &units::length(p.margin_left), 70.0, 22.0, 69.0);
@@ -133,7 +133,7 @@ pub fn document_defaults(d: &Dialog, view: &DocView) -> Option<DocumentProps> {
 }
 
 /// Paper sizes in twips, portrait.
-const PAPERS: [(&str, i32, i32); 6] = [
+pub(crate) const PAPERS: [(&str, i32, i32); 6] = [
     ("US Letter", 12240, 15840),
     ("US Legal", 12240, 20160),
     ("A4 Letter", 11906, 16838),
@@ -176,7 +176,7 @@ pub fn page_setup(view: &DocView) -> Dialog {
         .iter()
         .position(|x| (x.1 - w).abs() < 20 && (x.2 - h).abs() < 20)
         .unwrap_or(0);
-    let mut d = Dialog::new("Page Setup", 372.0, 112.0);
+    let mut d = Dialog::new("Page Setup", 422.0, 112.0);
     d.text("Paper:", 12.0, 13.0);
     d.popup_owned(
         "paper",
@@ -192,7 +192,7 @@ pub fn page_setup(view: &DocView) -> Dialog {
     d.radio("wide", "Wide", 170.0, 45.0, 1, wide);
     d.button("ok", "OK", 290.0, 10.0, 70.0, true);
     d.button("cancel", "Cancel", 290.0, 40.0, 70.0, false);
-    d.button("document", "Document…", 290.0, 80.0, 70.0, false);
+    d.button("document", "Document Setup…", 290.0, 80.0, 120.0, false);
     d
 }
 

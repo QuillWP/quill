@@ -412,6 +412,10 @@ impl Surface for Page<'_> {
         if self.clipped_out(baseline) {
             return;
         }
+        if let Some(g) = crate::color_glyph::get(fonts, face, id, 128.0) {
+            self.picture(&g.picture, g.rect(x, baseline, size));
+            return;
+        }
         let (fi, cid, w) = match self.glyphs.text_glyph(fonts, face.face, id) {
             None => return self.outline_glyph(fonts, face, id, size, x, baseline, color),
             // Nothing to draw (a space).
@@ -870,5 +874,31 @@ pub mod tests {
     pub fn test_fonts() -> Option<Fonts> {
         let f = Fonts::new(quill_layout::Catalog::scan_system());
         (!f.family_names().is_empty()).then_some(f)
+    }
+    #[test]
+    fn color_emoji_is_drawn_as_an_image_in_pdf_and_on_screen() {
+        let Some(mut fonts) = test_fonts() else {
+            return;
+        };
+        if !fonts.has_family("Apple Color Emoji") {
+            return;
+        }
+        let mut doc = quill_core::Document::with_default_font("Apple Color Emoji", 48);
+        let chp = doc.main.paras[0].mark_chp;
+        doc.main.paras[0].insert(0, "\u{1f600}", chp);
+        let mut v = DocView::new(doc, "Emoji".into());
+        v.update_layout(&mut fonts);
+        let bytes = write(&mut v, &mut fonts, &mut GlyphCache::new(), 0..1);
+        assert!(bytes.windows(15).any(|s| s == b"/Subtype /Image"));
+        let key = fonts.resolve("Apple Color Emoji", false, false);
+        let id = fonts.glyph_in(key, '\u{1f600}');
+        let mut pixels = vec![0xffffff; 96 * 96];
+        let mut c = crate::canvas::Canvas::new(&mut pixels, 96, 96, 1.0);
+        c.glyph(&fonts, &mut GlyphCache::new(), key, id, 48.0, 12.0, 64.0, 0);
+        assert!(
+            pixels
+                .iter()
+                .any(|&c| c != 0xffffff && (c >> 16 & 255) != (c >> 8 & 255))
+        );
     }
 }

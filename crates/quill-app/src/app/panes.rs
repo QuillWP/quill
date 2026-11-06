@@ -161,6 +161,24 @@ impl WinState {
         self.view.status = Some(if done { "Resolved." } else { "Reopened." }.into());
     }
 
+    /// Delete Annotation: the annotation at the insertion point, with its
+    /// replies.
+    pub fn delete_annotation(&mut self) {
+        let Some(id) = self.view.annotation_here() else {
+            self.view.status = Some(
+                "Put the insertion point by an annotation's mark or in its text, or in the \
+                 annotations pane, first."
+                    .into(),
+            );
+            return;
+        };
+        // The pane edits a copy: put its text back before changing the
+        // document.
+        self.close_pane();
+        self.view.delete_annotation(id);
+        self.view.status = Some("Annotation deleted.".into());
+    }
+
     pub fn close_pane(&mut self) {
         if self
             .pane

@@ -2148,7 +2148,7 @@ checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "quill-app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ab_glyph_rasterizer",
  "arboard",
@@ -2174,11 +2174,11 @@ dependencies = [
 
 [[package]]
 name = "quill-core"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "quill-formats"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "gif",
  "image-webp",
@@ -2201,7 +2201,7 @@ dependencies = [
 
 [[package]]
 name = "quill-layout"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ab_glyph",
  "ab_glyph_rasterizer",

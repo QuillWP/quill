@@ -5,6 +5,7 @@ use quill_core::hyphen::Hyphenator;
 use quill_core::thesaurus::Thesaurus;
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Where the data files may be: beside the program, in a macOS bundle's
@@ -48,6 +49,15 @@ pub fn thesaurus() -> Option<&'static Thesaurus> {
 }
 
 static IGNORED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static SPELLING_REVISION: AtomicU64 = AtomicU64::new(0);
+
+pub fn spelling_revision() -> u64 {
+    SPELLING_REVISION.load(Ordering::Relaxed)
+}
+
+pub fn spelling_changed() {
+    SPELLING_REVISION.fetch_add(1, Ordering::Relaxed);
+}
 
 thread_local! {
     static LOCAL: RefCell<Option<Result<crate::local_dictionary::Dictionary, String>>> = const { RefCell::new(None) };
@@ -68,6 +78,7 @@ fn with_local<R>(
 
 pub fn reload_dictionary() {
     LOCAL.with(|local| *local.borrow_mut() = None);
+    spelling_changed();
 }
 
 pub fn prepare_dictionary() -> Result<(), String> {
@@ -95,10 +106,14 @@ pub fn word_ok(word: &str) -> bool {
 pub fn add_word(word: &str) -> Result<(), String> {
     let path =
         crate::local_dictionary::path().ok_or("The Quill dictionary folder is unavailable.")?;
-    with_local(|dict| match dict {
+    let result = with_local(|dict| match dict {
         Ok(dict) => dict.add(&path, word),
         Err(error) => Err(error.clone()),
-    })
+    });
+    if result.is_ok() {
+        spelling_changed();
+    }
+    result
 }
 
 /// Ignore All: pass over `word` for the rest of the session.
@@ -107,11 +122,13 @@ pub fn ignore_all(word: &str) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .push(word.to_string());
+    spelling_changed();
 }
 
 /// Preferences > Spelling > Reset "Ignore All" List.
 pub fn reset_ignored() {
     IGNORED.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    spelling_changed();
 }
 
 #[cfg(test)]

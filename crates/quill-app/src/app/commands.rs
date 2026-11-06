@@ -18,7 +18,7 @@ impl App {
             Some(i) => self.window_list(self.windows[i].0),
             None => Vec::new(),
         };
-        let (view, formatting, paragraph, ruler) = match front {
+        let (view, formatting, paragraph, ruler, full_screen) = match front {
             Some(i) => {
                 let st = &self.windows[i].1.st;
                 (
@@ -26,9 +26,10 @@ impl App {
                     st.show_formatting_toolbar,
                     st.show_paragraph_toolbar,
                     st.show_ruler,
+                    st.full_screen,
                 )
             }
-            None => (&self.blank, true, true, true),
+            None => (&self.blank, true, true, true, false),
         };
         let cx = MenuContext {
             view,
@@ -36,6 +37,7 @@ impl App {
             show_formatting_toolbar: formatting,
             show_paragraph_toolbar: paragraph,
             show_ruler: ruler,
+            full_screen,
             recent: &self.recent,
             windows: &list,
         };

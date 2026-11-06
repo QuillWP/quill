@@ -680,7 +680,17 @@ impl DocView {
                 break;
             }
             if let Some(row) = &b.row {
-                draw_row(c, row, ox, oy + b.top, b.height, gridlines);
+                // A row carried over pages is closed off where each page cuts it.
+                let (y0, y1) = if self.page_view {
+                    // The closing line goes just inside the page's share,
+                    // where its clip still shows it.
+                    let cut = b.top + b.height > bottom + 0.01;
+                    let end = if cut { bottom - 1.0 } else { b.top + b.height };
+                    (b.top.max(top), end)
+                } else {
+                    (b.top, b.top + b.height)
+                };
+                draw_row(c, row, ox, oy + y0, (y1 - y0).max(0.0), gridlines);
             }
             // Outline view may show only a block's first line.
             let clipped =
@@ -791,6 +801,7 @@ impl DocView {
             self.laid_out_width,
             &self.doc.objects,
         );
+        self.draw_spelling(c, para, l, ox, py);
         if !self.page_view && c.screen() {
             let face = l.glyphs.last().map(|g| g.face).unwrap_or_default();
             for (line, y) in l

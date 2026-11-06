@@ -44,7 +44,7 @@ pub enum Format {
     Odt,
     /// A self-contained HTML document export.
     Html,
-    /// Text Only.
+    /// Text-only export.
     Text,
 }
 
@@ -59,9 +59,9 @@ impl Format {
     ];
 
     /// Saving in these formats exports a copy and leaves the document as it
-    /// was: Quill's ODT and HTML writers keep less than a .qwp file does.
+    /// was: plain text, ODT and HTML keep less than a .qwp file does.
     pub fn export_only(self) -> bool {
-        matches!(self, Format::Odt | Format::Html)
+        matches!(self, Format::Odt | Format::Html | Format::Text)
     }
 
     /// The name the Save As dialog shows.
@@ -72,7 +72,7 @@ impl Format {
             Format::Rtf => "Interchange Format (RTF)",
             Format::Odt => "OpenDocument Text (Export)",
             Format::Html => "HTML Document (Export)",
-            Format::Text => "Text Only",
+            Format::Text => "Text Only (Export)",
         }
     }
 

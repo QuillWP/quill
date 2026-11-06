@@ -64,13 +64,6 @@ pub mod color {
     /// or switched on.
     pub const HOVER: u32 = 0xCACACA;
     pub const PRESSED: u32 = 0xB2B2B2;
-    /// Neutral page surround, shared by Page Layout and Print Preview: the
-    /// light gray of an empty Safari window. The settings file can change
-    /// it (page_layout_color_background).
-    pub const PAGE_SURROUND: u32 = 0xE4E4E4;
-    /// The line round each page in Page Layout: a gray a little darker
-    /// than the surround (page_layout_color_page_border).
-    pub const PAGE_BORDER: u32 = 0xBBBBBB;
 }
 
 /// Color `c` as dark mode shows the interface: grays turn over, so white
@@ -466,6 +459,10 @@ impl<'a> Canvas<'a> {
         baseline: f32,
         color: u32,
     ) {
+        if let Some(g) = crate::color_glyph::get(fonts, face, id, size * self.scale) {
+            self.picture(&g.pixels, [0.0, 0.0, 1.0, 1.0], g.rect(x, baseline, size));
+            return;
+        }
         let s = self.scale;
         let px = x * s;
         let ox = px.floor();

@@ -65,7 +65,8 @@ enum DialogKeyAction {
 
 fn dialog_key_action(chars: &str, flags: usize) -> Option<DialogKeyAction> {
     match chars.chars().next()? {
-        '\r' | '\n' => Some(DialogKeyAction::Default),
+        // Return, and Enter on the keypad (or Fn-Return), as in any Mac dialog.
+        '\r' | '\n' | '\u{3}' => Some(DialogKeyAction::Default),
         '\u{1b}' => Some(DialogKeyAction::Cancel),
         '.' if flags & (1usize << 20) != 0 => Some(DialogKeyAction::Cancel),
         _ => None,
@@ -1379,6 +1380,10 @@ mod tests {
     #[test]
     fn native_dialog_keyboard_routes_default_and_cancel_actions() {
         assert_eq!(dialog_key_action("\r", 0), Some(DialogKeyAction::Default));
+        assert_eq!(
+            dialog_key_action("\u{3}", 0),
+            Some(DialogKeyAction::Default)
+        );
         assert_eq!(
             dialog_key_action("\u{1b}", 0),
             Some(DialogKeyAction::Cancel)

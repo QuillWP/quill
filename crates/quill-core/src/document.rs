@@ -1840,7 +1840,9 @@ impl Document {
                 p
             })
             .collect();
-        self.splice(story, first, new.len(), new);
+        if new[..] != self.story(story).paras[first..=last] {
+            self.splice(story, first, new.len(), new);
+        }
     }
 
     /// Revert To Style: drop hand formatting from paragraphs `first..=last`
@@ -1864,7 +1866,9 @@ impl Document {
                 p
             })
             .collect();
-        self.splice(story, first, new.len(), new);
+        if new[..] != self.story(story).paras[first..=last] {
+            self.splice(story, first, new.len(), new);
+        }
     }
 
     // ----- sections -----
@@ -1975,6 +1979,7 @@ impl Document {
         self.commit_open();
         self.begin(label, sel);
         let old = std::mem::replace(&mut self.props, props);
+        let (was, now) = (old.text_width(), self.props.text_width());
         self.history.open.as_mut().unwrap().records.push(Record {
             story: StoryId::Main,
             first: 0,
@@ -1986,6 +1991,7 @@ impl Document {
             summary: None,
             hf_section: 0,
         });
+        self.fit_full_width_tables(was, now);
         self.commit(sel);
         true
     }
@@ -2705,6 +2711,48 @@ mod tests {
         d.format_paras(MAIN, 0, 0, |pp| pp.align = Align::Left);
         d.commit(Selection::default());
         assert!(d.undo_label().is_none());
+        assert!(!d.is_modified());
+    }
+
+    #[test]
+    fn unchanged_style_actions_preserve_saved_point_and_redo() {
+        let mut d = doc_with(&["Plain"]);
+        let sel = Selection::default();
+        d.take_changes();
+        // Repetition must not fill history or evict useful earlier actions.
+        for _ in 0..150 {
+            d.begin("Style", sel);
+            d.apply_style(MAIN, 0, 0, 0);
+            d.commit(sel);
+            d.begin("Revert To Style", sel);
+            d.revert_to_style(MAIN, 0, 0);
+            d.commit(sel);
+        }
+        assert!(!d.is_modified());
+        assert_eq!(d.undo_label(), None);
+        assert!(d.take_changes().is_empty());
+        d.begin("Bold", sel);
+        d.format_chars(MAIN, p(0, 0), p(0, 5), |c| c.bold = true);
+        d.commit(sel);
+        d.undo();
+        let redo = d.redo_label();
+        assert!(redo.is_some());
+        d.begin("Style", sel);
+        d.apply_style(MAIN, 0, 0, 0);
+        d.revert_to_style(MAIN, 0, 0);
+        d.commit(sel);
+        assert!(!d.is_modified());
+        assert_eq!(d.redo_label(), redo);
+        d.redo();
+        assert!(d.main.paras[0].chp_at(0).bold);
+        d.mark_saved();
+        d.begin("Revert To Style", sel);
+        d.revert_to_style(MAIN, 0, 0);
+        d.commit(sel);
+        assert!(!d.main.paras[0].chp_at(0).bold);
+        assert!(d.is_modified());
+        d.undo();
+        assert!(d.main.paras[0].chp_at(0).bold);
         assert!(!d.is_modified());
     }
 

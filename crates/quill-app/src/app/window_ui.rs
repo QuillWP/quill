@@ -255,6 +255,7 @@ impl WinState {
             show_formatting_toolbar: self.show_formatting_toolbar,
             show_paragraph_toolbar: self.show_paragraph_toolbar,
             show_ruler: self.show_ruler,
+            full_screen: self.full_screen,
             recent: env.recent,
             windows: env.windows,
         }
@@ -517,7 +518,16 @@ impl WinState {
         self.draw_revision_badges(c, &mut label);
         let hbar = chrome::draw_status(c, &mut label, status, &page, &style);
         if !self.native_scrollbars {
-            chrome::draw_scroll(c, hbar, 0.0, false, false, None);
+            let v = self.main_view();
+            let max = v.max_scroll_x();
+            chrome::draw_scroll(
+                c,
+                hbar,
+                if max > 0.0 { v.scroll_x / max } else { 0.0 },
+                false,
+                max > 0.0,
+                self.horizontal_press.map(|p| p.0),
+            );
             chrome::draw_grow_box(c, Rect::new(w - BAR, h - BAR, BAR, BAR));
         }
 

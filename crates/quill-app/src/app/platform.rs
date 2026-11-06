@@ -17,6 +17,18 @@ impl App {
             self.redraw_group(i);
         }
         let w = &mut self.windows[i].1;
+        if pane == 2 {
+            let v = w.st.main_view_mut();
+            v.scroll_x = native_scroll_value(
+                v.scroll_x,
+                v.max_scroll_x(),
+                (v.area.w - 24.0).max(16.0),
+                part,
+                value as f32,
+            );
+            w.window.request_redraw();
+            return;
+        }
         if pane != 0 && w.st.pane.is_some() {
             if let Some(v) = w.st.pane_view_mut() {
                 let max = v.max_scroll();

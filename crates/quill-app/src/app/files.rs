@@ -1,6 +1,7 @@
 //! Opening, saving, backup creation, and close confirmation.
 
 use super::*;
+use std::path::Path;
 
 impl App {
     /// Open documents in new windows. An untouched Untitled window is reused.
@@ -222,25 +223,16 @@ impl App {
             }
         }
         match quill_formats::save(&w.st.main_view().doc, &path, format) {
-            Ok(()) if format.export_only() => {
-                w.st.main_view_mut().status = Some(format!(
-                    "Exported {} - editable original remains open",
-                    file_name(&path)
-                ));
-                w.window.request_redraw();
-                true
-            }
             Ok(()) => {
-                let recent_path = path.clone();
-                let view = w.st.main_view_mut();
-                view.doc.mark_saved();
-                view.title = file_name(&path);
-                view.path = Some(path);
-                view.path_chosen |= chosen;
-                crate::recovery::remove(w.recovery.take());
+                let editable_saved = record_saved_file(w.st.main_view_mut(), &path, format, chosen);
+                if editable_saved {
+                    crate::recovery::remove(w.recovery.take());
+                }
                 w.window.request_redraw();
-                self.retitle();
-                crate::recent::note(&mut self.recent, &recent_path);
+                if editable_saved {
+                    self.retitle();
+                    crate::recent::note(&mut self.recent, &path);
+                }
                 true
             }
             Err(error) => {
@@ -295,12 +287,34 @@ impl App {
     }
 }
 
+/// Only a complete editable save replaces the document's identity and saved point.
+/// Export success leaves its recovery copy, dirty state, and original path intact.
+fn record_saved_file(view: &mut DocView, path: &Path, format: Format, chosen: bool) -> bool {
+    if format.export_only() {
+        view.status = Some(format!(
+            "Exported {} - editable original remains open",
+            file_name(path)
+        ));
+        return false;
+    }
+    view.doc.mark_saved();
+    view.title = file_name(path);
+    view.path = Some(path.to_path_buf());
+    view.path_chosen |= chosen;
+    true
+}
+
 fn save_policy(
     format: Option<Format>,
     ask: bool,
     chosen: bool,
     native_default: bool,
 ) -> (bool, Format) {
+    // A lossy source needs an editable destination even when the user prefers
+    // saving imported files in their original format. Export is always explicit.
+    if format.is_some_and(Format::export_only) {
+        return (false, Format::Quill);
+    }
     let foreign = format.is_some_and(|f| f != Format::Quill);
     let direct = format.is_some() && !ask && (!foreign || chosen || !native_default);
     let initial = if foreign && native_default {
@@ -425,8 +439,10 @@ fn open_warning(
 
 #[cfg(test)]
 mod tests {
-    use super::docx_word_rewrite_losses;
-    use quill_core::Document;
+    use super::{docx_word_rewrite_losses, record_saved_file, save_policy};
+    use crate::docview::DocView;
+    use quill_core::{Document, Position, StoryId};
+    use quill_formats::Format;
 
     #[test]
     fn the_open_warning_lists_losses_then_fonts() {
@@ -488,6 +504,67 @@ mod tests {
             save_policy(None, false, false, true),
             (false, Format::Quill)
         );
+    }
+
+    #[test]
+    fn exports_never_become_the_implicit_save_destination() {
+        for format in [Format::Text, Format::Odt, Format::Html] {
+            for ask in [false, true] {
+                for chosen in [false, true] {
+                    for native_default in [false, true] {
+                        assert_eq!(
+                            save_policy(Some(format), ask, chosen, native_default),
+                            (false, Format::Quill)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn text_export_keeps_original_dirty_and_editable_save_clears_it() {
+        let root = std::env::temp_dir().join(format!("quill-text-export-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let original = root.join("Original.qwp");
+        let text = root.join("Copy.txt");
+        let mut view = DocView::new(Document::new(), "Original.qwp".into());
+        view.path = Some(original.clone());
+        view.path_chosen = true;
+        view.type_text("Keep my formatting");
+        view.doc.format_chars(
+            StoryId::Main,
+            Position::new(0, 0),
+            Position::new(0, 4),
+            |c| c.bold = true,
+        );
+        view.doc.commit(view.sel);
+        let before = view.doc.main.paras.clone();
+        let undo = view.doc.undo_label();
+        assert!(view.doc.is_modified());
+        quill_formats::save(&view.doc, &text, Format::Text).unwrap();
+        assert!(
+            std::fs::read_to_string(&text)
+                .unwrap()
+                .contains("Keep my formatting")
+        );
+        assert!(!record_saved_file(&mut view, &text, Format::Text, true));
+        assert!(
+            view.doc.is_modified(),
+            "closing must still ask to save the editable original"
+        );
+        assert_eq!(view.path.as_ref(), Some(&original));
+        assert_eq!(view.title, "Original.qwp");
+        assert!(view.path_chosen);
+        assert_eq!(view.doc.main.paras, before);
+        assert_eq!(view.doc.undo_label(), undo);
+        assert!(!original.exists());
+        quill_formats::save(&view.doc, &original, Format::Quill).unwrap();
+        assert!(record_saved_file(&mut view, &original, Format::Quill, true));
+        assert!(!view.doc.is_modified());
+        let back = quill_formats::load_reported(&original, true).unwrap().0;
+        assert!(back.main.paras[0].chp_at(0).bold);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

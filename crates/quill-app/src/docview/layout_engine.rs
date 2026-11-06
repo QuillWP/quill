@@ -62,6 +62,9 @@ impl DocView {
                 self.hf_dirty = true;
                 continue;
             }
+            // Paragraph indices and spelling ranges may have changed. Reuse word
+            // verdicts, but never paint ranges from before an edit or Undo.
+            self.spelling.invalidate();
             let end = (ch.first + ch.removed).min(self.layouts.len());
             let first = ch.first.min(self.layouts.len());
             self.layouts
@@ -90,6 +93,7 @@ impl DocView {
                 }
             }
         }
+        self.scroll_sideways(0.0);
         self.update_note_labels();
         let opts = self.options();
         if self.layouts.len() != n
@@ -622,6 +626,54 @@ impl DocView {
         v
     }
 
+    /// A table row as pagination units: slices cut where no line of any
+    /// cell is cut in two, so a row taller than what is left of the page
+    /// carries on over the next, as in the original. A row with nowhere to cut is
+    /// one unit.
+    fn row_units(&self, b: &Block, row: &RowGeom) -> Vec<paginate::Unit> {
+        // Every cell line's top and bottom, from the row's top.
+        let mut lines = Vec::new();
+        for &(first, last, _, _) in &row.cells {
+            for p in first..=last {
+                let Some(l) = self.layouts.get(p).and_then(|l| l.as_ref()) else {
+                    continue;
+                };
+                let top = self.tops[p] - b.top;
+                lines.extend(
+                    l.lines
+                        .iter()
+                        .map(|line| (top + line.top, top + line.top + line.height)),
+                );
+            }
+        }
+        let mut cuts: Vec<f32> = lines
+            .iter()
+            .map(|&(_, bottom)| bottom)
+            .filter(|&c| c > 0.5 && c < b.height - 0.5)
+            .filter(|&c| !lines.iter().any(|&(t, bm)| t < c - 0.01 && bm > c + 0.01))
+            .collect();
+        cuts.sort_by(f32::total_cmp);
+        cuts.dedup_by(|a, b| (*a - *b).abs() < 0.01);
+        let top = self.unpad(b.top);
+        let edges: Vec<f32> = std::iter::once(0.0)
+            .chain(cuts)
+            .chain(std::iter::once(b.height))
+            .collect();
+        let n = edges.len() - 1;
+        (0..n)
+            .map(|k| paginate::Unit {
+                para: b.first,
+                line: k,
+                top: top + edges[k],
+                bottom: top + edges[k + 1],
+                first: k == 0,
+                last: k + 1 == n,
+                hard_break: false,
+                notes: 0.0,
+            })
+            .collect()
+    }
+
     pub(super) fn repaginate(&mut self) {
         let p = &self.doc.props;
         let base_height = (p.page_height - p.margin_top - p.margin_bottom).max(720) as f32 / 20.0;
@@ -633,7 +685,8 @@ impl DocView {
         if page_heights.is_empty() {
             page_heights.push(base_height);
         }
-        // Lines of paragraphs, and table rows whole.
+        // Lines of paragraphs, and table rows in slices that can go on
+        // different pages.
         let mut units = Vec::new();
         for b in &self.blocks {
             match &b.row {
@@ -642,16 +695,7 @@ impl DocView {
                     self.layout(b.first),
                     self.unpad(b.top),
                 )),
-                Some(_) => units.push(paginate::Unit {
-                    para: b.first,
-                    line: 0,
-                    top: self.unpad(b.top),
-                    bottom: self.unpad(b.top) + b.height,
-                    first: true,
-                    last: true,
-                    hard_break: false,
-                    notes: 0.0,
-                }),
+                Some(row) => units.extend(self.row_units(b, row)),
             }
         }
         for u in self.end_note_units() {

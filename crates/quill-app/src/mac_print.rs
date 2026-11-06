@@ -336,7 +336,7 @@ pub fn page_setup(
         let raw: *mut AnyObject = msg_send![raw,
             initWithFrame: NSRect::new(NSPoint::ZERO, NSSize::new(280., 44.))];
         let view = Retained::from_raw(raw).ok_or("Could not create Page Setup options.")?;
-        let title = NSString::from_str("Document…");
+        let title = NSString::from_str("Document Setup…");
         let button: *mut AnyObject = msg_send![class!(NSButton),
             buttonWithTitle: &*title target: &*delegate action: sel!(quillDocument:)];
         let _: () = msg_send![button,

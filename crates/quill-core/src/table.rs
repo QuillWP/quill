@@ -296,6 +296,52 @@ impl Document {
     }
 
     /// Change a row's settings.
+    /// Keep tables that ran margin to margin doing so when the margins or
+    /// the paper change from `was` to `now` wide. Tables given a width of
+    /// their own stay as they are.
+    pub(crate) fn fit_full_width_tables(&mut self, was: Twips, now: Twips) {
+        if was == now || was <= 0 || now <= 0 {
+            return;
+        }
+        let story = StoryId::Main;
+        let mut p = 0;
+        while p < self.main.paras.len() {
+            if !self.main.paras[p].pap.in_table {
+                p += 1;
+                continue;
+            }
+            let rows = table_rows(&self.main.paras, p);
+            let Some(last) = rows.last() else {
+                p += 1;
+                continue;
+            };
+            p = last.end + 1;
+            let props: Vec<RowProps> = rows
+                .iter()
+                .map(|r| row_props(&self.main.paras, r, was))
+                .collect();
+            // Full width allows for columns that didn't divide evenly.
+            let full = |r: &RowProps| (r.width() - was).abs() <= (r.cells.len() as Twips).max(15);
+            if !props.iter().all(full) {
+                continue;
+            }
+            for (row, mut r) in rows.iter().zip(props) {
+                let old = r.width().max(1) as i64;
+                let mut left = now;
+                let n = r.cells.len();
+                for (k, c) in r.cells.iter_mut().enumerate() {
+                    c.width = if k + 1 == n {
+                        left
+                    } else {
+                        (c.width as i64 * now as i64 / old) as Twips
+                    };
+                    left -= c.width;
+                }
+                self.set_row(story, row.end, r);
+            }
+        }
+    }
+
     pub fn set_row(&mut self, story: StoryId, end: usize, props: RowProps) {
         let mut p = self.story(story).paras[end].clone();
         if p.row.as_deref() == Some(&props) {
@@ -607,5 +653,33 @@ mod tests {
         let p = row_props(&d.main.paras, &row, 8640);
         assert_eq!(p.cells[0].width, 2000);
         assert_eq!(p.cells.len(), 2);
+    }
+
+    #[test]
+    fn full_width_tables_follow_the_margins() {
+        let mut d = from_plain_text("a\nb\nc");
+        let tw = d.props.text_width();
+        d.insert_table(Main, Position::new(0, 0), 2, 3, tw / 3);
+        d.insert_table(Main, Position::new(9, 0), 1, 2, 1440);
+        let widths = |d: &Document| -> Vec<Twips> {
+            d.main
+                .paras
+                .iter()
+                .filter_map(|p| p.row.as_ref().map(|r| r.width()))
+                .collect()
+        };
+        assert_eq!(widths(&d), [tw / 3 * 3, tw / 3 * 3, 2880]);
+        let mut props = d.props.clone();
+        props.margin_left += 720;
+        props.margin_right += 720;
+        let sel = crate::Selection::caret(Position::new(0, 0));
+        assert!(d.set_document_props("Document Setup", props, sel));
+        // The full-width table fills the narrower text; the one with a
+        // width of its own keeps it.
+        let now = d.props.text_width();
+        assert_eq!(widths(&d), [now, now, 2880]);
+        d.undo();
+        assert_eq!(d.props.text_width(), tw);
+        assert_eq!(widths(&d), [tw / 3 * 3, tw / 3 * 3, 2880]);
     }
 }

@@ -64,9 +64,11 @@ pub fn install(proxy: EventLoopProxy<UserEvent>) {
 pub struct MacScrollbars {
     primary: MacScrollbar,
     secondary: MacScrollbar,
+    horizontal: MacScrollbar,
 }
 
 struct MacScrollbar {
+    vertical: bool,
     container: Retained<NSScrollView>,
     scroller: Retained<NSScroller>,
     last: Cell<Option<(u32, u32, bool)>>,
@@ -82,8 +84,9 @@ impl MacScrollbars {
         // thread. Its view is flipped, matching Quill's top-left coordinates.
         let mtm = unsafe { MainThreadMarker::new_unchecked() };
         let parent = unsafe { &*handle.ns_view.as_ptr().cast::<NSView>() };
-        let primary = make_scroller(mtm);
-        let secondary = make_scroller(mtm);
+        let primary = make_scroller(mtm, true);
+        let secondary = make_scroller(mtm, true);
+        let horizontal = make_scroller(mtm, false);
 
         // SAFETY: NSApplication's delegate is winit's live application
         // delegate, and NSView retains each subview added to it.
@@ -92,15 +95,24 @@ impl MacScrollbars {
             let delegate: *mut AnyObject = msg_send![app, delegate];
             primary.scroller.setTarget(delegate.as_ref());
             secondary.scroller.setTarget(delegate.as_ref());
+            horizontal.scroller.setTarget(delegate.as_ref());
             primary.scroller.setAction(Some(sel!(quillScroll:)));
             secondary.scroller.setAction(Some(sel!(quillScroll:)));
+            horizontal.scroller.setAction(Some(sel!(quillScroll:)));
             primary.scroller.setContinuous(true);
             secondary.scroller.setContinuous(true);
+            horizontal.scroller.setContinuous(true);
             parent.addSubview(&primary.container);
             parent.addSubview(&secondary.container);
+            parent.addSubview(&horizontal.container);
         }
         secondary.container.setHidden(true);
-        Some(Self { primary, secondary })
+        horizontal.container.setHidden(true);
+        Some(Self {
+            primary,
+            secondary,
+            horizontal,
+        })
     }
 
     pub fn owns(&self, sender: usize) -> Option<usize> {
@@ -108,13 +120,22 @@ impl MacScrollbars {
             Some(0)
         } else if Retained::as_ptr(&self.secondary.scroller) as usize == sender {
             Some(1)
+        } else if Retained::as_ptr(&self.horizontal.scroller) as usize == sender {
+            Some(2)
         } else {
             None
         }
     }
 
-    pub fn sync(&self, primary: ScrollbarState, secondary: Option<ScrollbarState>, ui: f32) {
+    pub fn sync(
+        &self,
+        primary: ScrollbarState,
+        secondary: Option<ScrollbarState>,
+        horizontal: ScrollbarState,
+        ui: f32,
+    ) {
         sync_one(&self.primary, primary, ui);
+        sync_one(&self.horizontal, horizontal, ui);
         match secondary {
             Some(state) => sync_one(&self.secondary, state, ui),
             None => self.secondary.container.setHidden(true),
@@ -124,11 +145,12 @@ impl MacScrollbars {
 
 impl Drop for MacScrollbars {
     fn drop(&mut self) {
-        // SAFETY: both controls are still alive and are only manipulated on
+        // SAFETY: the controls are still alive and are only manipulated on
         // the main application thread.
         unsafe {
             self.primary.container.removeFromSuperview();
             self.secondary.container.removeFromSuperview();
+            self.horizontal.container.removeFromSuperview();
         }
     }
 }
@@ -142,21 +164,28 @@ pub struct ScrollbarState {
     pub enabled: bool,
 }
 
-fn make_scroller(mtm: MainThreadMarker) -> MacScrollbar {
+fn make_scroller(mtm: MainThreadMarker, vertical: bool) -> MacScrollbar {
     // SAFETY: allocation, initialization and configuration all happen on the
     // main thread as required by AppKit.
     unsafe {
         let container = NSScrollView::initWithFrame(mtm.alloc(), NSRect::ZERO);
         let scroller = NSScroller::initWithFrame(mtm.alloc(), NSRect::ZERO);
         container.setDrawsBackground(false);
-        container.setHasHorizontalScroller(false);
-        container.setVerticalScroller(Some(&scroller));
-        container.setHasVerticalScroller(true);
+        if vertical {
+            container.setHasHorizontalScroller(false);
+            container.setVerticalScroller(Some(&scroller));
+            container.setHasVerticalScroller(true);
+        } else {
+            container.setHasVerticalScroller(false);
+            container.setHorizontalScroller(Some(&scroller));
+            container.setHasHorizontalScroller(true);
+        }
         container.setAutohidesScrollers(false);
         container.setScrollerStyle(NSScrollerStyle::Overlay);
         container.setScrollerKnobStyle(NSScrollerKnobStyle::Dark);
         scroller.setKnobStyle(NSScrollerKnobStyle::Dark);
         MacScrollbar {
+            vertical,
             container,
             scroller,
             last: Cell::new(None),
@@ -175,10 +204,17 @@ fn sync_one(scrollbar: &MacScrollbar, state: ScrollbarState, ui: f32) {
     // old full-width scrollbar trough. AppKit draws the thumb itself.
     let right = (r.x + r.w) * ui;
     let width = 16.0_f32.min(r.w * ui);
-    let frame = NSRect::new(
-        NSPoint::new((right - width) as f64, (r.y * ui) as f64),
-        NSSize::new(width as f64, (r.h * ui) as f64),
-    );
+    let frame = if scrollbar.vertical {
+        NSRect::new(
+            NSPoint::new((right - width) as f64, (r.y * ui) as f64),
+            NSSize::new(width as f64, (r.h * ui) as f64),
+        )
+    } else {
+        NSRect::new(
+            NSPoint::new((r.x * ui) as f64, (r.y * ui) as f64),
+            NSSize::new((r.w * ui) as f64, (r.h * ui) as f64),
+        )
+    };
     // SAFETY: geometry and scalar control properties may be updated on the
     // main thread at any time outside AppKit's drawing callback.
     unsafe {

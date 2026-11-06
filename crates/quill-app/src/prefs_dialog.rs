@@ -45,8 +45,6 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
             d.field("name", &s.name, 102.0, 42.0, 327.0);
             d.text("Your Initials:", 11.0, 71.0);
             d.field("initials", &s.initials, 102.0, 69.0, 67.0);
-            // Paper size is a document's own (Page Setup), so General
-            // has no custom paper size.
             d.text("Measurement Unit:", 11.0, 102.0);
             let names: Vec<&str> = Unit::ALL.iter().map(|u| u.label()).collect();
             let at = Unit::ALL.iter().position(|u| *u == s.unit).unwrap_or(0);
@@ -64,6 +62,30 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
                 12.0,
                 143.0,
                 s.formatted_clipboard,
+            );
+            d.text("Default Paper:", 11.0, 184.0);
+            let mut papers: Vec<&str> = crate::page_dialogs::PAPERS.iter().map(|p| p.0).collect();
+            let current = crate::page_dialogs::PAPERS.iter().position(|p| {
+                (p.1 - s.document.page_width.min(s.document.page_height)).abs() < 20
+                    && (p.2 - s.document.page_width.max(s.document.page_height)).abs() < 20
+            });
+            if current.is_none() {
+                papers.push("Custom");
+            }
+            d.popup(
+                "defaultpaper",
+                &papers,
+                current.unwrap_or(papers.len() - 1),
+                139.0,
+                181.0,
+                160.0,
+            );
+            d.note(
+                "paper_help",
+                "For new documents. Page Setup changes the current document.",
+                12.0,
+                215.0,
+                410.0,
             );
             d.focus("name");
         }
@@ -173,27 +195,34 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
                 153.0,
                 410.0,
             );
-            d.check("suggest", "Always Suggest", 14.0, 187.0, s.always_suggest);
-            d.group("Ignore", 8.0, 212.0, 269.0, 66.0);
+            d.check(
+                "live_spelling",
+                "Check spelling as you type",
+                14.0,
+                178.0,
+                s.spelling_as_you_type,
+            );
+            d.check("suggest", "Always Suggest", 14.0, 200.0, s.always_suggest);
+            d.group("Ignore", 8.0, 225.0, 269.0, 66.0);
             d.check(
                 "upper",
                 "Words in UPPERCASE",
                 14.0,
-                235.0,
+                248.0,
                 s.ignore_uppercase,
             );
             d.check(
                 "numbers",
                 "Words with Numbers",
                 14.0,
-                256.0,
+                269.0,
                 s.ignore_numbers,
             );
             d.button(
                 "reset",
                 "Reset \u{201C}Ignore All\u{201D} List",
                 8.0,
-                284.0,
+                302.0,
                 175.0,
                 false,
             );
@@ -255,6 +284,14 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
                 s.name = d.field_text("name");
                 s.initials = d.field_text("initials");
                 s.unit = unit;
+                if id == "defaultpaper"
+                    && let Some(&(_, w, h)) =
+                        crate::page_dialogs::PAPERS.get(d.selected("defaultpaper"))
+                {
+                    let landscape = s.document.page_width > s.document.page_height;
+                    (s.document.page_width, s.document.page_height) =
+                        if landscape { (h, w) } else { (w, h) };
+                }
                 s.smart_quotes = on("smart");
                 s.formatted_clipboard = on("fmtclip");
             });
@@ -296,6 +333,7 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
         }
         SPELLING_PANEL => settings::update(|s| {
             s.always_suggest = on("suggest");
+            s.spelling_as_you_type = on("live_spelling");
             s.words_to_system = d.selected("add_words") == 1;
             s.ignore_uppercase = on("upper");
             s.ignore_numbers = on("numbers");
@@ -354,6 +392,25 @@ mod tests {
     }
 
     #[test]
+    fn live_spelling_checkbox_applies_and_fits_the_panel() {
+        settings::update(|s| *s = settings::Settings::default());
+        let mut d = preferences(SPELLING_PANEL, &[]);
+        assert!(d.is_on("live_spelling"));
+        d.set_on("live_spelling", false);
+        changed(SPELLING_PANEL, &mut d, "live_spelling");
+        assert!(!settings::get().spelling_as_you_type);
+        assert!(!settings::Settings::from_text(&settings::get().to_text()).spelling_as_you_type);
+        for item in &d.items {
+            assert!(
+                item.rect.bottom() <= d.height,
+                "{} falls outside Preferences",
+                item.id
+            );
+        }
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
     fn every_panel_builds() {
         for p in 0..PANELS.len() {
             let d = preferences(p, &["Arial".to_string()]);
@@ -393,5 +450,26 @@ mod tests {
         changed(1, &mut d, "recent");
         assert!(!settings::get().recent_files);
         settings::update(|s| *s = settings::Settings::default());
+    }
+    #[test]
+    fn default_paper_is_persistent_and_only_affects_new_documents() {
+        settings::update(|s| *s = settings::Settings::default());
+        let existing = settings::get().new_document();
+        let mut d = preferences(0, &[]);
+        d.set_selected("defaultpaper", 2);
+        changed(0, &mut d, "defaultpaper");
+        let s = settings::get();
+        assert_eq!(
+            (s.document.page_width, s.document.page_height),
+            (11906, 16838)
+        );
+        assert_eq!(existing.props.page_width, 12240);
+        assert_eq!(
+            settings::Settings::from_text(&s.to_text())
+                .new_document()
+                .props
+                .page_width,
+            11906
+        );
     }
 }

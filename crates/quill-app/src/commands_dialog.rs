@@ -80,6 +80,7 @@ pub fn describe(cmd: Cmd) -> String {
         ResolveAnnotation => {
             "Marks the annotation at the insertion point resolved, or open again (toggle)."
         }
+        DeleteAnnotation => "Deletes the annotation at the insertion point and its replies.",
         ShowChanges => "Shows tracked changes marked up, or the text with them accepted (toggle).",
         _ => "",
     };

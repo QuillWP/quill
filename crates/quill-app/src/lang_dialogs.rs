@@ -158,6 +158,7 @@ pub fn spelling_button(
                 );
                 return Action::None;
             }
+            crate::language::spelling_changed();
             e
         }
         "change" => {

@@ -393,6 +393,7 @@ impl DocView {
             }
             ReplyToAnnotation => return Effect::ReplyToAnnotation,
             ResolveAnnotation => return Effect::ResolveAnnotation,
+            DeleteAnnotation => return Effect::DeleteAnnotation,
             ViewAnnotations => {
                 return match self.next_annotation() {
                     Some(id) => Effect::OpenNote(StoryId::Annotations, id),
