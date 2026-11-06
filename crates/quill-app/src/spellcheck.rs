@@ -329,7 +329,7 @@ mod platform {
     pub fn learn(word: &str) -> Result<(), String> {
         let word = cword(word).ok_or_else(|| "The word contains an embedded NUL.".to_string())?;
         with_checker(|e| unsafe { (e.add)(e.dict, word.as_ptr(), -1) })
-            .ok_or_else(|| "Linux has no Enchant spelling provider for the current language.")?;
+            .ok_or("Linux has no Enchant spelling provider for the current language.")?;
         Ok(())
     }
 }

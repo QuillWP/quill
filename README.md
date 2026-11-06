@@ -12,21 +12,22 @@
 <p align="center"><a href="https://quillwp.com">quillwp.com</a></p>
 
 **Status: alpha · version 0.14.0.** Alpha testers wanted.
+**[Download a build](https://github.com/QuillWP/quill/releases)** from the releases page.
 
 ![Quill editing a document set in Avenir Next with headings, a bulleted list and a table](docs/images/screenshot.png)
 
 ## Small on purpose
 
-Everything in the app, measured from release builds on macOS and Windows:
+Everything in the app, measured from the release build for Apple Silicon Macs:
 
-| Part | macOS (Apple Silicon) | Windows 11 (x86_64) |
-|---|---:|---:|
-| The program itself | 4.8 MB | 5.34 MB |
-| Thesaurus data | 1.4 MB | 1.4 MB |
-| Icons and About artwork | 0.9 MB | 0.7 MB |
-| Licenses, notices and readme | 0.2 MB | 0.2 MB |
-| **Whole app on disk** | **7.3 MB** | **7.6 MB** |
-| **Download (compressed)** | **4.8 MB** | **4.83 MB** |
+| Part | Size |
+|---|---:|
+| The program itself | 4.9 MB |
+| Thesaurus data | 1.4 MB |
+| Icons and About artwork | 0.9 MB |
+| Licenses, notices and readme | 0.2 MB |
+| **Whole app** | **7.4 MB** |
+| **Download (disk image)** | **5.2 MB** |
 
 Quill is written from scratch in Rust, draws its own pages and uses native Mac
 menus and dialogs. It uses the fonts already installed on your Mac.
@@ -79,15 +80,32 @@ formats and useful writing tools, in an app measured in megabytes.
 Quill is a good fit if you use a Mac with a recent macOS, write real documents
 (letters, reports, manuscripts, notes), have DOCX, RTF or OpenDocument files to
 try, and are willing to report what breaks. Please
-[open an issue](../../issues) for anything that breaks, changes or looks wrong.
+[open an issue](https://github.com/QuillWP/quill/issues) for anything that breaks, changes or looks wrong.
 
-Not yet: Windows and Linux builds have had little testing, and screen readers
-cannot read the document area yet.
+Not yet: screen readers cannot read the document area.
+
+### Installing an alpha build
+
+Quill needs macOS 11 Big Sur or later on an Apple Silicon Mac (M1 or newer).
+
+1. Download the newest disk image from the
+   [releases page](https://github.com/QuillWP/quill/releases), open it and drag
+   Quill to Applications.
+2. Alpha builds are not signed by Apple yet; version 1.0 will be. The first time
+   you open Quill, macOS says it cannot check it for malicious software. Click
+   Done (or Cancel), open System Settings > Privacy & Security, scroll down to
+   the message about Quill and click Open Anyway, then confirm. You do this once
+   for each new version. On macOS 14 or earlier you can instead Control-click
+   Quill in Applications and choose Open.
+
+If you would rather build Quill yourself, follow the
+[build instructions for the Mac](BUILD_INSTRUCTIONS_MAC.md).
 
 ## Building
 
-You need a Rust toolchain with edition 2024 support and Python 3.11 or newer.
-On Debian or Ubuntu, also install `libgtk-3-dev` and `libxkbcommon-dev`.
+Step-by-step instructions, including installing the tools, are in
+[BUILD_INSTRUCTIONS_MAC.md](BUILD_INSTRUCTIONS_MAC.md). In short, you need the
+Xcode Command Line Tools, Rust and Python 3.11 or newer.
 
 ```sh
 python3 tools/package.py            # target/release/Quill.app on the Mac
@@ -98,11 +116,6 @@ cargo test --workspace
 
 See the [user guide](docs/user-guide.md) and the
 [release instructions](docs/release.md) for more.
-
-## Windows and Linux
-
-Quill builds and runs on Windows 11 and Ubuntu 24.04 (amd64), but both have had
-much less testing than the Mac build.
 
 ## License
 

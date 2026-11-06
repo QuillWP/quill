@@ -11,6 +11,8 @@ use crate::commands::{self as command_map, Cmd, Mods};
 use crate::dialog::{DKey, Dialog, Outcome};
 use crate::docview::{BorderKind, Clipboard, DialogId, DocView, Effect, Handle, Port};
 use crate::format_dialogs::{self, Which};
+#[cfg(target_os = "linux")]
+use crate::linux_window::Window;
 use crate::menu::{self, MENU_BAR_HEIGHT, Menu, OpenMenu};
 use crate::pane::{self, Pane, PaneHit};
 use crate::toolbar::{self, ToolState};
@@ -30,7 +32,9 @@ use winit::event::{
 };
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
-use winit::window::{CursorIcon, CustomCursor, ResizeDirection, Window, WindowId};
+#[cfg(not(target_os = "linux"))]
+use winit::window::Window;
+use winit::window::{CursorIcon, CustomCursor, ResizeDirection, WindowId};
 
 mod commands;
 mod dialogs;
@@ -1454,6 +1458,12 @@ fn hand_over(a: &mut WinState, a_port: &mut Port, b: &mut WinState, b_port: &mut
 /// Events the app sends itself.
 #[derive(Debug)]
 pub enum UserEvent {
+    #[cfg(target_os = "linux")]
+    LinuxMenu { window: WindowId, action: Action },
+    #[cfg(target_os = "linux")]
+    LinuxClose(WindowId),
+    #[cfg(target_os = "linux")]
+    LinuxFocus(WindowId),
     /// A choice from the system menu bar, by item id.
     #[cfg(target_os = "macos")]
     Menu(String),
@@ -1527,6 +1537,9 @@ pub struct App {
     #[cfg(target_os = "macos")]
     native_print_window: Option<WindowId>,
     windows: Vec<(WindowId, DocWindow)>,
+    /// GTK polling must not turn editor timers into continuous repainting.
+    #[cfg(target_os = "linux")]
+    editor_wake: Option<Instant>,
     /// The window in front, which menu commands act on.
     front: Option<WindowId>,
     /// Stands in for a document when no window is open, so the menus can
@@ -1614,6 +1627,8 @@ impl App {
             pending: files,
             recent: crate::recent::load(),
             windows: Vec::new(),
+            #[cfg(target_os = "linux")]
+            editor_wake: None,
             fonts_scan: Some(fonts_scan),
             crop_cursor: None,
             system_catalog: None,
@@ -1775,7 +1790,7 @@ impl App {
         let Some(i) = self.index(id) else {
             return;
         };
-        match std::fs::read(path) {
+        match quill_formats::read_file_with_limit(path, crate::paste_special::MAX_PICTURE_BYTES) {
             Ok(bytes) => match quill_formats::images::picture(bytes) {
                 Some(pic) => {
                     let w = &mut self.windows[i].1;
@@ -1856,6 +1871,9 @@ impl App {
             return;
         };
         let at = at.to_logical::<f64>(k);
+        #[cfg(target_os = "linux")]
+        let size = w.frame_size().to_logical::<f64>(k);
+        #[cfg(not(target_os = "linux"))]
         let size = w.inner_size().to_logical::<f64>(k);
         let frame = [at.x, at.y, size.width, size.height].map(|v| v.round() as i32);
         if crate::settings::get().window_frame != Some(frame) {
@@ -2004,7 +2022,18 @@ impl App {
         // carries it.
         #[cfg(not(target_os = "macos"))]
         let attrs = attrs.with_window_icon(window_icon());
-        let window = match el.create_window(attrs) {
+        // Wayland has no window icons: the desktop looks the icon up from
+        // the application ID, which names quill.desktop (and its Icon=).
+        #[cfg(target_os = "linux")]
+        let attrs = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attrs.with_name("quill", "quill")
+        };
+        #[cfg(target_os = "linux")]
+        let created = Window::create(el, attrs, self.proxy.clone());
+        #[cfg(not(target_os = "linux"))]
+        let created = el.create_window(attrs);
+        let window = match created {
             Ok(w) => Rc::new(w),
             Err(e) => {
                 eprintln!("quill: cannot open a window: {e}");
@@ -2027,6 +2056,10 @@ impl App {
         crate::mac_text_input::install(&self.proxy);
         let id = window.id();
         let mut st = WinState::new(DocView::new(doc, title));
+        #[cfg(target_os = "linux")]
+        {
+            st.own_menu_bar = !window.has_native_menu();
+        }
         st.dark = window.theme() == Some(winit::window::Theme::Dark);
         #[cfg(target_os = "macos")]
         {
@@ -2229,7 +2262,7 @@ impl App {
             });
             if open {
                 if let Some(p) = dialog.pick_file() {
-                    match std::fs::read_to_string(&p) {
+                    match crate::settings::read_text(&p) {
                         Ok(text) => crate::settings::update(|s| {
                             *s = crate::settings::Settings::from_text(&text)
                         }),
@@ -2334,10 +2367,7 @@ impl App {
             };
             crate::print_job::Target::Save(path)
         } else {
-            crate::print_job::Target::Print {
-                path: crate::print_job::temporary_path(),
-                copies: job.copies,
-            }
+            crate::print_job::Target::Print { copies: job.copies }
         };
         w.st.main_view_mut().status = Some("Preparing PDF\u{2026}".to_string());
         w.window.request_redraw();
@@ -3345,6 +3375,25 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(not(target_os = "macos"))]
         let _ = el;
         match event {
+            #[cfg(target_os = "linux")]
+            UserEvent::LinuxMenu { window, action } => {
+                if self.index(window).is_some() {
+                    self.front = Some(window);
+                    self.menu_action(el, action);
+                    if let Some(i) = self.index(window) {
+                        self.windows[i].1.window.focus_editor();
+                    }
+                }
+            }
+            #[cfg(target_os = "linux")]
+            UserEvent::LinuxClose(id) => self.window_event(el, id, WindowEvent::CloseRequested),
+            #[cfg(target_os = "linux")]
+            UserEvent::LinuxFocus(id) => {
+                if let Some(i) = self.index(id) {
+                    self.windows[i].1.window.focus_editor();
+                }
+                self.window_event(el, id, WindowEvent::Focused(true));
+            }
             #[cfg(target_os = "macos")]
             UserEvent::Menu(id) => self.menu_choice(el, &id),
             #[cfg(target_os = "macos")]
@@ -3495,6 +3544,10 @@ impl ApplicationHandler<UserEvent> for App {
         self.refresh_font_folders();
         if let StartCause::ResumeTimeReached { .. } = cause {
             let now = Instant::now();
+            #[cfg(target_os = "linux")]
+            if self.editor_wake.is_some_and(|deadline| now < deadline) {
+                return;
+            }
             if now >= self.next_recovery() {
                 self.last_recovery = now;
                 let autosave = crate::settings::with(|s| s.autosave_secs) > 0;
@@ -3580,6 +3633,16 @@ impl ApplicationHandler<UserEvent> for App {
             ) {
                 self.redraw_group(i);
             }
+        }
+        #[cfg(target_os = "linux")]
+        if matches!(
+            event,
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                ..
+            }
+        ) {
+            self.windows[i].1.window.focus_editor();
         }
         match event {
             WindowEvent::CloseRequested => {
@@ -3763,6 +3826,8 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        #[cfg(target_os = "linux")]
+        crate::linux_window::poll();
         #[cfg(target_os = "macos")]
         crate::mac_open::set_unsaved(
             self.windows
@@ -3779,9 +3844,12 @@ impl ApplicationHandler<UserEvent> for App {
                 || (w.focused && w.st.selection_scroll(false))
         });
         if holding {
-            el.set_control_flow(ControlFlow::WaitUntil(
-                Instant::now() + Duration::from_millis(60),
-            ));
+            let next = Instant::now() + Duration::from_millis(60);
+            #[cfg(target_os = "linux")]
+            {
+                self.editor_wake = Some(next);
+            }
+            el.set_control_flow(ControlFlow::WaitUntil(next));
             return;
         }
         let next = self
@@ -3812,6 +3880,16 @@ impl ApplicationHandler<UserEvent> for App {
             .flatten()
             .min();
         let next = spelling.map_or(next, |t| t.min(next));
+        #[cfg(target_os = "linux")]
+        {
+            self.editor_wake = Some(next);
+        }
+        #[cfg(target_os = "linux")]
+        let next = if self.windows.iter().any(|(_, w)| w.window.has_native_menu()) {
+            next.min(Instant::now() + Duration::from_millis(16))
+        } else {
+            next
+        };
         el.set_control_flow(ControlFlow::WaitUntil(next));
     }
 }
@@ -3827,6 +3905,17 @@ fn window_icon() -> Option<winit::window::Icon> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_window_icon_picture_decodes_to_a_square_with_alpha() {
+        // Windows and Linux windows build their icon from this file.
+        let png = include_bytes!("../../../assets/quill-64.png");
+        let (w, h, rgba) =
+            crate::image::decode_rgba(png, quill_core::ImageFormat::Png).expect("icon decodes");
+        assert_eq!((w, h), (64, 64));
+        assert_eq!(rgba.len(), 64 * 64 * 4);
+        assert!(rgba.chunks(4).any(|p| p[3] == 255));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

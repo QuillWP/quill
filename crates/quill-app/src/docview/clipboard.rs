@@ -6,6 +6,11 @@ use super::*;
 mod rich;
 use rich::RichContent;
 
+/// Most clipboard text, and HTML, Quill will read: the text limit is the
+/// document's character limit, and the HTML limit is the HTML reader's.
+const MAX_CLIP_TEXT: usize = quill_core::limits::MAX_CHARACTERS;
+const MAX_CLIP_HTML: usize = 8 << 20;
+
 /// What a paste brings in.
 pub enum Clip {
     /// Copied inside Quill, with formatting.
@@ -191,8 +196,18 @@ impl Clipboard {
                 .map(|c| Clip::Rich(c.content.clone()))
                 .or_else(|| self.local_text.clone().map(Clip::Plain));
         }
-        let text = self.system.as_mut().and_then(|s| s.get_text().ok());
-        let html = self.system.as_mut().and_then(|s| s.get().html().ok());
+        // The clipboard provider has already built these strings, so the
+        // limits stop only what Quill does with them (parsing, pasting).
+        let text = self
+            .system
+            .as_mut()
+            .and_then(|s| s.get_text().ok())
+            .filter(|t| t.len() <= MAX_CLIP_TEXT);
+        let html = self
+            .system
+            .as_mut()
+            .and_then(|s| s.get().html().ok())
+            .filter(|h| h.len() <= MAX_CLIP_HTML);
         let sequence = crate::system_clipboard::sequence();
         if let Some(cached) = &self.rich
             && cached.owns(text.as_deref(), html.as_deref(), sequence)
@@ -228,6 +243,7 @@ impl Clipboard {
         self.system
             .as_mut()
             .and_then(|s| s.get_text().ok())
+            .filter(|t| t.len() <= MAX_CLIP_TEXT)
             .or_else(|| {
                 self.get().map(|c| match c {
                     Clip::Plain(s) => s,

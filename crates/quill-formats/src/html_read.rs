@@ -762,13 +762,23 @@ struct Rule {
     /// The element's parent (true) or any ancestor (false) must match.
     context: Option<(bool, Simple)>,
     weight: u32,
-    declarations: String,
+    /// Shared by every selector of one block, so a long list of selectors
+    /// over a big block holds the text once.
+    declarations: std::sync::Arc<str>,
 }
+
+/// Style sheet limits. Rules are capped across all of a page's sheets and
+/// inside selector lists; declaration text is charged once per block, as
+/// the rules of a block share it; matching work (rules tried per element)
+/// is capped so a hostile sheet cannot make a big page crawl.
+const MAX_RULES: usize = 10_000;
+const MAX_DECLARATION_BYTES: usize = 4 << 20;
+const MAX_RULE_TESTS: u64 = 20_000_000;
 
 /// The rules of a `<style>` sheet. At-rules (@media, @page and so on)
 /// are skipped; true when it imports another sheet, which is never
 /// fetched.
-fn style_sheet(css: &str, rules: &mut Vec<Rule>) -> bool {
+fn style_sheet(css: &str, rules: &mut Vec<Rule>, bytes_left: &mut usize) -> bool {
     let mut text = String::with_capacity(css.len());
     let mut rest = css;
     while let Some(at) = rest.find("/*") {
@@ -780,7 +790,7 @@ fn style_sheet(css: &str, rules: &mut Vec<Rule>) -> bool {
     text.push_str(rest);
     let mut imports = false;
     let mut rest = text.as_str();
-    while rules.len() < 10_000 {
+    while rules.len() < MAX_RULES {
         rest = rest.trim_start();
         if rest.is_empty() {
             break;
@@ -817,8 +827,12 @@ fn style_sheet(css: &str, rules: &mut Vec<Rule>) -> bool {
         }
         let Some(open) = rest.find('{') else { break };
         let close = rest[open..].find('}').map_or(rest.len(), |n| open + n);
-        let declarations = rest[open + 1..close].to_string();
+        let declarations = &rest[open + 1..close];
+        let mut shared: Option<std::sync::Arc<str>> = None;
         for selector in rest[..open].split(',') {
+            if rules.len() >= MAX_RULES {
+                break;
+            }
             let spaced = selector.replace('>', " > ");
             let parts: Vec<&str> = spaced.split_whitespace().collect();
             let (target, context) = match parts.as_slice() {
@@ -832,11 +846,22 @@ fn style_sheet(css: &str, rules: &mut Vec<Rule>) -> bool {
                 continue;
             }
             let weight = target.weight() + context.as_ref().map_or(0, |c| c.1.weight());
+            if shared.is_none() {
+                // Past the byte budget, the rest of the sheet is dropped.
+                if declarations.len() > *bytes_left {
+                    return imports;
+                }
+                *bytes_left -= declarations.len();
+                shared = Some(declarations.into());
+            }
+            let Some(declarations) = shared.clone() else {
+                continue;
+            };
             rules.push(Rule {
                 target,
                 context,
                 weight,
-                declarations: declarations.clone(),
+                declarations,
             });
         }
         rest = &rest[(close + 1).min(rest.len())..];
@@ -867,6 +892,8 @@ struct Reader<'a> {
     doc: Document,
     report: ImportReport,
     rules: Vec<Rule>,
+    /// Rules tried against elements so far, against `MAX_RULE_TESTS`.
+    rule_tests: u64,
     /// The elements being read, outermost first, for style sheet rules.
     path: Vec<&'a Element>,
     /// The paragraph being written, and whether to keep it when empty.
@@ -883,6 +910,13 @@ struct Reader<'a> {
 /// The bullet for a list this deep.
 fn bullet(depth: usize) -> char {
     ['\u{2022}', '\u{25E6}', '\u{25AA}'][(depth.max(1) - 1) % 3]
+}
+
+/// A list's `start` or an item's `value`, held to +/-1,000,000 so the
+/// counting around it cannot overflow.
+fn list_value(attr: Option<&str>) -> Option<i32> {
+    let n: i64 = attr?.trim().parse().ok()?;
+    Some(n.clamp(-1_000_000, 1_000_000) as i32)
 }
 
 fn list_number(n: i32, kind: char) -> String {
@@ -964,7 +998,7 @@ impl<'a> Reader<'a> {
             "sup" => f.chp.script = quill_core::Script::Super,
             "sub" => f.chp.script = quill_core::Script::Sub,
             "small" => f.chp.size = (size * 5 / 6).max(2),
-            "big" => f.chp.size = size * 6 / 5,
+            "big" => f.chp.size = (u32::from(size) * 6 / 5).min(3276) as u16,
             "code" | "tt" | "kbd" | "samp" | "pre" => {
                 f.chp.font = self.doc.font_id("Courier New");
                 f.pre |= e.name == "pre";
@@ -1028,8 +1062,15 @@ impl<'a> Reader<'a> {
                 _ => {}
             }
         }
-        let mut matched: Vec<(u32, usize)> = self
-            .rules
+        // Each element tries every rule; stop styling from sheets once the
+        // page has used its share of tries.
+        self.rule_tests = self.rule_tests.saturating_add(self.rules.len() as u64);
+        let rules: &[Rule] = if self.rule_tests > MAX_RULE_TESTS {
+            &[]
+        } else {
+            &self.rules
+        };
+        let mut matched: Vec<(u32, usize)> = rules
             .iter()
             .enumerate()
             .filter(|(_, r)| {
@@ -1203,10 +1244,7 @@ impl<'a> Reader<'a> {
                 let kind = e.attr("type").and_then(|t| t.chars().next()).unwrap_or('1');
                 self.lists.push(List {
                     ordered: name == "ol",
-                    n: e.attr("start")
-                        .and_then(|s| s.trim().parse().ok())
-                        .unwrap_or(1)
-                        - 1,
+                    n: list_value(e.attr("start")).unwrap_or(1) - 1,
                     kind,
                     none: f.list_none,
                 });
@@ -1223,10 +1261,10 @@ impl<'a> Reader<'a> {
                 let label = match self.lists.last_mut() {
                     Some(l) if !l.none && !f.list_none => {
                         if l.ordered {
-                            l.n = e
-                                .attr("value")
-                                .and_then(|v| v.trim().parse().ok())
-                                .unwrap_or(l.n + 1);
+                            l.n = match list_value(e.attr("value")) {
+                                Some(n) => n,
+                                None => l.n + 1,
+                            };
                             Some(format!("{}.", list_number(l.n, l.kind)))
                         } else {
                             Some(bullet(depth).to_string())
@@ -1600,6 +1638,7 @@ fn build(html: &str, limits: &Limits, file: bool) -> Result<(Document, ImportRep
         doc: Document::new(),
         report: ImportReport::default(),
         rules: Vec::new(),
+        rule_tests: 0,
         path: Vec::new(),
         cur: None,
         keep: false,
@@ -1610,8 +1649,9 @@ fn build(html: &str, limits: &Limits, file: bool) -> Result<(Document, ImportRep
     };
     let mut sheets = Vec::new();
     find_all(&root, "style", &mut sheets);
+    let mut bytes_left = MAX_DECLARATION_BYTES;
     for sheet in sheets {
-        if style_sheet(&sheet.text(), &mut r.rules) {
+        if style_sheet(&sheet.text(), &mut r.rules, &mut bytes_left) {
             r.report.note(notes::STYLE_SHEETS);
         }
     }
@@ -1788,6 +1828,78 @@ fn decode(bytes: &[u8], report: &mut ImportReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_selector_list_cannot_pass_the_rule_cap() {
+        let mut rules = Vec::new();
+        let mut bytes = MAX_DECLARATION_BYTES;
+        let list: Vec<String> = (0..MAX_RULES).map(|i| format!(".c{i}")).collect();
+        style_sheet(
+            &format!("{}, p {{ color: red }}", list.join(",")),
+            &mut rules,
+            &mut bytes,
+        );
+        assert_eq!(rules.len(), MAX_RULES);
+        // The 10,001st selector (p) was never added, so p stays black.
+        let (doc, _) = read_file(
+            format!(
+                "<style>{}, p {{ color: #ff0000 }}</style><p>x</p>",
+                list.join(",")
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(doc.main.paras[0].runs[0].chp.color, quill_core::Rgb::BLACK);
+    }
+
+    #[test]
+    fn selectors_share_one_declaration_block() {
+        let big = "x".repeat(1 << 20);
+        let selectors: Vec<String> = (0..5000).map(|i| format!(".c{i}")).collect();
+        let sheet = format!("{} {{ --pad: {big} }}", selectors.join(","));
+        let mut rules = Vec::new();
+        let mut bytes = MAX_DECLARATION_BYTES;
+        style_sheet(&sheet, &mut rules, &mut bytes);
+        assert_eq!(rules.len(), 5000);
+        assert!(std::sync::Arc::ptr_eq(
+            &rules[0].declarations,
+            &rules[4999].declarations
+        ));
+        // Charged once, not 5000 times.
+        assert!(MAX_DECLARATION_BYTES - bytes < 2 << 20);
+    }
+
+    #[test]
+    fn many_blocks_stop_at_the_total_budget() {
+        let block = format!(".a {{ --pad: {} }}\n", "y".repeat(100_000));
+        let sheet = block.repeat(100);
+        let mut rules = Vec::new();
+        let mut bytes = MAX_DECLARATION_BYTES;
+        style_sheet(&sheet, &mut rules, &mut bytes);
+        assert!(rules.len() < 100 && !rules.is_empty());
+        assert!(bytes < 100_000);
+        // And many separate style elements share the same pool.
+        let page = format!("<style>{}</style>", ".a { color: red }\n".repeat(MAX_RULES)).repeat(3);
+        let (doc, _) = read_file(page.as_bytes()).unwrap();
+        assert!(doc.main.paras.len() <= 1);
+    }
+
+    #[test]
+    fn extreme_numbers_in_html_read_without_panicking() {
+        let nested = format!("{}x{}", "<big>".repeat(64), "</big>".repeat(64));
+        let pages = [
+            "<ol start=\"-2147483648\"><li>x</li></ol>".to_string(),
+            "<ol start=\"2147483647\"><li>x</li><li>y</li></ol>".to_string(),
+            "<ol start=\"1\"><li value=\"-2147483648\">x</li><li>y</li></ol>".to_string(),
+            "<ol start=\"99999999999999999999\"><li value=\"2147483647\">x</li><li>y</li></ol>"
+                .to_string(),
+            format!("<p>{nested}</p>"),
+        ];
+        for page in &pages {
+            assert!(read_clipboard(page).is_ok(), "{page}");
+            assert!(read_file(page.as_bytes()).is_ok(), "{page}");
+        }
+    }
 
     #[test]
     fn loose_markup_closes_the_way_browsers_close_it() {

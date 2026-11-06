@@ -122,9 +122,20 @@ pub fn load_reported(
     path: &Path,
     interpret_rtf: bool,
 ) -> Result<(Document, report::ImportReport), String> {
+    load_reported_trusting(path, interpret_rtf, false)
+}
+
+/// `load_reported`, with `trust_outside_pictures` true to also load the
+/// pictures a Markdown file names outside its own folder. The report of a
+/// normal load lists those (`outside_pictures`) so the person can be asked.
+pub fn load_reported_trusting(
+    path: &Path,
+    interpret_rtf: bool,
+    trust_outside_pictures: bool,
+) -> Result<(Document, report::ImportReport), String> {
     // Whatever the file says, its measurements end up within Word's range,
     // and it's no bigger than Quill can save and open again.
-    let (mut doc, report) = read_any(path, interpret_rtf)?;
+    let (mut doc, report) = read_any(path, interpret_rtf, trust_outside_pictures)?;
     too_large(path, doc.size())?;
     doc.keep_in_bounds();
     Ok((doc, report))
@@ -293,7 +304,11 @@ fn plain_text(path: &Path, bytes: Vec<u8>) -> Result<Document, String> {
     Ok(quill_core::text::from_plain_text(&text))
 }
 
-fn read_any(path: &Path, interpret_rtf: bool) -> Result<(Document, report::ImportReport), String> {
+fn read_any(
+    path: &Path,
+    interpret_rtf: bool,
+    trust_outside_pictures: bool,
+) -> Result<(Document, report::ImportReport), String> {
     let plain = |doc: Document| (doc, report::ImportReport::default());
     let bytes = read_file_with_limit(path, MAX_FILE_BYTES)?;
     let name = || {
@@ -355,7 +370,8 @@ fn read_any(path: &Path, interpret_rtf: bool) -> Result<(Document, report::Impor
     if Format::from_path(path) == Some(Format::Markdown) && looks_like_text(&bytes) {
         let text = decode_text(bytes);
         too_large(path, quill_core::limits::Size::of_text(&text))?;
-        let (doc, mut report) = markdown::read(&text, path.parent());
+        let (doc, mut report) =
+            markdown::read_trusting(&text, path.parent(), trust_outside_pictures);
         report.no_page = true;
         return Ok((doc, report));
     }
@@ -417,7 +433,10 @@ fn document_error(path: &Path, feature: &str, error: String) -> String {
 
 /// Read at most `limit` bytes, checking both the initial metadata and the
 /// bytes actually read in case the file grows while it is being opened.
-fn read_file_with_limit(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+/// Read a whole file of at most `limit` bytes. Anything but a regular file
+/// (a pipe, a device, a directory) is refused before it is opened, so
+/// picking one cannot block or fill memory.
+pub fn read_file_with_limit(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     // Opening a named pipe can block before any byte limit is applied.
     // Reject devices, pipes and directories before opening, then check the
     // opened handle too in case the path changed.

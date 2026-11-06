@@ -1255,7 +1255,13 @@ mod tests {
             windows: &[],
         };
         let (menus, actions) = build_menus(&cx);
-        let submenu = menus[1].items[2].submenu.as_ref().unwrap();
+        let file = menus.iter().find(|menu| menu.title == "File").unwrap();
+        let submenu = file
+            .items
+            .iter()
+            .find(|item| item.label == "Open Recent")
+            .and_then(|item| item.submenu.as_ref())
+            .unwrap();
         assert_eq!(submenu.title, "Open Recent");
         assert_eq!(submenu.items[0].label, "First.qwp");
         assert_eq!(actions[submenu.items[0].id as usize], Action::Recent(0));

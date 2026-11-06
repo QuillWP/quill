@@ -25,7 +25,7 @@ away, and winit then panics rather than enter the handler twice:
 
     tried to handle event while another event is currently being handled
 
-The app aborts and unsaved work is lost. Both crashes Lucas saw on
+The app aborts and unsaved work is lost. Both crashes reported on
 2026-10-28, while printing and in the Save panel, were this. winit has no
 setting to avoid it (device events cannot be turned off on the Mac), and
 0.31.0-beta.4 queues events the same way.
@@ -47,9 +47,8 @@ window to change displays during a modal panel.
 1. Check whether the new release still hands set-aside events to a busy
    handler (`maybe_queue_event` in the macOS backend, `app_state.rs`). If it
    no longer does, remove `vendor/winit` and both `[patch.crates-io]` entries.
-2. Otherwise copy the new release here, apply the same change (see the
-   commit "Hold winit events that arrive while a modal panel is open"), and
-   update the version above.
+2. Otherwise copy the new release here, apply the same change (the code
+   marked `QUILL PATCH` in `app_state.rs`), and update the version above.
 3. Run `cargo run -p quill-app --example modal_events`. It sends a click
    through AppKit while winit's handler is busy and spins the run loop, as
    AppKit does during the Save panel. It must print "back in the handler

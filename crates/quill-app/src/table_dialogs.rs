@@ -664,9 +664,10 @@ pub fn table_cells_apply(d: &Dialog, view: &mut DocView) -> bool {
     ) else {
         return false;
     };
-    let by = units::parse(&d.field_text("height_by"), "pt")
-        .unwrap_or(0)
-        .abs();
+    // A bad or out-of-range height leaves the table as it was.
+    let Some(by) = units::parse(&d.field_text("height_by"), "pt").map(|t| t.abs()) else {
+        return false;
+    };
     let height = match d.selected("height") {
         1 if by > 0 => RowHeight::AtLeast(by),
         2 if by > 0 => RowHeight::Exactly(by),

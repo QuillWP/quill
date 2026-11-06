@@ -3405,6 +3405,19 @@ mod tests {
     }
 
     #[test]
+    fn extreme_numbers_in_a_docx_read_without_panicking() {
+        for n in ["-2147483648", "2147483647", "1e308", "-1e308", "NaN", "inf"] {
+            let body = format!(
+                r#"<w:p><w:pPr><w:ind w:hanging="{n}" w:left="{n}" w:firstLine="{n}"/><w:spacing w:line="{n}" w:lineRule="exact" w:before="{n}" w:after="{n}"/><w:pBdr><w:top w:val="single" w:space="{n}" w:sz="{n}"/></w:pBdr></w:pPr><w:r><w:rPr><w:position w:val="{n}"/><w:spacing w:val="{n}"/></w:rPr><w:t>x</w:t></w:r></w:p><w:sectPr><w:pgMar w:top="{n}" w:bottom="{n}" w:left="{n}" w:right="{n}"/></w:sectPr>"#
+            );
+            let _ = read(&docx(&body));
+        }
+        let body =
+            r#"<w:p><w:pPr><w:ind w:hanging="-2147483648"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#;
+        assert!(read(&docx(body)).is_ok());
+    }
+
+    #[test]
     fn a_page_number_inside_a_link_stays_a_field() {
         let field = |instr: &str, shown: &str, lock: &str| {
             format!(

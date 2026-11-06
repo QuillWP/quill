@@ -1,10 +1,12 @@
 [package]
 name = "quill-formats"
-description = "Quill document formats: native, DOCX, RTF, text, and ODT/HTML exports"
+description = "Quill document formats: native .qwp, DOCX, RTF, ODT, HTML, Markdown and plain text"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [dependencies]
 quill-core.workspace = true

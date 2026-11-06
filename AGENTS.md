@@ -23,7 +23,7 @@ cargo test --workspace
 ```
 
 Quit any running Quill before running `package.py`. Do not run `cargo clean`
-without asking. macOS is the primary target; Windows and Linux comes second.
+without asking. macOS is the primary target; Windows and Linux come second.
 
 ## Rules
 

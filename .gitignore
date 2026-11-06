@@ -4,3 +4,6 @@
 /Quill.app/
 __pycache__/
 *.py[cod]
+
+# Local work files that are not published
+/local/

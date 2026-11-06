@@ -1,7 +1,6 @@
 //! Quill-only learned words. Reading and writing never changes the OS dictionary.
 
 use std::collections::BTreeSet;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -26,15 +25,14 @@ fn word_key(word: &str) -> Result<String, String> {
 
 impl Dictionary {
     pub fn load(path: &Path) -> Result<Self, String> {
-        let file = match std::fs::File::open(path) {
-            Ok(file) => file,
+        // Look at the path before opening it: opening a named pipe can
+        // block, and the reader below refuses anything but a regular file.
+        match std::fs::metadata(path) {
+            Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(format!("Could not read “{}”: {e}", path.display())),
-        };
-        let mut bytes = Vec::new();
-        file.take((MAX_BYTES + 1) as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|e| format!("Could not read “{}”: {e}", path.display()))?;
+        }
+        let bytes = quill_formats::read_file_with_limit(path, MAX_BYTES as u64)?;
         Self::parse(&bytes)
             .map_err(|e| format!("Invalid Quill dictionary “{}”: {e}", path.display()))
     }
@@ -212,6 +210,35 @@ mod tests {
         );
         assert!(!dict.contains("NeverLearned"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_named_pipe_is_refused_instead_of_blocking() {
+        let dir = std::env::temp_dir().join(format!("quill-dict-pipe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pipe = dir.join("words.txt");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        // Nothing writes to the pipe; opening it for reading would hang.
+        let error = Dictionary::load(&pipe)
+            .err()
+            .expect("a pipe is not a dictionary");
+        assert!(error.contains("Not a regular file"), "{error}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_dictionary_past_the_limit_is_refused_unread() {
+        let dir = std::env::temp_dir().join(format!("quill-dict-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let big = dir.join("words.txt");
+        std::fs::write(&big, vec![b'a'; MAX_BYTES + 1]).unwrap();
+        assert!(Dictionary::load(&big).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

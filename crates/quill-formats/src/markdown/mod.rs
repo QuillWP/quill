@@ -6,7 +6,7 @@ mod read;
 mod write;
 
 pub use loss::losses;
-pub use read::read;
+pub use read::{read, read_trusting};
 pub use write::{PictureFile, write, write_with_pictures};
 
 use quill_core::Document;
@@ -418,6 +418,101 @@ fn main() {}
         )
         .unwrap();
         assert!(!dir.join("Plain_images").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A folder with a document folder inside it and a picture in each.
+    fn picture_tree(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("quill-md-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("doc/sub")).unwrap();
+        std::fs::create_dir_all(dir.join("private")).unwrap();
+        let png = crate::odt_read::base64_decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==").unwrap();
+        // Different trailing bytes keep the pictures from merging into one
+        // object when they are loaded.
+        for (n, p) in ["doc/inside.png", "doc/sub/deeper.png", "private/photo.png"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut bytes = png.clone();
+            bytes.push(n as u8);
+            std::fs::write(dir.join(p), &bytes).unwrap();
+        }
+        let dir = dir.canonicalize().unwrap();
+        // Windows canonicalizes to a verbatim path (\\?\C:\...), whose
+        // backslashes Markdown reads as escapes. Use the ordinary form.
+        #[cfg(windows)]
+        let dir = std::path::PathBuf::from(dir.to_string_lossy().trim_start_matches(r"\\?\"));
+        dir
+    }
+
+    #[test]
+    fn pictures_outside_the_folder_wait_for_permission() {
+        let dir = picture_tree("outside");
+        let doc = dir.join("doc");
+        let absolute = dir.join("private/photo.png");
+        // Elsewhere the link is simply missing, and missing pictures are not
+        // asked about.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(dir.join("private"), doc.join("link")).unwrap();
+        let text = format!(
+            "![a](inside.png)\n\n![b](sub/deeper.png)\n\n![c](../private/photo.png)\n\n\
+             ![d]({})\n\n![e](file://{})\n\n![f](link/photo.png)\n\n![g](..%2Fprivate%2Fphoto.png)\n\n\
+             ![h](sub/../inside.png)",
+            absolute.display(),
+            absolute.display()
+        );
+        let (doc_in, report) = read(&text, Some(&doc));
+        // Inside, in a subfolder, and wandering back in with "..": loaded.
+        assert_eq!(doc_in.objects.len(), 2);
+        assert!(
+            report
+                .notes()
+                .contains(&crate::report::MARKDOWN_OUTSIDE_PICTURES)
+        );
+        // One outside file, however it was named (relative, absolute, file
+        // URL, through a symlink, percent-encoded), named as the system
+        // spells it in full (on Windows, the verbatim \\?\ form).
+        assert_eq!(
+            report.outside_pictures,
+            vec![absolute.canonicalize().unwrap()]
+        );
+        // With permission they all load.
+        let (doc_all, report) = read_trusting(&text, Some(&doc), true);
+        assert_eq!(doc_all.objects.len(), 3);
+        assert!(report.outside_pictures.is_empty());
+        assert!(
+            !report
+                .notes()
+                .contains(&crate::report::MARKDOWN_OUTSIDE_PICTURES)
+        );
+        // No folder to be inside of: nothing local is read unasked.
+        let (none, report) = read(&format!("![x]({})", absolute.display()), None);
+        assert_eq!(none.objects.len(), 0);
+        assert_eq!(report.outside_pictures.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_pictures_are_not_asked_about() {
+        let dir = picture_tree("missing");
+        let (_, report) = read("![x](../private/nope.png)", Some(&dir.join("doc")));
+        assert!(report.outside_pictures.is_empty());
+        assert!(report.notes().contains(&crate::report::MARKDOWN_PICTURES));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_file_lists_outside_pictures_and_trusting_loads_them() {
+        let dir = picture_tree("open");
+        let file = dir.join("doc/Notes.md");
+        std::fs::write(&file, "![c](../private/photo.png)\n").unwrap();
+        let (doc, report) = crate::load_reported(&file, true).unwrap();
+        assert_eq!(doc.objects.len(), 0);
+        assert_eq!(report.outside_pictures.len(), 1);
+        let (doc, report) = crate::load_reported_trusting(&file, true, true).unwrap();
+        assert_eq!(doc.objects.len(), 1);
+        assert!(report.outside_pictures.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

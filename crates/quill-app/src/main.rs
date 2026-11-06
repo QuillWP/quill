@@ -29,6 +29,8 @@ mod lang_dialogs;
 mod language;
 mod licenses;
 mod link_dialog;
+#[cfg(target_os = "linux")]
+mod linux_window;
 mod listbox;
 mod local_dictionary;
 #[cfg(target_os = "macos")]

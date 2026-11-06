@@ -23,7 +23,7 @@ class PackageTests(unittest.TestCase):
                      "fuzz/fuzz_targets/example.rs", "fuzz/support/oracle.rs", "fuzz/Cargo.toml",
                      "assets/quill.icns", "assets/quill-document.icns", "assets/quill-about.jpg",
                      "assets/quill.ico", "assets/quill-document.ico", "assets/quill-document.png",
-                     "tools/quill-mime.xml"]:
+                     "tools/quill-mime.xml", "tools/install-linux.sh"]:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"fixture")
@@ -33,7 +33,7 @@ class PackageTests(unittest.TestCase):
     def test_source_keeps_images_data_and_working_files_but_excludes_builds(self):
         for name in ["target/huge.bin", "crates/target/huge.bin", "fuzz/target/huge.bin",
                      "fuzz/corpus/input", "fuzz/artifacts/crash", "Quill.app/generated",
-                     "drafts/icon.png", "lucas/private.md",
+                     "drafts/icon.png", "local/notes.md",
                      ".git/private", "tools/__pycache__/module.pyc", "assets/.DS_Store"]:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -48,7 +48,7 @@ class PackageTests(unittest.TestCase):
                 self.assertIn("Quill/" + name, names)
             self.assertFalse(any("huge.bin" in name or "corpus/" in name or ".git/" in name
                                  or ".DS_Store" in name or "__pycache__" in name
-                                 or "drafts/" in name or "lucas/" in name for name in names))
+                                 or "drafts/" in name or "local/" in name for name in names))
         self.assertEqual((self.output / "keep-existing-package.zip").read_bytes(), b"preserved")
 
     def test_native_archives_include_runtime_data_licenses_and_executable(self):

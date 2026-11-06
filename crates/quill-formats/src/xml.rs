@@ -230,11 +230,15 @@ impl Element {
         out
     }
 
-    /// An integer attribute.
+    /// An integer attribute. The value is held to +/-1,000,000, far past
+    /// any legal length or count, so the negation, absolute value and
+    /// scaling that readers do next cannot overflow. NaN reads as absent.
     pub fn int(&self, name: &str) -> Option<i32> {
+        const LIMIT: f64 = 1_000_000.0;
         self.attr(name)
             .and_then(|v| v.trim().parse::<f64>().ok())
-            .map(|f| f.round() as i32)
+            .filter(|f| !f.is_nan())
+            .map(|f| f.round().clamp(-LIMIT, LIMIT) as i32)
     }
 
     /// A WordprocessingML on/off property: present means on unless its

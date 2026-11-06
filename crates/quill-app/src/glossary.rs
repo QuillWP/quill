@@ -20,12 +20,16 @@ fn file() -> Option<std::path::PathBuf> {
     crate::settings::sibling("Quill Glossary", "Quill Glossary.txt", "glossary")
 }
 
+/// The glossary is read whole at startup; a larger or non-regular file is
+/// ignored instead of read.
+const MAX_GLOSSARY_BYTES: u64 = 8 << 20;
+
 fn with_entries<R>(f: impl FnOnce(&mut Vec<Entry>) -> R) -> R {
     ENTRIES.with(|e| {
         let mut e = e.borrow_mut();
         let list = e.get_or_insert_with(|| {
             file()
-                .and_then(|p| std::fs::read(p).ok())
+                .and_then(|p| quill_formats::read_file_with_limit(&p, MAX_GLOSSARY_BYTES).ok())
                 .map(|b| parse(&b))
                 .unwrap_or_default()
         });

@@ -51,6 +51,22 @@ impl App {
         }
         // Runs after anything that opens, saves or closes a document.
         self.note_session();
+        #[cfg(target_os = "linux")]
+        {
+            self.ensure_fonts();
+            for (id, w) in &self.windows {
+                let list = self.window_list(*id);
+                let env = Env {
+                    font_names: &self.font_names,
+                    font_families: &self.font_families,
+                    recent: &self.recent,
+                    windows: &list,
+                };
+                let (menus, actions) = app_menus::build(&w.st.context(&env));
+                w.window
+                    .sync_menus(&menus, &actions, w.st.modal_dialog_open());
+            }
+        }
         #[cfg(target_os = "macos")]
         {
             self.ensure_fonts();
@@ -99,7 +115,7 @@ impl App {
     }
 
     /// Do what a menu item chose, for the window in front.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub(super) fn menu_action(&mut self, el: &ActiveEventLoop, action: Action) {
         // While a text field in a dialog is being edited (Find, Replace and
         // the like), Cut, Copy, Paste, Select All and Undo are the field's.
@@ -119,6 +135,7 @@ impl App {
         {
             return;
         }
+        #[cfg(target_os = "macos")]
         if self.preferences.as_ref().is_some_and(|p| p.is_modal()) {
             if let Some(preferences) = &self.preferences {
                 preferences.activate();
@@ -126,6 +143,7 @@ impl App {
             return;
         }
         match (action, front) {
+            #[cfg(target_os = "macos")]
             (Action::Cmd(Cmd::Preferences), front)
                 if front.is_none() || self.preferences.is_some() =>
             {

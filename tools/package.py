@@ -137,6 +137,14 @@ def copy_common(destination: Path, mac: bool = False) -> None:
     shutil.copy2(notices, destination / "THIRD-PARTY-NOTICES.txt")
 
 
+def unix_modes(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    """Set the permissions a tar.gz unpacks with, rather than taking them
+    from the disk: a package built on Windows has no execute bits to copy."""
+    executable = info.name.rsplit("/", 1)[-1] in ("quill", "install-linux.sh")
+    info.mode = 0o755 if info.isdir() or executable else 0o644
+    return info
+
+
 def portable_package(executable: Path, output: Path, version: str,
                      system: str, arch: str, label: str = "") -> Path:
     name = f"quill-{version}-{system}-{arch}{label}"
@@ -154,6 +162,7 @@ def portable_package(executable: Path, output: Path, version: str,
                 shutil.copy2(source, stage / asset)
         if system == "linux":
             shutil.copy2(ROOT / "tools/quill.desktop", stage / "quill.desktop")
+            shutil.copy2(ROOT / "tools/install-linux.sh", stage / "install-linux.sh")
         archive = Path(tmp) / destination.name
         if system == "windows":
             with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
@@ -162,7 +171,7 @@ def portable_package(executable: Path, output: Path, version: str,
                         bundle.write(path, path.relative_to(stage))
         else:
             with tarfile.open(archive, "w:gz") as bundle:
-                bundle.add(stage, arcname=name)
+                bundle.add(stage, arcname=name, filter=unix_modes)
         archive.replace(destination)
     return destination
 

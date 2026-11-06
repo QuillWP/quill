@@ -24,6 +24,10 @@ impl Form {
 }
 
 /// Radio button ids, one for each form offered.
+/// The most encoded picture data taken from the clipboard or a file,
+/// matching the Markdown reader's per-picture limit.
+pub const MAX_PICTURE_BYTES: u64 = 64 << 20;
+
 const IDS: [&str; 3] = ["form0", "form1", "form2"];
 
 /// The dialog, offering `forms` (at least one) with the first chosen.
@@ -75,6 +79,11 @@ pub fn clipboard_image() -> Option<Vec<u8>> {
                 continue;
             }
             let len: usize = msg_send![data, length];
+            // NSPasteboard has produced the NSData by now, so this cannot
+            // stop the provider's own allocation; it stops our copy of it.
+            if len > MAX_PICTURE_BYTES as usize {
+                continue;
+            }
             let bytes: *const std::ffi::c_void = msg_send![data, bytes];
             if !bytes.is_null() && len > 0 {
                 return Some(std::slice::from_raw_parts(bytes.cast::<u8>(), len).to_vec());

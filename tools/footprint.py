@@ -50,11 +50,14 @@ def binary_path():
 
 
 def package_size():
-    found = []
-    for pattern in ("*.dmg", "*.tar.gz", "*.zip"):
-        found += glob.glob(os.path.join(ROOT, "dist", pattern))
+    # Only this system's own package: dist/ can also hold packages built
+    # elsewhere, and the source zip.
+    pattern = {"Darwin": "*.dmg", "Linux": "*.tar.gz", "Windows": "*.zip"}.get(
+        platform.system(), "*.zip")
+    found = glob.glob(os.path.join(ROOT, "dist", pattern))
     # Debug packages are far larger and are not what ships.
-    found = [p for p in found if "-debug" not in os.path.basename(p)]
+    found = [p for p in found
+             if "-debug" not in os.path.basename(p) and "-source" not in os.path.basename(p)]
     return max((os.path.getsize(p) for p in found), default=None)
 
 

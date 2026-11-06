@@ -37,10 +37,9 @@ for all three platforms through GitHub Actions. Only tag pushes create a draft r
       (sources, licenses);
       the files in data/licenses ship with every package (they do, as part
       of data/).
-- [ ] Git history holds no copied artwork from the original product, such as
-      pixel copies of its toolbar icons. Before the repository goes public,
-      check every commit that will be published, or publish a fresh history,
-      and check the icons are clearly Quill's own.
+- [ ] No artwork copied from the original product, such as pixel copies of
+      its toolbar icons, is in the repository; the icons are clearly Quill's
+      own.
 - [ ] The bundle identifier in tools/Info.plist (com.quillwp.Quill) is the one
       to keep: changing it later loses users' settings on the Mac.
 - [ ] For a public macOS build, import the Developer ID Application
@@ -64,8 +63,9 @@ for all three platforms through GitHub Actions. Only tag pushes create a draft r
 - [ ] Windows (.zip): unzip anywhere, run quill.exe, Spelling works, Open
       and Save dialogs appear, printing hands a PDF to the default handler.
 - [ ] Linux (.tar.gz): runs on X11 and Wayland, Spelling works, printing
-      goes through lp. Install the .desktop file and icon to get it in the
-      application menu.
+      goes through lp. Run install-linux.sh from the unpacked folder to get
+      Quill in the application menu with its icon (Wayland shows no icon
+      without it).
 - [ ] Each opens a .docx made by current Microsoft Word, and Word opens
       what Quill saves.
 
@@ -73,5 +73,5 @@ for all three platforms through GitHub Actions. Only tag pushes create a draft r
 
 - [ ] `git tag vX.Y.Z && git push --tags` runs the Release workflow, which
       attaches the three packages to a draft GitHub release.
-- [ ] Write the release notes (what is new, known gaps from the plan), check
+- [ ] Write the release notes (what is new, known gaps), check
       the attached packages download and open, then publish the draft.

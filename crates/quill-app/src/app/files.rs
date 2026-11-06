@@ -19,6 +19,57 @@ fn font_reminder() {
     }
 }
 
+/// A Markdown file names pictures outside its own folder. They stay out
+/// unless the person says to load them, and Don't Load is the default
+/// button so a stray Return loads nothing. Show Paths lists the files and
+/// comes back to the question.
+fn ask_to_load_outside_pictures(name: &str, pictures: &[PathBuf]) -> bool {
+    const SHOWN: usize = 15;
+    let count = pictures.len();
+    let what = if count == 1 {
+        "1 picture outside its folder".to_string()
+    } else {
+        format!("{count} pictures outside its folder")
+    };
+    loop {
+        let answer = message_box(
+            rfd::MessageLevel::Warning,
+            "Quill",
+            format!(
+                "\u{201c}{name}\u{201d} links to {what}.\n\nLoading a picture copies it \
+                 into the document, and it is included when you save or share the document. \
+                 Load them only if you trust this file."
+            ),
+            rfd::MessageButtons::YesNoCancelCustom(
+                "Don't Load".into(),
+                "Show Paths".into(),
+                "Load Pictures".into(),
+            ),
+        );
+        match answer {
+            rfd::MessageDialogResult::Custom(label) if label == "Load Pictures" => return true,
+            rfd::MessageDialogResult::Custom(label) if label == "Show Paths" => {
+                let mut list = pictures
+                    .iter()
+                    .take(SHOWN)
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if count > SHOWN {
+                    list.push_str(&format!("\n{} more.", count - SHOWN));
+                }
+                message_box(
+                    rfd::MessageLevel::Info,
+                    "Quill",
+                    format!("Pictures outside the folder:\n\n{list}"),
+                    rfd::MessageButtons::Ok,
+                );
+            }
+            _ => return false,
+        }
+    }
+}
+
 /// Whether two paths name one file, however each was written.
 fn same_file(a: &Path, b: &Path) -> bool {
     a == b
@@ -44,7 +95,7 @@ impl App {
                 continue;
             }
             let rtf = crate::settings::with(|s| s.interpret_rtf);
-            let (mut doc, report) = match quill_formats::load_reported(path, rtf) {
+            let (mut doc, mut report) = match quill_formats::load_reported(path, rtf) {
                 Ok(d) => d,
                 // A file named as a document that holds plain text can
                 // still be read, as text.
@@ -82,6 +133,12 @@ impl App {
                     continue;
                 }
             };
+            if !report.outside_pictures.is_empty()
+                && ask_to_load_outside_pictures(&file_name(path), &report.outside_pictures)
+                && let Ok(trusted) = quill_formats::load_reported_trusting(path, rtf, true)
+            {
+                (doc, report) = trusted;
+            }
             if report.no_page {
                 crate::settings::with(|s| doc.props.take_paper(&s.document));
             }

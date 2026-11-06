@@ -589,6 +589,7 @@ impl Dialog {
     }
 
     /// Choose row `row` of list `id`, as a click on it does.
+    #[cfg(any(target_os = "macos", test))]
     pub fn select_row(&mut self, id: &str, row: usize) {
         if let Some(item) = self.item_mut(id) {
             let r = item.rect;
@@ -656,11 +657,9 @@ impl Dialog {
         }
     }
 
-    /// Whether the dialog has items only its own canvas drawing can show
-    /// (an owner-drawn area, a color box, a slider), so it cannot be a
-    /// native window.
     /// Whether something in the dialog can only be drawn by Quill. A color
     /// button is not: native dialogs make it an ordinary button.
+    #[cfg(target_os = "macos")]
     pub fn needs_canvas(&self) -> bool {
         self.items.iter().any(|i| {
             matches!(
@@ -1878,7 +1877,13 @@ pub mod units {
             "li" | "line" | "lines" => 240.0,
             _ => return None,
         };
-        Some((n * per).round() as Twips)
+        // Refuse anything past a million twips (about 700 inches) instead
+        // of letting the cast saturate; i32::MIN has no absolute value.
+        let t = (n * per).round();
+        if !t.is_finite() || t.abs() > 1_000_000.0 {
+            return None;
+        }
+        Some(t as Twips)
     }
 
     /// A length in the unit chosen in Preferences: "1.25 in", "3.17 cm".
@@ -1951,6 +1956,25 @@ pub mod units {
             assert_eq!(parse("-0.5 in", "in"), Some(-720));
             assert_eq!(parse("", "in"), Some(0));
             assert_eq!(parse("abc", "in"), None);
+        }
+
+        #[test]
+        fn rejects_out_of_range_lengths() {
+            for text in [
+                "-999999999999 pt",
+                "999999999999 pt",
+                "99999999999999999999999999999999999999 in",
+                "-99999999999999999999999999999999999999",
+                "1000000 in",
+            ] {
+                assert_eq!(parse(text, "in"), None, "{text}");
+            }
+            assert_eq!(parse("-1000000", "pt"), None);
+            assert_eq!(parse("1e5 pt", "in"), None);
+            assert_eq!(parse("\u{ff11}\u{ff12} pt", "in"), None);
+            assert_eq!(parse("-1.0 in", "in"), Some(-1440));
+            // The limit itself is still accepted.
+            assert_eq!(parse("50000 pt", "in"), Some(1_000_000));
         }
 
         #[test]

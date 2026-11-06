@@ -285,7 +285,9 @@ impl Writer<'_> {
         );
         let mut start = 0;
         for run in &p.runs {
-            let link = quill_core::link::get(run.chp.link);
+            // A link whose address a browser would run as script or open as
+            // data goes out as plain text, not as an <a>.
+            let link = quill_core::link::get(run.chp.link).filter(|l| safe_href(&l.url));
             let mut chp = run.chp;
             if link.is_some() && !self.inline {
                 // The link's class gives its color.
@@ -462,6 +464,28 @@ fn character_style_metadata(doc: &Document, out: &mut String) {
     }
 }
 
+/// Whether a browser may be handed `url` as an <a href>. The scheme is
+/// read the way a browser reads it: leading control characters and spaces
+/// are dropped and tabs and newlines inside the address are ignored, so
+/// "  JaVa\nScript:..." is still seen as "javascript". Only web, mail, phone
+/// and file-transfer schemes pass, plus addresses with no scheme at all
+/// (relative paths, "?query" and "#fragment").
+fn safe_href(url: &str) -> bool {
+    let cleaned: String = url
+        .trim_start_matches(|c: char| c.is_ascii_control() || c == ' ')
+        .chars()
+        .filter(|c| !c.is_ascii_control())
+        .collect();
+    let head: &str = cleaned.split(['/', '?', '#']).next().unwrap_or("");
+    let Some((scheme, _)) = head.split_once(':') else {
+        return true;
+    };
+    matches!(
+        scheme.trim().to_ascii_lowercase().as_str(),
+        "http" | "https" | "mailto" | "ftp" | "tel"
+    )
+}
+
 pub fn write(doc: &Document) -> Vec<u8> {
     let mut out = format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title>\n<style>\n",
@@ -536,4 +560,57 @@ pub fn write_clipboard(doc: &Document) -> String {
     .story(&doc.main.paras, &mut out, false);
     out.push_str("</div>");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exported(href: &str) -> (String, String) {
+        let page = format!("<p><a href=\"{href}\">Click me</a></p>");
+        let doc = read_file(page.as_bytes()).unwrap().0;
+        (
+            String::from_utf8(write(&doc)).unwrap(),
+            write_clipboard(&doc),
+        )
+    }
+
+    #[test]
+    fn script_and_data_links_leave_as_plain_text() {
+        for href in [
+            "javascript:alert(1)",
+            "JaVaScRiPt:alert(1)",
+            "  javascript:alert(1)",
+            "java&#x09;script:alert(1)",
+            "java&#10;script:alert(1)",
+            "&#106;avascript:alert(1)",
+            "\u{1}javascript:alert(1)",
+            "data:text/html,<b>x</b>",
+            "vbscript:msgbox(1)",
+        ] {
+            let (file, clip) = exported(href);
+            for out in [&file, &clip] {
+                assert!(!out.contains("<a "), "{href}: {out}");
+                assert!(!out.to_ascii_lowercase().contains("script:"), "{href}");
+                assert!(out.contains("Click me"), "{href}");
+            }
+        }
+    }
+
+    #[test]
+    fn web_mail_relative_and_fragment_links_survive() {
+        for href in [
+            "https://example.com/a?b=c:d",
+            "HTTP://example.com",
+            "mailto:a@example.com",
+            "page.html",
+            "dir/page.html",
+            "./a:b",
+            "?q=javascript:x",
+        ] {
+            let (file, clip) = exported(href);
+            assert!(file.contains("<a href="), "{href}");
+            assert!(clip.contains("<a href="), "{href}");
+        }
+    }
 }

@@ -1299,16 +1299,16 @@ mod tests {
     #[test]
     fn symbol_fonts_draw_their_symbols_for_typed_letters() {
         let mut fonts = system();
-        for (family, real_name) in [
-            ("Wingdings", "Wingdings"),
-            ("Zapf Dingbats", "ZapfDingbats"),
-            ("Symbol", "Symbol"),
-        ] {
+        for family in ["Wingdings", "Zapf Dingbats", "Symbol"] {
             if !fonts.has_family(family) {
                 continue;
             }
             let key = fonts.resolve(family, false, false);
-            assert!(fonts.face(key.face).name.starts_with(real_name));
+            // The font itself, not a stand-in: only symbol fonts carry a
+            // symbol table. (Face names come from file names, which differ
+            // by system: Windows keeps Wingdings in wingding.ttf.)
+            let face = fonts.face(key.face);
+            assert!(face.symbols.is_some(), "{family} resolved to {}", face.name);
             let j = fonts.glyph_in(key, 'J');
             assert_ne!(j.0, 0, "{family} draws J");
             // Word's private-use form of the same code draws the same.
@@ -1316,6 +1316,7 @@ mod tests {
             // The symbol comes from the font itself, not a fallback.
             assert_eq!(fonts.glyph(key, 'J'), (key, j));
         }
+        #[cfg(target_os = "macos")]
         if fonts.has_family("Symbol") {
             // Apple's Symbol keeps its Unicode Greek as well.
             let key = fonts.resolve("Symbol", false, false);

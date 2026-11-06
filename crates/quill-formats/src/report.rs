@@ -7,6 +7,10 @@ pub struct ImportReport {
     /// The file's format has no page size or margins (HTML, Markdown, plain
     /// text), so the ones it came with are only Quill's built-in defaults.
     pub no_page: bool,
+    /// Pictures a Markdown file names outside its own folder (and its
+    /// subfolders), as the files they resolve to. They are left out unless
+    /// the person chose to load them (`load_reported_trusting`).
+    pub outside_pictures: Vec<std::path::PathBuf>,
 }
 
 impl ImportReport {
@@ -81,6 +85,8 @@ pub const MARKDOWN_LINKED_PICTURES: &str =
     "Pictures the Markdown links to on the web were kept as links; Quill never fetches them.";
 pub const MARKDOWN_HTML: &str = "HTML written in the Markdown was kept as text, apart from underline, superscript, subscript and line breaks.";
 pub const MARKDOWN_NOTES: &str = "Footnotes written as [^1] were kept as ordinary text.";
+pub const MARKDOWN_OUTSIDE_PICTURES: &str =
+    "Pictures the file names outside its own folder were left out until you choose to load them.";
 pub const MARKDOWN_PICTURES: &str =
     "Pictures the file names were left out where Quill could not find them beside the file.";
 pub const ENCODING: &str =

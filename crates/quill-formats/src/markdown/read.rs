@@ -25,6 +25,12 @@ const MAX_DEPTH: usize = 24;
 const MAX_COLUMNS: usize = 255;
 /// The largest picture file read from beside the Markdown file.
 const MAX_PICTURE: u64 = 64 << 20;
+/// The most picture bytes one document takes in all, however many
+/// pictures it names.
+const MAX_PICTURES_TOTAL: u64 = 256 << 20;
+/// The most outside pictures listed in the report (all are still counted
+/// as skipped).
+const MAX_OUTSIDE_LISTED: usize = 1000;
 
 /// Twips a list level and a quote level indent by.
 pub(super) const LIST_INDENT: i32 = 360;
@@ -898,6 +904,11 @@ struct Reader {
     images: HashMap<String, Option<u32>>,
     /// Inside a link's label, where a web address is not made a link again.
     in_link: usize,
+    /// Read pictures from outside the document's folder too. Off unless the
+    /// person said so for this document.
+    trust_outside: bool,
+    /// Picture bytes taken so far, against `MAX_PICTURES_TOTAL`.
+    picture_bytes: u64,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -932,6 +943,8 @@ impl Reader {
             refs: HashMap::new(),
             images: HashMap::new(),
             in_link: 0,
+            trust_outside: false,
+            picture_bytes: 0,
         }
     }
 
@@ -1295,7 +1308,27 @@ impl Reader {
                 Some(base) => base.join(name),
                 None => PathBuf::from(name),
             };
-            match crate::read_file_with_limit(&path, MAX_PICTURE) {
+            // Decide where the name really points: ".." and symlinks are
+            // resolved first, so what is checked is the file that would be
+            // read. A file that is not there is simply missing.
+            let Ok(real) = path.canonicalize() else {
+                self.report.note(notes::MARKDOWN_PICTURES);
+                return None;
+            };
+            let inside = self
+                .base
+                .as_ref()
+                .and_then(|b| b.canonicalize().ok())
+                .is_some_and(|b| real.starts_with(b));
+            if !inside && !self.trust_outside {
+                self.report.note(notes::MARKDOWN_OUTSIDE_PICTURES);
+                let listed = &mut self.report.outside_pictures;
+                if listed.len() < MAX_OUTSIDE_LISTED && !listed.contains(&real) {
+                    listed.push(real);
+                }
+                return None;
+            }
+            match crate::read_file_with_limit(&real, MAX_PICTURE) {
                 Ok(bytes) => bytes,
                 Err(_) => {
                     self.report.note(notes::MARKDOWN_PICTURES);
@@ -1303,6 +1336,11 @@ impl Reader {
                 }
             }
         };
+        self.picture_bytes = self.picture_bytes.saturating_add(bytes.len() as u64);
+        if self.picture_bytes > MAX_PICTURES_TOTAL {
+            self.report.note(notes::MARKDOWN_PICTURES);
+            return None;
+        }
         let Some(mut pic) = crate::images::picture(bytes) else {
             self.report.note(notes::PICTURES);
             return None;
@@ -1654,12 +1692,24 @@ fn emphasis(toks: &mut [Tok]) {
 }
 
 /// Read Markdown. `base` is the folder the file is in, for pictures it
-/// names; nothing is fetched from the network.
+/// names; nothing is fetched from the network. Pictures outside that
+/// folder and its subfolders are left out and listed in the report.
 pub fn read(text: &str, base: Option<&Path>) -> (Document, ImportReport) {
+    read_trusting(text, base, false)
+}
+
+/// `read`, with the pictures outside the folder loaded too when
+/// `trust_outside` is true: the person has agreed to it for this document.
+pub fn read_trusting(
+    text: &str,
+    base: Option<&Path>,
+    trust_outside: bool,
+) -> (Document, ImportReport) {
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let mut lines: Vec<String> = text.split('\n').map(String::from).collect();
     let mut r = Reader::new(base);
+    r.trust_outside = trust_outside;
 
     // YAML front matter at the very top is kept as a block of code.
     let mut front = Vec::new();
@@ -1718,4 +1768,20 @@ pub fn read(text: &str, base: Option<&Path>) -> (Document, ImportReport) {
     r.doc.main.paras = paras;
     r.doc.forget_history();
     (r.doc, r.report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_document_stops_taking_pictures_at_the_total_budget() {
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let src = format!("data:image/png;base64,{png}");
+        let mut r = Reader::new(None);
+        assert!(r.load_picture(&src).is_some());
+        r.picture_bytes = MAX_PICTURES_TOTAL;
+        assert!(r.load_picture(&src).is_none());
+        assert!(r.report.notes().contains(&notes::MARKDOWN_PICTURES));
+    }
 }

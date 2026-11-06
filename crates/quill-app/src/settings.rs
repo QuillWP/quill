@@ -1045,6 +1045,15 @@ thread_local! {
 static PERSIST: AtomicBool = AtomicBool::new(false);
 
 /// Where the settings file lives.
+/// A settings file is a few KB of text; anything past 1 MiB, or not a
+/// regular file, is refused before it is read.
+const MAX_SETTINGS_BYTES: u64 = 1 << 20;
+
+pub fn read_text(path: &std::path::Path) -> Result<String, String> {
+    let bytes = quill_formats::read_file_with_limit(path, MAX_SETTINGS_BYTES)?;
+    String::from_utf8(bytes).map_err(|_| "The file is not UTF-8 text.".to_string())
+}
+
 fn path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if cfg!(target_os = "macos") {
@@ -1097,7 +1106,7 @@ pub fn load() {
     defaults.document.page_height = h;
     CURRENT.with(|c| *c.borrow_mut() = defaults);
     if let Some(p) = path()
-        && let Ok(text) = std::fs::read_to_string(&p)
+        && let Ok(text) = read_text(&p)
     {
         let s = Settings::from_text_with_defaults(&text, get());
         // Write the file back in its full layout when it is missing
@@ -1281,6 +1290,35 @@ mod tests {
             std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
             1
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn settings_files_are_read_with_a_size_limit_and_only_when_regular() {
+        let dir = std::env::temp_dir().join(format!("quill-settings-read-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = dir.join("ok.txt");
+        std::fs::write(&ok, "unit = cm\n").unwrap();
+        assert_eq!(read_text(&ok).unwrap(), "unit = cm\n");
+        let big = dir.join("big.txt");
+        std::fs::write(&big, vec![b'#'; MAX_SETTINGS_BYTES as usize + 1]).unwrap();
+        assert!(read_text(&big).unwrap_err().contains("too large"));
+        let binary = dir.join("binary.txt");
+        std::fs::write(&binary, [0xff, 0xfe]).unwrap();
+        assert!(read_text(&binary).is_err());
+        assert!(read_text(&dir).unwrap_err().contains("Not a regular file"));
+        #[cfg(unix)]
+        {
+            let pipe = dir.join("pipe");
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(&pipe)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(read_text(&pipe).unwrap_err().contains("Not a regular file"));
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

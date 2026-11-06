@@ -5,6 +5,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
+repository.workspace = true
+publish.workspace = true
 
 [[bin]]
 name = "quill"
@@ -57,6 +59,10 @@ windows = { version = "0.62", default-features = false, features = ["Win32_Globa
 
 [target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
 rfd = { version = "0.17", default-features = false, features = ["gtk3"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+x11-dl = "2.21"
 
 [target.'cfg(unix)'.dependencies]
 # Correct platform declarations for time_t and struct tm.

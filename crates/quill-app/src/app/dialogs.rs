@@ -443,6 +443,7 @@ impl WinState {
         }
     }
 
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     pub(super) fn modal_dialog_open(&self) -> bool {
         self.dialogs.last().is_some_and(|(_, d)| !d.modeless)
     }

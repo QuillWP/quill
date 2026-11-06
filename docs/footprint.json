@@ -2,8 +2,8 @@
   "Darwin-arm64": {
     "binary": 4916000,
     "data": 1429371,
-    "memory": 31080448,
-    "package": 5066904
+    "memory": 30900224,
+    "package": 5235338
   },
   "Linux-x86_64": {
     "binary": 7205136,
