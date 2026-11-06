@@ -12,6 +12,21 @@ pub enum Clip {
     Rich(RichContent),
     /// Text from another application.
     Plain(String),
+    /// A picture another application copied (PNG, JPEG, TIFF and so on),
+    /// with no text beside it: a screenshot, or Copy Image in a browser.
+    Picture(Vec<u8>),
+}
+
+/// Whether a copied picture is pasted rather than the text copied with it.
+/// Programs that copy formatted text often add a picture of it too, so the
+/// text wins, unless it is only the picture's web address.
+fn picture_wins(text: Option<&str>) -> bool {
+    let text = text.map_or("", str::trim);
+    text.is_empty()
+        || (!text.contains(char::is_whitespace)
+            && ["http://", "https://", "file://"]
+                .iter()
+                .any(|p| text.starts_with(p)))
 }
 
 /// Standard clipboard representations plus an exact in-process selection.
@@ -52,6 +67,7 @@ impl Clipboard {
     pub fn fragment(&mut self) -> Option<Fragment> {
         match self.get()? {
             Clip::Rich(f) => Some(f.fragment),
+            Clip::Picture(_) => None,
             Clip::Plain(t) => {
                 let t = t.replace("\r\n", "\n").replace('\r', "\n");
                 let mut lines: Vec<&str> = t.split('\n').collect();
@@ -178,6 +194,11 @@ impl Clipboard {
             doc.keep_in_bounds();
             return Some(Clip::Rich(RichContent::from_document(doc, text.as_deref())));
         }
+        if picture_wins(text.as_deref())
+            && let Some(bytes) = crate::paste_special::clipboard_image()
+        {
+            return Some(Clip::Picture(bytes));
+        }
         text.map(Clip::Plain)
     }
 
@@ -189,6 +210,7 @@ impl Clipboard {
                 self.get().map(|c| match c {
                     Clip::Plain(s) => s,
                     Clip::Rich(r) => r.fragment.plain_text(),
+                    Clip::Picture(_) => String::new(),
                 })
             })
     }
@@ -197,6 +219,15 @@ impl Clipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_copied_picture_wins_only_over_no_text_or_its_address() {
+        assert!(picture_wins(None));
+        assert!(picture_wins(Some("  ")));
+        assert!(picture_wins(Some("https://example.com/cat.png")));
+        assert!(!picture_wins(Some("A paragraph copied from Word")));
+        assert!(!picture_wins(Some("see https://example.com")));
+    }
 
     #[test]
     fn equal_plain_text_does_not_reuse_stale_formatting_after_an_external_copy() {

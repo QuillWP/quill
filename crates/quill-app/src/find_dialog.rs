@@ -7,7 +7,7 @@ use crate::docview::{Clipboard, DocView};
 use quill_core::find::{
     self, CharSpec, Direction, FIND_SPECIALS, ParaSpec, Pattern, REPLACE_SPECIALS, Replacement,
 };
-use quill_core::props::{LineSpacing, WORD_COLORS};
+use quill_core::props::LineSpacing;
 use quill_core::{Position, Selection};
 use std::cell::RefCell;
 
@@ -40,6 +40,14 @@ impl Search {
             self.find_chp.clone(),
             self.find_pap.clone(),
         )
+    }
+
+    /// The pattern as `view` shows the text: while deleted text is hidden,
+    /// Find looks past it, as the reader does.
+    pub fn pattern_in(&self, view: &DocView) -> Pattern {
+        let mut pat = self.pattern();
+        pat.skip_deleted = !view.show_changes;
+        pat
     }
 
     pub fn replacement(&self) -> Replacement {
@@ -240,7 +248,7 @@ pub enum Hit {
 
 /// Find the next match from the selection and select it.
 pub fn find_next(view: &mut DocView, s: &Search) -> Hit {
-    let pat = s.pattern();
+    let pat = s.pattern_in(view);
     if pat.is_empty() {
         return Hit::NotFound;
     }
@@ -275,7 +283,7 @@ pub fn find_next(view: &mut DocView, s: &Search) -> Hit {
 
 /// Go on from the other end of the document after `ReachedEnd`.
 pub fn find_wrapped(view: &mut DocView, s: &Search) -> bool {
-    let pat = s.pattern();
+    let pat = s.pattern_in(view);
     let story = &view.doc.main;
     let found = if s.dir == UP {
         find::find(story, &pat, story.end(), Direction::Up)
@@ -302,8 +310,11 @@ pub fn replace(st: &mut FindState, view: &mut DocView, clip: &mut Clipboard) -> 
         } else {
             None
         };
+        // Find Next goes on from past the old text, which tracking keeps.
+        let past = find::FromEnd::new(&view.doc.main, b);
         let (_, e) = view.replace_found(a, b, &s.replacement(), s.match_case, frag.as_ref());
-        view.set_selection(Selection::caret(e));
+        let next = e.max(past.get(&view.doc.main));
+        view.set_selection(Selection::caret(next));
     }
     let r = find_next(view, &s);
     st.found = (r == Hit::Match).then(|| view.sel.range());
@@ -326,7 +337,13 @@ pub fn replace_all(st: &mut FindState, view: &mut DocView, clip: &mut Clipboard)
     } else {
         None
     };
-    let n = view.replace_all(&s.pattern(), &s.replacement(), from, to, frag.as_ref());
+    let n = view.replace_all(
+        &s.pattern_in(view),
+        &s.replacement(),
+        from,
+        to,
+        frag.as_ref(),
+    );
     st.found = None;
     (n, s.dir == SELECTION)
 }
@@ -368,12 +385,7 @@ pub fn character_spec(
         })
         .map_or(0, |i| i + 1);
     d.set_options("underline", u, ui);
-    let mut c = vec![String::new()];
-    c.extend(d.options("color"));
-    let ci = spec
-        .color
-        .and_then(|x| WORD_COLORS.iter().position(|(_, rgb)| *rgb == x))
-        .map_or(0, |i| i + 1);
+    let (c, ci) = crate::format_dialogs::color_options(spec.color, true);
     d.set_options("color", c, ci);
     for (id, v) in [
         ("bold", spec.bold),
@@ -424,10 +436,7 @@ pub fn read_character_spec(d: &Dialog, view: &mut DocView) -> Option<CharSpec> {
         .selected("underline")
         .checked_sub(1)
         .and_then(|i| crate::format_dialogs::UNDERLINE_KINDS.get(i).copied());
-    s.color = d
-        .selected("color")
-        .checked_sub(1)
-        .and_then(|i| WORD_COLORS.get(i).map(|(_, rgb)| *rgb));
+    s.color = crate::format_dialogs::color_named(&d.selected_text("color"));
     s.bold = d.check3_state("bold");
     s.italic = d.check3_state("italic");
     s.outline = d.check3_state("outline");
@@ -469,7 +478,7 @@ pub fn paragraph_spec(view: &DocView, spec: &ParaSpec) -> Dialog {
         Some(LineSpacing::Auto) => (1, String::new()),
         Some(LineSpacing::AtLeast(t)) => (2, units::points(t)),
         Some(LineSpacing::Exactly(t)) => (3, units::points(t)),
-        Some(LineSpacing::Multiple(m)) => (2, units::points(m as i32)),
+        Some(LineSpacing::Multiple(m)) => (4, crate::format_dialogs::lines(m)),
     };
     d.set_options("line", lines, rule);
     d.set_field("line_by", &by);
@@ -502,13 +511,10 @@ pub fn read_paragraph_spec(d: &Dialog) -> Option<ParaSpec> {
     s.left = field("left", "in")?;
     s.right = field("right", "in")?;
     s.first = field("first", "in")?;
-    let by = field("line_by", "pt")?.unwrap_or(0).abs();
+    // The popup has a blank "any" choice before the Paragraph dialog's.
     s.line = match d.selected("line") {
         0 => None,
-        1 => Some(LineSpacing::Auto),
-        2 if by == 0 => Some(LineSpacing::Auto),
-        2 => Some(LineSpacing::AtLeast(by)),
-        _ => Some(LineSpacing::Exactly(by.max(20))),
+        rule => crate::format_dialogs::read_line_rule(d, rule - 1)?,
     };
     s.page_break_before = d.check3_state("pagebreak");
     s.keep_with_next = d.check3_state("keepnext");
@@ -637,5 +643,41 @@ mod tests {
         assert_eq!(v.doc.main.paras[0].text, "dog dog dog");
         v.exec(crate::commands::Cmd::Undo, false, &mut clip);
         assert_eq!(v.doc.main.paras[0].text, "dog cat cat");
+    }
+    #[test]
+    fn replacing_tracked_deletions_moves_on() {
+        // "quietly" is already deleted and shown struck through. With
+        // tracking on, Replace All and Replace each replace it once and
+        // move on, instead of finding the old text again forever.
+        for all in [true, false] {
+            let mut v = view("The cat sat quietly.");
+            v.doc.props.track_changes = true;
+            v.doc.author = "Ada".into();
+            v.doc.delete(
+                quill_core::StoryId::Main,
+                Position::new(0, 12),
+                Position::new(0, 19),
+            );
+            let mut st = FindState {
+                replace: true,
+                search: Search {
+                    find: "quietly".into(),
+                    replace: "toward".into(),
+                    dir: if all { ALL } else { DOWN },
+                    ..Default::default()
+                },
+                found: None,
+            };
+            let mut clip = Clipboard::new();
+            if all {
+                assert_eq!(replace_all(&mut st, &mut v, &mut clip).0, 1);
+            } else {
+                assert_eq!(find_next(&mut v, &st.search), Hit::Match);
+                st.found = Some(v.sel.range());
+                assert_eq!(replace(&mut st, &mut v, &mut clip), Hit::ReachedEnd);
+            }
+            let accepted = quill_core::tracking::accepted(&v.doc.main.paras);
+            assert_eq!(accepted[0].text, "The cat sat toward.");
+        }
     }
 }

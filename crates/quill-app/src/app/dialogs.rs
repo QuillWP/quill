@@ -383,7 +383,9 @@ impl WinState {
                 Outcome::Cancel => {
                     self.dialogs.pop();
                 }
-                Outcome::Changed(id) if *kind == 0 => format_dialogs::character_changed(d, id),
+                Outcome::Changed(id) if *kind == 0 => {
+                    format_dialogs::character_changed(d, id, None)
+                }
                 _ => {}
             },
             Which::Alert(alert) => match o {

@@ -16,6 +16,41 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const SETTINGS_VERSION: u16 = 4;
 
+/// The view documents open in (Preferences > View).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DefaultView {
+    #[default]
+    Normal,
+    Outline,
+    PageLayout,
+}
+
+impl DefaultView {
+    pub const ALL: [DefaultView; 3] = [
+        DefaultView::Normal,
+        DefaultView::Outline,
+        DefaultView::PageLayout,
+    ];
+
+    /// The name Preferences shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            DefaultView::Normal => "Normal",
+            DefaultView::Outline => "Outline",
+            DefaultView::PageLayout => "Page Layout",
+        }
+    }
+
+    /// The name the settings file uses.
+    fn key(self) -> &'static str {
+        match self {
+            DefaultView::Normal => "normal",
+            DefaultView::Outline => "outline",
+            DefaultView::PageLayout => "page_layout",
+        }
+    }
+}
+
 /// The unit lengths are shown in (Preferences > General).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Unit {
@@ -68,8 +103,15 @@ pub struct Settings {
     // View
     pub show_hidden: bool,
     pub table_gridlines: bool,
+    /// How the gridlines look: their color, and dotted or solid.
+    pub table_gridline_color: u32,
+    pub table_gridline_dotted: bool,
+    /// The gray round the pages in Page Layout.
+    pub page_layout_color_background: u32,
+    /// The line round each page in Page Layout.
+    pub page_layout_color_page_border: u32,
     pub text_boundaries: bool,
-    pub open_page_layout: bool,
+    pub default_view: DefaultView,
     pub open_with_ruler: bool,
     pub open_with_formatting_toolbar: bool,
     pub open_with_paragraph_toolbar: bool,
@@ -91,6 +133,9 @@ pub struct Settings {
     /// Initial document-view scale as a percentage. This changes only the
     /// screen presentation, never document measurements or saved font sizes.
     pub document_zoom: f64,
+    /// Where the last document window closed and how big it was, in
+    /// points: left, top, width, height. New windows open there.
+    pub window_frame: Option<[i32; 4]>,
     /// Interface size as a percentage of the platform's usual size, for
     /// trying out sizes by editing the settings file.
     pub interface_scale: u16,
@@ -206,6 +251,7 @@ impl Default for Settings {
             view_toolbar: true,
             paragraph_toolbar_tabs: false,
             document_zoom: 150.0,
+            window_frame: None,
             interface_scale: 100,
             formatting_toolbar_scale: 110,
             toolbar_spacing: 24,
@@ -232,8 +278,12 @@ impl Default for Settings {
             formatted_clipboard: true,
             show_hidden: false,
             table_gridlines: true,
+            table_gridline_color: 0x808080,
+            table_gridline_dotted: false,
+            page_layout_color_background: crate::canvas::color::PAGE_SURROUND,
+            page_layout_color_page_border: crate::canvas::color::PAGE_BORDER,
             text_boundaries: false,
-            open_page_layout: false,
+            default_view: DefaultView::Normal,
             open_with_ruler: true,
             open_with_formatting_toolbar: true,
             open_with_paragraph_toolbar: true,
@@ -277,8 +327,32 @@ impl Settings {
         section(&mut out, "View", Some("Preferences > View"));
         put(&mut out, "show_hidden", b(self.show_hidden));
         put(&mut out, "table_gridlines", b(self.table_gridlines));
+        put(
+            &mut out,
+            "table_gridline_color",
+            format!("{:06X}", self.table_gridline_color & 0xFF_FFFF),
+        );
+        put(
+            &mut out,
+            "table_gridline_dotted",
+            b(self.table_gridline_dotted),
+        );
+        put(
+            &mut out,
+            "page_layout_color_background",
+            format!("{:06X}", self.page_layout_color_background & 0xFF_FFFF),
+        );
+        put(
+            &mut out,
+            "page_layout_color_page_border",
+            format!("{:06X}", self.page_layout_color_page_border & 0xFF_FFFF),
+        );
         put(&mut out, "text_boundaries", b(self.text_boundaries));
-        put(&mut out, "open_page_layout", b(self.open_page_layout));
+        put(
+            &mut out,
+            "default_view",
+            self.default_view.key().to_string(),
+        );
         put(&mut out, "open_with_ruler", b(self.open_with_ruler));
         put(
             &mut out,
@@ -301,6 +375,9 @@ impl Settings {
             ),
         );
         put(&mut out, "document_zoom", self.document_zoom.to_string());
+        if let Some([x, y, w, h]) = self.window_frame {
+            put(&mut out, "window_frame", format!("{x} {y} {w} {h}"));
+        }
         put(
             &mut out,
             "interface_scale",
@@ -551,6 +628,16 @@ impl Settings {
                         zoom
                     };
                 }
+                "window_frame" => {
+                    let n: Vec<i32> = v
+                        .split_whitespace()
+                        .filter_map(|n| n.parse().ok())
+                        .collect();
+                    s.window_frame = match n[..] {
+                        [x, y, w, h] if w > 0 && h > 0 => Some([x, y, w, h]),
+                        _ => None,
+                    };
+                }
                 "interface_scale" => s.interface_scale = v.parse().unwrap_or(100u16).clamp(50, 300),
                 // The formatting toolbar was called the ribbon in older files.
                 "formatting_toolbar_scale" | "ribbon_scale" => {
@@ -612,8 +699,31 @@ impl Settings {
                 "formatted_clipboard" => s.formatted_clipboard = flag,
                 "show_hidden" => s.show_hidden = flag,
                 "table_gridlines" => s.table_gridlines = flag,
+                "table_gridline_color" => {
+                    if let Some(c) = hex_color(v) {
+                        s.table_gridline_color = c;
+                    }
+                }
+                "page_layout_color_page_border" => {
+                    if let Some(c) = hex_color(v) {
+                        s.page_layout_color_page_border = c;
+                    }
+                }
+                "page_layout_color_background" => {
+                    if let Some(c) = hex_color(v) {
+                        s.page_layout_color_background = c;
+                    }
+                }
+                "table_gridline_dotted" => s.table_gridline_dotted = flag,
                 "text_boundaries" => s.text_boundaries = flag,
-                "open_page_layout" => s.open_page_layout = flag,
+                "default_view" => {
+                    s.default_view = DefaultView::ALL
+                        .into_iter()
+                        .find(|d| d.key() == v)
+                        .unwrap_or_default()
+                }
+                // Older files had only a Page Layout switch.
+                "open_page_layout" if flag => s.default_view = DefaultView::PageLayout,
                 "open_with_ruler" => s.open_with_ruler = flag,
                 "open_with_paragraph_toolbar" => s.open_with_paragraph_toolbar = flag,
                 "open_with_formatting_toolbar" | "open_with_ribbon" => {
@@ -803,6 +913,12 @@ pub fn with<R>(f: impl FnOnce(&Settings) -> R) -> R {
 }
 
 /// Change the settings and save them.
+/// A color written as six hex digits, with or without a leading #.
+fn hex_color(v: &str) -> Option<u32> {
+    let hex = v.trim().trim_start_matches('#');
+    (hex.len() == 6).then(|| u32::from_str_radix(hex, 16).ok())?
+}
+
 pub fn update(f: impl FnOnce(&mut Settings)) {
     let text = CURRENT.with(|c| {
         let mut s = c.borrow_mut();
@@ -1047,5 +1163,64 @@ mod tests {
         assert_eq!(d.font_name(chp.font), "Geneva");
         assert_eq!(chp.size, 20);
         assert!(!d.is_modified());
+    }
+    #[test]
+    fn window_frame_round_trips_and_rejects_nonsense() {
+        let s = Settings {
+            window_frame: Some([-1200, 40, 900, 700]),
+            ..Default::default()
+        };
+        let back = Settings::from_text(&s.to_text());
+        assert_eq!(back.window_frame, Some([-1200, 40, 900, 700]));
+        for bad in ["1 2 3", "1 2 0 5", "a b c d"] {
+            let text = format!("window_frame = {bad}\n");
+            assert_eq!(Settings::from_text(&text).window_frame, None);
+        }
+    }
+    #[test]
+    fn gridline_look_round_trips() {
+        let s = Settings::default();
+        assert_eq!(
+            (s.table_gridline_color, s.table_gridline_dotted),
+            (0x808080, false)
+        );
+        let s = Settings::from_text("table_gridline_color = #C0C0C0\ntable_gridline_dotted = 1\n");
+        assert_eq!(
+            (s.table_gridline_color, s.table_gridline_dotted),
+            (0xC0C0C0, true)
+        );
+        let back = Settings::from_text(&s.to_text());
+        assert_eq!(back.table_gridline_color, 0xC0C0C0);
+        assert!(back.table_gridline_dotted);
+        // Nonsense keeps the default.
+        let s = Settings::from_text("table_gridline_color = gray\n");
+        assert_eq!(s.table_gridline_color, 0x808080);
+        let s = Settings::from_text("page_layout_color_background = D9D9D9\n");
+        assert_eq!(
+            Settings::from_text(&s.to_text()).page_layout_color_background,
+            0xD9D9D9
+        );
+        assert_eq!(Settings::default().page_layout_color_background, 0xE4E4E4);
+        let s = Settings::from_text("page_layout_color_page_border = 999999\n");
+        assert_eq!(
+            Settings::from_text(&s.to_text()).page_layout_color_page_border,
+            0x999999
+        );
+    }
+    #[test]
+    fn default_view_reads_new_and_old_settings() {
+        for d in DefaultView::ALL {
+            let s = Settings {
+                default_view: d,
+                ..Default::default()
+            };
+            assert_eq!(Settings::from_text(&s.to_text()).default_view, d);
+        }
+        let old = Settings::from_text("open_page_layout = 1\n");
+        assert_eq!(old.default_view, DefaultView::PageLayout);
+        assert_eq!(
+            Settings::from_text("open_page_layout = 0\n").default_view,
+            DefaultView::Normal
+        );
     }
 }

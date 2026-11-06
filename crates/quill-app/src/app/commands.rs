@@ -69,8 +69,13 @@ impl App {
     pub(super) fn menu_choice(&mut self, el: &ActiveEventLoop, id: &str) {
         #[cfg(target_os = "macos")]
         let action = {
-            let index = crate::native_menu::action_index(&muda::MenuId::new(id));
-            index.and_then(|i| self.native.as_ref().and_then(|n| n.actions.get(i).cloned()))
+            match crate::native_menu::context_index(id) {
+                Some(i) => self.context_actions.get(i).cloned(),
+                None => {
+                    let index = crate::native_menu::action_index(&muda::MenuId::new(id));
+                    index.and_then(|i| self.native.as_ref().and_then(|n| n.actions.get(i).cloned()))
+                }
+            }
         };
         #[cfg(not(target_os = "macos"))]
         let action: Option<Action> = {

@@ -32,6 +32,7 @@ mod notes;
 mod outline;
 mod picture;
 mod sections;
+mod table_move;
 mod tools;
 
 pub use clipboard::{Clip, Clipboard};
@@ -47,6 +48,9 @@ pub const TEXT_LEFT: f32 = 12.0;
 pub(crate) const PAGE_GAP: f32 = 36.0;
 /// Space above the first line.
 const TEXT_TOP: f32 = 6.0;
+/// Normal view's room above a section break mark, in points: enough for
+/// its label between the section's last line and the next paragraph.
+const SECTION_PAD: f32 = 14.0;
 /// How long the caret stays on and off.
 pub const BLINK: Duration = Duration::from_millis(530);
 /// Clicks closer together than this make double and triple clicks.
@@ -197,6 +201,10 @@ pub struct DocView {
     /// Format for text typed at the insertion point after a formatting
     /// command with nothing selected.
     typing_chp: Option<CharProps>,
+    /// What `typing_chp` was before each formatting command at the
+    /// insertion point, so Undo can take those back before anything is
+    /// typed.
+    caret_formats: Vec<Option<CharProps>>,
     goal_x: Option<f32>,
     layouts: Vec<Option<ParaLayout>>,
     /// Keep every paragraph's glyphs (printing): see `memory`.
@@ -251,6 +259,10 @@ pub struct DocView {
     pub outline_prefix: bool,
     /// A table of contents just made, to make again with its own pages.
     toc_refresh: Option<quill_core::contents::TocOptions>,
+    /// The pages were worked out again, so a live table of contents may
+    /// need catching up; and how many times running it has just done so.
+    toc_stale: bool,
+    toc_rounds: u8,
     /// Hyphenate All under way.
     hyph_job: Option<language::HyphenJob>,
     /// Page height, top and bottom margins and widow control when the
@@ -285,6 +297,7 @@ pub struct DocView {
     back: Vec<Position>,
     /// A picture handle being dragged.
     pic_drag: Option<picture::PicDrag>,
+    table_drag: Option<table_move::TableDrag>,
     /// Frames placed on the pages (Page Layout view and printing).
     frames: Vec<frames::FrameBox>,
     /// The areas each paragraph's lines were laid out to keep clear of,
@@ -294,6 +307,12 @@ pub struct DocView {
     /// Whether frames were placed (rather than left in the text) when the
     /// paragraphs were last placed.
     placed_frames_on: bool,
+    /// Normal view's room for section break marks: where each starts,
+    /// down the text. Page counting leaves it out (see `unpad`).
+    section_pads: Vec<f32>,
+    /// The view the paragraphs were last placed for: Normal view leaves
+    /// room for section marks, Page Layout does not.
+    placed_page_view: bool,
 }
 
 impl DocView {
@@ -309,6 +328,7 @@ impl DocView {
             show_changes: true,
             captions: false,
             typing_chp: None,
+            caret_formats: Vec::new(),
             goal_x: None,
             layouts: Vec::new(),
             keep_all: false,
@@ -339,6 +359,8 @@ impl DocView {
             show_formatting: true,
             outline_prefix: false,
             toc_refresh: None,
+            toc_stale: false,
+            toc_rounds: 0,
             hyph_job: None,
             laid_out_page: (0, 0, 0, false),
             page_view: false,
@@ -356,10 +378,13 @@ impl DocView {
             status: None,
             back: Vec::new(),
             pic_drag: None,
+            table_drag: None,
             frames: Vec::new(),
             wraps: Vec::new(),
             want_wrap: Vec::new(),
             placed_frames_on: false,
+            section_pads: Vec::new(),
+            placed_page_view: false,
         }
     }
 
@@ -667,7 +692,7 @@ impl DocView {
             _ => 1,
         };
         self.last_click = Some((now, wx, wy, count));
-        if count == 1 && self.picture_mouse_down(wx, wy, shift) {
+        if count == 1 && (self.picture_mouse_down(wx, wy, shift) || self.table_mouse_down(wx, wy)) {
             return;
         }
         if self.outline {
@@ -686,6 +711,23 @@ impl DocView {
         self.doc.break_typing();
         let (pos, upstream) = self.hit(wx, wy);
         let in_bar = wx < self.area.x + self.text_x() - 2.0;
+        // A live table of contents is one object: a click selects it all.
+        if count == 1
+            && !shift
+            && !cmd
+            && self.doc.props.live_toc.is_some()
+            && let Some(end) = self.doc.existing_toc()
+            && pos.para <= end
+        {
+            self.sel = Selection::new(Position::new(0, 0), Position::new(end + 1, 0));
+            self.drag = None;
+            self.status = Some(
+                "Table of contents: it keeps itself up to date. Right-click to update it or make it editable."
+                    .into(),
+            );
+            self.reset_blink();
+            return;
+        }
         // ⌘-click on a link follows it, as in today's Word; anywhere else
         // it selects the sentence, as in the original.
         if cmd && !shift && !in_bar && count == 1 {
@@ -733,7 +775,7 @@ impl DocView {
     }
 
     pub fn mouse_drag(&mut self, wx: f32, wy: f32) {
-        if self.picture_drag(wx, wy) {
+        if self.picture_drag(wx, wy) || self.table_mouse_drag(wx, wy) {
             return;
         }
         let Some((unit, origin)) = self.drag else {
@@ -760,10 +802,11 @@ impl DocView {
     pub fn mouse_up(&mut self) {
         self.drag = None;
         self.picture_mouse_up();
+        self.table_mouse_up();
     }
 
     pub fn dragging(&self) -> bool {
-        self.drag.is_some() || self.pic_drag.is_some()
+        self.drag.is_some() || self.pic_drag.is_some() || self.table_drag.is_some()
     }
 
     /// The whole line around `pos`, as clicking in the selection bar picks.
@@ -988,5 +1031,139 @@ mod tests {
         exact.update_layout(&mut fonts);
         assert_eq!(exact.page_body_extra[0], (0.0, 0.0));
         assert!(at_least.pages.len() > exact.pages.len());
+    }
+    #[test]
+    fn paragraph_formats_stop_at_a_selection_ending_at_a_paragraph_start() {
+        // Selecting "Alpha" through the start of "Beta" centers only Alpha,
+        // whichever way the selection was made.
+        let mut clip = Clipboard::new();
+        for backward in [false, true] {
+            let mut view = DocView::new(Document::new(), "t".into());
+            view.type_text("Alpha");
+            view.exec(Cmd::NewParagraph, false, &mut clip);
+            view.type_text("Beta");
+            let (a, b) = (Position::new(0, 0), Position::new(1, 0));
+            view.sel = if backward {
+                Selection::new(b, a)
+            } else {
+                Selection::new(a, b)
+            };
+            view.exec(Cmd::AlignCenter, false, &mut clip);
+            let align = |i: usize| view.doc.main.paras[i].pap.align;
+            assert_ne!(align(0), align(1), "backward: {backward}");
+        }
+    }
+
+    #[test]
+    fn undo_takes_back_a_format_chosen_with_nothing_typed() {
+        let mut clip = Clipboard::new();
+        let mut view = DocView::new(Document::new(), "t".into());
+        view.exec(Cmd::Bold, false, &mut clip);
+        assert_eq!(view.undo_label(), "Undo Formatting");
+        view.exec(Cmd::Undo, false, &mut clip);
+        view.type_text("abc");
+        assert!(!view.doc.main.paras[0].chp_of_char(0).bold);
+        // Once typed, Undo takes back the typing as usual.
+        let mut view = DocView::new(Document::new(), "t".into());
+        view.exec(Cmd::Bold, false, &mut clip);
+        view.type_text("abc");
+        assert!(view.doc.main.paras[0].chp_of_char(0).bold);
+        view.exec(Cmd::Undo, false, &mut clip);
+        assert_eq!(view.doc.main.paras[0].text, "");
+    }
+    #[test]
+    fn shift_f3_cycles_the_case() {
+        let mut clip = Clipboard::new();
+        let mut view = DocView::new(Document::new(), "t".into());
+        view.type_text("big red dog");
+        view.sel = Selection::new(Position::new(0, 0), Position::new(0, 11));
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            view.exec(Cmd::CycleCase, false, &mut clip);
+            seen.push(view.doc.main.paras[0].text.clone());
+        }
+        assert_eq!(seen, ["BIG RED DOG", "Big Red Dog", "big red dog"]);
+        // With nothing selected, the word at the insertion point.
+        view.sel = Selection::caret(Position::new(0, 5));
+        view.exec(Cmd::CycleCase, false, &mut clip);
+        assert_eq!(view.doc.main.paras[0].text, "big RED dog");
+        assert_eq!(view.sel, Selection::caret(Position::new(0, 5)));
+    }
+    /// "Before", a 2 by 2 table holding a, b, c, d, then "After".
+    fn with_table(clip: &mut Clipboard) -> DocView {
+        let mut v = DocView::new(Document::new(), "t".into());
+        v.type_text("Before");
+        v.exec(Cmd::NewParagraph, false, clip);
+        v.type_text("After");
+        v.doc.insert_table(MAIN, Position::new(1, 0), 2, 2, 1440);
+        for (p, t) in [(1, "a"), (2, "b"), (4, "c"), (5, "d")] {
+            v.sel = Selection::caret(Position::new(p, 0));
+            v.type_text(t);
+        }
+        v.doc.forget_history();
+        v
+    }
+
+    /// Each paragraph's text, with T for a table paragraph and c or r for
+    /// a cell or row end.
+    fn shape(v: &DocView) -> String {
+        v.doc
+            .main
+            .paras
+            .iter()
+            .map(|p| {
+                let kind = match p.mark {
+                    Mark::CellEnd => "c",
+                    Mark::RowEnd => "r",
+                    _ => "",
+                };
+                let t = if p.pap.in_table { "T" } else { "" };
+                format!("{}{t}{kind}", p.text)
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn whole_tables_cut_copy_and_paste_in_one_piece() {
+        let mut clip = Clipboard::new();
+        let table = "aTc bTc Tr cTc dTc Tr";
+        let mut v = with_table(&mut clip);
+        assert_eq!(shape(&v), format!("Before {table} After"));
+        v.sel = Selection::caret(Position::new(2, 0));
+        v.exec(Cmd::SelectTable, false, &mut clip);
+        v.exec(Cmd::Cut, false, &mut clip);
+        assert_eq!(shape(&v), "Before After");
+        v.exec(Cmd::Undo, false, &mut clip);
+        assert_eq!(shape(&v), format!("Before {table} After"));
+
+        // Pasted in the middle of a paragraph, the table splits it.
+        v.exec(Cmd::SelectTable, false, &mut clip);
+        v.exec(Cmd::Copy, false, &mut clip);
+        v.sel = Selection::caret(Position::new(0, 3));
+        v.exec(Cmd::Paste, false, &mut clip);
+        assert_eq!(shape(&v), format!("Bef {table} ore {table} After"));
+        assert_eq!(v.sel, Selection::caret(Position::new(7, 0)));
+        v.exec(Cmd::Undo, false, &mut clip);
+
+        // At the start of a paragraph, it goes before it.
+        v.sel = Selection::caret(Position::new(0, 0));
+        v.exec(Cmd::Paste, false, &mut clip);
+        assert_eq!(shape(&v), format!("{table} Before {table} After"));
+        v.exec(Cmd::Undo, false, &mut clip);
+
+        // Tables do not nest: inside a cell, the table's text arrives as
+        // paragraphs of that cell.
+        v.sel = Selection::caret(Position::new(2, 1));
+        v.exec(Cmd::Paste, false, &mut clip);
+        assert_eq!(shape(&v), "Before aTc baT bT cT dT Tc Tr cTc dTc Tr After");
+        v.exec(Cmd::Undo, false, &mut clip);
+
+        // Cells copied without their row paste as plain paragraphs.
+        v.sel = Selection::new(Position::new(1, 0), Position::new(2, 1));
+        v.exec(Cmd::Copy, false, &mut clip);
+        v.sel = Selection::caret(Position::new(7, 5));
+        v.exec(Cmd::Paste, false, &mut clip);
+        assert_eq!(shape(&v), format!("Before {table} Aftera b"));
     }
 }

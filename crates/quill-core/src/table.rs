@@ -25,6 +25,64 @@ impl Row {
     }
 }
 
+/// Make pasted paragraphs fit where they go. Inside a table cell (`inside`)
+/// tables do not nest, so everything becomes plain paragraphs of the cell.
+/// Elsewhere whole rows stay rows; cells copied without their whole row
+/// become plain paragraphs, one for each cell.
+pub(crate) fn fit_pasted(paras: &mut Vec<Paragraph>, inside: bool) {
+    let flatten = |p: &mut Paragraph| {
+        p.pap.in_table = inside;
+        p.mark = Mark::Paragraph;
+        p.row = None;
+    };
+    if inside {
+        // A row's end mark holds no text; it goes.
+        paras.retain(|p| p.mark != Mark::RowEnd || !p.pap.in_table);
+        paras.iter_mut().for_each(flatten);
+        return;
+    }
+    let mut i = 0;
+    while i < paras.len() {
+        if !paras[i].pap.in_table {
+            i += 1;
+            continue;
+        }
+        let run_end = (i..paras.len())
+            .find(|&j| !paras[j].pap.in_table)
+            .unwrap_or(paras.len());
+        // Whole rows only: each ends with its row mark, after as many
+        // cells as the mark describes.
+        let mut whole = paras[run_end - 1].mark == Mark::RowEnd;
+        let mut cells = 0;
+        for p in &paras[i..run_end] {
+            match p.mark {
+                Mark::CellEnd => cells += 1,
+                Mark::RowEnd => {
+                    whole &= p.row.as_ref().is_some_and(|r| r.cells.len() == cells);
+                    cells = 0;
+                }
+                _ => {}
+            }
+        }
+        if whole {
+            i = run_end;
+            continue;
+        }
+        let mut k = i;
+        let mut end = run_end;
+        while k < end {
+            if paras[k].mark == Mark::RowEnd && paras[k].text.is_empty() {
+                paras.remove(k);
+                end -= 1;
+            } else {
+                flatten(&mut paras[k]);
+                k += 1;
+            }
+        }
+        i = end;
+    }
+}
+
 /// The row holding paragraph `p`, if it is in a table.
 pub fn row_at(paras: &[Paragraph], p: usize) -> Option<Row> {
     if !paras.get(p)?.pap.in_table {
@@ -265,6 +323,49 @@ impl Document {
         }
         let at = if below { row.end + 1 } else { row.first };
         self.splice(story, at, 0, new);
+    }
+
+    /// Delete `s..e` when it holds whole tables: they go entirely, with the
+    /// text around them. None, changing nothing, when `s` or `e` is partway
+    /// into a table, or while tracking changes (a deleted table cannot be
+    /// tracked yet, so only its text is marked deleted).
+    pub fn delete_whole_tables(
+        &mut self,
+        story: StoryId,
+        s: Position,
+        e: Position,
+    ) -> Option<Position> {
+        let paras = &self.story(story).paras;
+        let table_start = |p: usize| p == 0 || !paras[p - 1].pap.in_table;
+        let start_ok = !paras[s.para].pap.in_table || (s.offset == 0 && table_start(s.para));
+        if self.props.track_changes || !start_ok || paras[e.para].pap.in_table {
+            return None;
+        }
+        // Table paragraphs in the range, as runs, last first.
+        let mut runs = Vec::new();
+        let mut p = s.para;
+        while p < e.para {
+            if paras[p].pap.in_table {
+                let a = p;
+                while p < e.para && paras[p].pap.in_table {
+                    p += 1;
+                }
+                runs.push((a, p - a));
+            } else {
+                p += 1;
+            }
+        }
+        if runs.is_empty() {
+            return None;
+        }
+        let mut e = e;
+        for &(a, n) in runs.iter().rev() {
+            self.splice(story, a, n, Vec::new());
+            e.para -= n;
+        }
+        // A range starting at a table now starts where the table was.
+        let s = if s.para > e.para { e } else { s };
+        Some(if s < e { self.delete(story, s, e) } else { s })
     }
 
     /// Delete whole rows `first.first..=last.end`. The story keeps its

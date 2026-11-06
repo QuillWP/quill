@@ -64,8 +64,31 @@ pub mod color {
     /// or switched on.
     pub const HOVER: u32 = 0xCACACA;
     pub const PRESSED: u32 = 0xB2B2B2;
-    /// Neutral page surround, shared by Page Layout and Print Preview.
-    pub const PAGE_SURROUND: u32 = 0xD1D1D1;
+    /// Neutral page surround, shared by Page Layout and Print Preview: the
+    /// light gray of an empty Safari window. The settings file can change
+    /// it (page_layout_color_background).
+    pub const PAGE_SURROUND: u32 = 0xE4E4E4;
+    /// The line round each page in Page Layout: a gray a little darker
+    /// than the surround (page_layout_color_page_border).
+    pub const PAGE_BORDER: u32 = 0xBBBBBB;
+}
+
+/// Color `c` as dark mode shows the interface: grays turn over, so white
+/// panels go dark and black labels go light; pale tints darken; strong
+/// colors (icons, the accent blue) stay as they are.
+pub fn dark_ink(c: u32) -> u32 {
+    let (r, g, b) = ((c >> 16) & 255, (c >> 8) & 255, c & 255);
+    let (hi, lo) = (r.max(g).max(b), r.min(g).min(b));
+    if hi - lo < 32 {
+        let v = (r + g + b) / 3;
+        let d = 0x1E + (255 - v) * (0xE6 - 0x1E) / 255;
+        return d << 16 | d << 8 | d;
+    }
+    if lo > 0xB0 {
+        let k = |x: u32| x * 2 / 5;
+        return k(r) << 16 | k(g) << 8 | k(b);
+    }
+    c
 }
 
 /// Coverage-to-alpha curve that darkens light anti-aliasing a little, so
@@ -93,6 +116,9 @@ pub struct Canvas<'a> {
     clip: Px,
     /// Clips saved by `push_clip`.
     clips: Vec<Px>,
+    /// Draw in dark mode's colors (see `dark_ink`). Off while the page
+    /// and its text are drawn, which keep their own colors.
+    pub dark: bool,
 }
 
 impl<'a> Canvas<'a> {
@@ -111,7 +137,13 @@ impl<'a> Canvas<'a> {
                 y1: h,
             },
             clips: Vec::new(),
+            dark: false,
         }
+    }
+
+    /// The color to draw `c` in: itself, or its dark mode color.
+    fn ink(&self, c: u32) -> u32 {
+        if self.dark { dark_ink(c) } else { c }
     }
 
     /// Size of the canvas in points.
@@ -179,6 +211,7 @@ impl<'a> Canvas<'a> {
     }
 
     pub fn fill(&mut self, r: Rect, color: u32) {
+        let color = self.ink(color);
         let p = self.clipped(self.px(r));
         if p.x0 >= p.x1 {
             return;
@@ -275,6 +308,7 @@ impl<'a> Canvas<'a> {
     /// A filled, anti-aliased circle centered on (`cx`, `cy`), radius `r`, in
     /// points.
     pub fn circle(&mut self, cx: f32, cy: f32, r: f32, color: u32) {
+        let color = self.ink(color);
         let s = self.scale;
         let (pcx, pcy, pr) = (cx * s, cy * s, r * s);
         let x0 = ((pcx - pr).floor() as i32).max(self.clip.x0);
@@ -301,6 +335,7 @@ impl<'a> Canvas<'a> {
 
     /// Blend a glyph mask with its origin at device pixel (`ox`, `oy`).
     pub fn mask(&mut self, m: &Mask, ox: i32, oy: i32, color: u32) {
+        let color = self.ink(color);
         let lut = coverage_lut();
         let x0 = ox + m.left;
         let y0 = oy + m.top;
@@ -347,10 +382,18 @@ impl<'a> Canvas<'a> {
                 if x < self.clip.x0 || x >= self.clip.x1 {
                     continue;
                 }
-                let s = px[(iy * w as i32 + ix) as usize];
+                let mut s = px[(iy * w as i32 + ix) as usize];
                 let sa = (s >> 24) * alpha / 255;
                 if sa == 0 {
                     continue;
+                }
+                if self.dark {
+                    // Unpremultiply, take the dark color, premultiply again.
+                    let a = (s >> 24).max(1);
+                    let un = |sh: u32| (((s >> sh) & 255) * 255 / a).min(255);
+                    let c = dark_ink(un(16) << 16 | un(8) << 8 | un(0));
+                    let pre = |sh: u32| ((c >> sh) & 255) * a / 255;
+                    s = a << 24 | pre(16) << 16 | pre(8) << 8 | pre(0);
                 }
                 let d = &mut self.buf[(y * self.width + x) as usize];
                 let ch = |sh: u32| {
@@ -459,6 +502,10 @@ pub trait Surface {
     fn fill(&mut self, r: Rect, color: u32);
     /// The thinnest line worth drawing, in points.
     fn hair(&self) -> f32;
+    /// One device pixel, in points: the finest line the surface can show.
+    fn pixel(&self) -> f32 {
+        self.hair()
+    }
     #[allow(clippy::too_many_arguments)]
     fn glyph(
         &mut self,
@@ -541,6 +588,10 @@ impl Surface for Canvas<'_> {
 
     fn hair(&self) -> f32 {
         Canvas::hair(self)
+    }
+
+    fn pixel(&self) -> f32 {
+        1.0 / self.scale
     }
 
     fn glyph(
@@ -689,6 +740,25 @@ impl Label<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dark_mode_turns_grays_over_and_keeps_strong_colors() {
+        let gray = |c: u32| c & 0xFF;
+        assert!(gray(dark_ink(color::WHITE)) < 0x30);
+        assert!(gray(dark_ink(color::BLACK)) > 0xD0);
+        // Lighter stays lighter than darker, the other way round.
+        assert!(gray(dark_ink(color::GRAY)) < gray(dark_ink(color::GRAY_DARK)));
+        assert_eq!(dark_ink(0x0A84FF), 0x0A84FF);
+        assert!(dark_ink(color::HIGHLIGHT) & 0xFF < 0x80);
+        // Only while drawing in dark mode.
+        let mut buf = vec![0u32; 4];
+        let mut c = Canvas::new(&mut buf, 2, 2, 1.0);
+        c.fill(Rect::new(0.0, 0.0, 1.0, 1.0), color::WHITE);
+        c.dark = true;
+        c.fill(Rect::new(1.0, 0.0, 1.0, 1.0), color::WHITE);
+        assert_eq!(buf[0], color::WHITE);
+        assert_eq!(buf[1], dark_ink(color::WHITE));
+    }
 
     #[test]
     fn fills_outside_the_canvas_do_nothing() {

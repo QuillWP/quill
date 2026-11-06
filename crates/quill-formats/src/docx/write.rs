@@ -603,10 +603,19 @@ fn paragraph(doc: &Document, ids: &[String], p: &Paragraph, out: &mut String) {
         section_props(doc, k, p.section.as_deref().unwrap_or(&doc.section), out);
     }
     out.push_str("</w:pPr>");
+    let main = main_index(doc, p);
+    // A live table of contents is a TOC field, so Word can update it too.
+    let toc = doc.props.live_toc.zip(doc.existing_toc());
+    if let (Some((o, _)), Some(0)) = (toc, main) {
+        let _ = write!(
+            out,
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> {} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+            toc_instruction(&o)
+        );
+    }
     // Hyperlinks become HYPERLINK fields around their runs: these work the
     // same in every part, with no relationships to keep.
     let mut link = 0;
-    let main = main_index(doc, p);
     for (s, e, chp) in p.run_bounds() {
         comment_marks(out, main.map(|i| (i, s)), true);
         if chp.link != link {
@@ -736,7 +745,59 @@ fn paragraph(doc: &Document, ids: &[String], p: &Paragraph, out: &mut String) {
     if link != 0 {
         out.push_str(r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#);
     }
+    if toc.is_some_and(|(_, end)| main == Some(end)) {
+        out.push_str(r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#);
+    }
     out.push_str("</w:p>");
+}
+
+/// The TOC field instruction for a table of contents made with `o`:
+/// headings of the levels it lists, or TC entries; \n leaves out the
+/// page numbers.
+pub(crate) fn toc_instruction(o: &quill_core::contents::TocOptions) -> String {
+    let mut s = if o.outline {
+        format!(r#"TOC \o "{}-{}""#, o.from, o.to)
+    } else {
+        r#"TOC \f"#.to_string()
+    };
+    if !o.page_numbers {
+        s.push_str(r#" \n"#);
+    }
+    s
+}
+
+/// The settings a TOC field instruction asks for, if it is one Quill can
+/// keep up to date: headings by level (\o) or TC entries (\f).
+pub(crate) fn toc_options(instr: &str) -> Option<quill_core::contents::TocOptions> {
+    let mut words = instr.split_whitespace();
+    if !words.next()?.eq_ignore_ascii_case("TOC") {
+        return None;
+    }
+    let mut o = quill_core::contents::TocOptions {
+        outline: false,
+        ..Default::default()
+    };
+    let mut known = false;
+    let rest: Vec<&str> = words.collect();
+    for (k, w) in rest.iter().enumerate() {
+        match *w {
+            "\\o" => {
+                o.outline = true;
+                known = true;
+                let range = rest.get(k + 1).map(|r| r.trim_matches('"'));
+                if let Some((a, b)) = range.and_then(|r| r.split_once('-'))
+                    && let (Ok(a), Ok(b)) = (a.parse::<u8>(), b.parse::<u8>())
+                {
+                    o.from = a.clamp(1, 9);
+                    o.to = b.clamp(1, 9).max(o.from);
+                }
+            }
+            "\\f" => known = true,
+            "\\n" => o.page_numbers = false,
+            _ => {}
+        }
+    }
+    known.then_some(o)
 }
 
 /// A field argument's text, with the backslashes and quotes Word's field

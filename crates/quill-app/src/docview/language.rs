@@ -29,9 +29,20 @@ pub struct HyphenJob {
     pub capitals: bool,
 }
 
+/// The word at `s..e` as the reader sees it once tracked changes are
+/// accepted: without its deleted letters, or None when all of it is deleted.
+fn live_word(p: &Paragraph, s: usize, e: usize) -> Option<String> {
+    let word: String = p.text[s..e]
+        .char_indices()
+        .filter(|&(i, _)| !quill_core::revision::is_deleted(p.chp_of_char(s + i).rev))
+        .map(|(_, c)| c)
+        .collect();
+    (!word.is_empty()).then_some(word)
+}
+
 impl DocView {
     /// The next word from `from` that is not in the dictionaries, skipping
-    /// hidden text and, as Preferences say, words in capitals or with
+    /// hidden and deleted text and, as Preferences say, words in capitals or with
     /// numbers.
     pub fn next_misspelling(&self, from: Position) -> Option<(Position, Position)> {
         let (upper, numbers) = crate::settings::with(|s| (s.ignore_uppercase, s.ignore_numbers));
@@ -51,7 +62,10 @@ impl DocView {
                 if s < start || p.chp_of_char(s).hidden {
                     continue;
                 }
-                let w = &p.text[s..e];
+                let Some(w) = live_word(p, s, e) else {
+                    continue;
+                };
+                let w = w.as_str();
                 if numbers && w.chars().any(|c| c.is_numeric()) {
                     continue;
                 }
@@ -98,7 +112,9 @@ impl DocView {
             let spans: Vec<(usize, usize)> =
                 quill_core::spell::words(&self.doc.main.paras[i].text, 0)
                     .into_iter()
-                    .filter(|&(s, e)| &self.doc.main.paras[i].text[s..e] == word)
+                    .filter(|&(s, e)| {
+                        live_word(&self.doc.main.paras[i], s, e).as_deref() == Some(word)
+                    })
                     .collect();
             for &(s, e) in spans.iter().rev() {
                 let chp = self.doc.main.paras[i].chp_of_char(s);

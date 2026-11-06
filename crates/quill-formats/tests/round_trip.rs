@@ -551,6 +551,15 @@ fn quill_keeps_everything_exactly() {
         doc.props.footnote_position = at;
         quill_round_trip(&doc);
     }
+    // A live table of contents keeps the settings it was made with.
+    let mut doc = kitchen_sink();
+    doc.props.live_toc = Some(quill_core::contents::TocOptions {
+        outline: true,
+        page_numbers: false,
+        from: 2,
+        to: 4,
+    });
+    quill_round_trip(&doc);
     quill_round_trip(&Document::new());
 }
 
@@ -947,4 +956,36 @@ fn quill_files_open_whatever_they_are_called() {
     let back = quill_formats::load(&path).unwrap();
     assert_eq!(back.main, doc.main);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_live_table_of_contents_is_a_toc_field_in_docx() {
+    let mut doc = quill_core::text::from_plain_text("Intro\t1\nBody");
+    let toc1 = doc.styles.find("toc 1").unwrap();
+    doc.apply_style(StoryId::Main, 0, 0, toc1);
+    doc.split_paragraph(StoryId::Main, Position::new(1, 0));
+    let p = &mut doc.main.paras[0];
+    p.mark = quill_core::Mark::SectionBreak;
+    p.section = Some(Box::new(doc.section.clone()));
+    assert_eq!(doc.existing_toc(), Some(0));
+    let o = quill_core::contents::TocOptions {
+        outline: true,
+        page_numbers: true,
+        from: 1,
+        to: 3,
+    };
+    doc.props.live_toc = Some(o);
+    let bytes = quill_formats::docx::write(&doc, 1_760_000_000);
+    let xml = String::from_utf8_lossy(
+        &quill_formats::zip::Archive::open(&bytes)
+            .unwrap()
+            .read("word/document.xml")
+            .unwrap()
+            .unwrap(),
+    )
+    .into_owned();
+    assert!(xml.contains(r#"TOC \o "1-3""#));
+    let back = quill_formats::docx::read(&bytes).unwrap();
+    assert_eq!(back.props.live_toc, Some(o));
+    assert_eq!(back.main.paras[0].text, "Intro\t1");
 }

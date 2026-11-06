@@ -268,7 +268,27 @@ pub(super) fn manual_page_break_rule_ys(l: &ParaLayout, py: f32) -> impl Iterato
         .map(move |line| py + line.top + line.height / 2.0)
 }
 
-/// A table row's furniture: cell shading, the original's dotted gridlines (when
+/// Table gridlines as Preferences sets them: shown or not, their color,
+/// dotted or solid.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Gridlines {
+    pub color: u32,
+    pub dotted: bool,
+}
+
+impl Gridlines {
+    /// The gridlines to draw on screen, if they are shown.
+    pub(super) fn current() -> Option<Gridlines> {
+        crate::settings::with(|s| {
+            s.table_gridlines.then_some(Gridlines {
+                color: s.table_gridline_color,
+                dotted: s.table_gridline_dotted,
+            })
+        })
+    }
+}
+
+/// A table row's furniture: cell shading, the on-screen gridlines (when
 /// Preferences shows them) and cell borders. The row's top left is at
 /// (`ox`, `top`), `ox` being the left margin.
 pub(super) fn draw_row(
@@ -277,7 +297,7 @@ pub(super) fn draw_row(
     ox: f32,
     top: f32,
     height: f32,
-    grid: bool,
+    grid: Option<Gridlines>,
 ) {
     let bottom = top + height;
     for (k, &(_, _, x0, x1)) in row.cells.iter().enumerate() {
@@ -290,12 +310,24 @@ pub(super) fn draw_row(
             );
         }
     }
-    if grid {
-        let dots_v = |c: &mut dyn Surface, x: f32| {
+    if let Some(g) = grid {
+        let t = c.pixel();
+        let hline = |c: &mut dyn Surface, x0: f32, x1: f32, y: f32| {
+            if g.dotted {
+                c.dotted_hline(x0, x1, y, g.color);
+            } else {
+                c.fill(Rect::new(x0, y, x1 - x0 + t, t), g.color);
+            }
+        };
+        let vline = |c: &mut dyn Surface, x: f32| {
+            if !g.dotted {
+                c.fill(Rect::new(x, top, t, bottom - top), g.color);
+                return;
+            }
             let mut y = top.floor();
             while y < bottom {
                 if (y as i32) % 2 == 0 {
-                    c.fill(Rect::new(x, y, 1.0, 1.0), color::BLACK);
+                    c.fill(Rect::new(x, y, 1.0, 1.0), g.color);
                 }
                 y += 1.0;
             }
@@ -306,11 +338,11 @@ pub(super) fn draw_row(
         );
         // Each row draws its own top and bottom, so rows of different
         // widths are closed off.
-        c.dotted_hline(ox + left, ox + right, top, color::BLACK);
-        c.dotted_hline(ox + left, ox + right, bottom, color::BLACK);
-        dots_v(c, ox + left);
+        hline(c, ox + left, ox + right, top);
+        hline(c, ox + left, ox + right, bottom);
+        vline(c, ox + left);
         for &(_, _, _, x1) in &row.cells {
-            dots_v(c, ox + x1);
+            vline(c, ox + x1);
         }
     }
     for (k, &(_, _, x0, x1)) in row.cells.iter().enumerate() {
@@ -468,8 +500,16 @@ impl DocView {
         let clip = c.set_clip(area);
         let ox = self.area.x + self.text_x();
         let n = self.layouts.len();
+        // In dark mode only the desk round the pages goes dark; the pages,
+        // and Normal view's text, keep the document's own colors.
+        let dark = std::mem::replace(&mut c.dark, false);
         if self.page_view {
-            c.fill(area, color::PAGE_SURROUND);
+            c.dark = dark;
+            c.fill(
+                area,
+                crate::settings::with(|s| s.page_layout_color_background),
+            );
+            c.dark = false;
             let (_, ph) = self.page_size();
             let left = area.x + self.page_left();
             for k in 0..self.pages.len() {
@@ -488,7 +528,8 @@ impl DocView {
             let top = self.scroll_y - TEXT_TOP;
             self.draw_text(c, fonts, cache, focused, ox, oy, top, top + area.h);
             for (first, _) in self.secs.iter().skip(1) {
-                let y = oy + self.tops[*first];
+                // In the middle of the room left for it.
+                let y = oy + self.tops[*first] - SECTION_PAD / 2.0;
                 if y >= area.y && y <= area.bottom() + 4.0 {
                     self.draw_section_mark(
                         c,
@@ -509,7 +550,7 @@ impl DocView {
                 &self.pages[..]
             };
             for page in pages.iter().skip(1).filter(|p| !p.manual) {
-                let y = (oy + page.y).floor();
+                let y = (oy + self.pad(page.y)).floor();
                 if y < area.y || y > area.bottom() {
                     continue;
                 }
@@ -532,6 +573,10 @@ impl DocView {
             c.fill(Rect::new(wx, wy, c.hair(), h), color::BLACK);
         }
         self.draw_picture_selection(c);
+        if focused {
+            self.draw_table_handle(c);
+        }
+        c.dark = dark;
         c.restore_clip(clip);
     }
 
@@ -558,7 +603,10 @@ impl DocView {
         let page = Rect::new(left, top, pw, ph);
         if c.screen() {
             c.fill(page, color::WHITE);
-            c.frame(page.inset(-1.0), color::BLACK);
+            c.frame(
+                page.inset(-1.0),
+                crate::settings::with(|s| s.page_layout_color_page_border),
+            );
         }
         if c.screen() && crate::settings::with(|s| s.text_boundaries) {
             // Preferences > Text Boundaries: the margins, dotted.
@@ -626,7 +674,7 @@ impl DocView {
         bottom: f32,
     ) {
         let (s, e) = self.sel.range();
-        let gridlines = c.screen() && crate::settings::with(|s| s.table_gridlines);
+        let gridlines = Gridlines::current().filter(|_| c.screen());
         for b in &self.blocks[self.block_at(top)..] {
             if b.top > bottom {
                 break;

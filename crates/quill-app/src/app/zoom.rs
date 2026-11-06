@@ -89,6 +89,30 @@ impl WinState {
         crate::settings::update(|s| s.document_zoom = percent);
     }
 
+    /// Zoom by `factor` about the pointer, `cy` down the window, as a pinch
+    /// or ⌘-scroll does: the line under the pointer stays under it. `save`
+    /// keeps the new zoom for next time; a gesture saves once, at its end.
+    pub(super) fn zoom_at(&mut self, factor: f64, cy: f32, save: bool) {
+        let old = self.document_zoom;
+        let percent = (old as f64 * 100.0 * factor).clamp(MIN, MAX);
+        if !percent.is_finite() {
+            return;
+        }
+        let new = (percent / 100.0) as f32;
+        if save {
+            self.apply_zoom(percent);
+        } else {
+            self.document_zoom = new;
+            self.zoom_edit = None;
+        }
+        let new = self.document_zoom;
+        let v = self.main_view_mut();
+        // How far below the top of the text the pointer is, in document
+        // units, before and after.
+        let below = (cy / old - v.area.y).max(0.0);
+        v.scroll_y = (v.scroll_y + below - below * old / new).max(0.0);
+    }
+
     pub(super) fn commit_zoom(&mut self) -> bool {
         let Some(edit) = &self.zoom_edit else {
             return true;
@@ -451,5 +475,22 @@ mod tests {
         assert_eq!(toolbar::command(0), Some(Cmd::PrintPreview));
         assert_eq!(view.exec(Cmd::Print, false, &mut clip), Effect::Print);
         assert_eq!(view.exec(Cmd::SavePdf, false, &mut clip), Effect::SavePdf);
+    }
+    #[test]
+    fn pinch_zoom_keeps_the_line_under_the_pointer() {
+        let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+        state.document_zoom = 1.0;
+        state.view.area.y = 40.0;
+        state.view.scroll_y = 100.0;
+        let under = |s: &WinState, cy: f32| cy / s.document_zoom - s.view.area.y + s.view.scroll_y;
+        let before = under(&state, 300.0);
+        state.zoom_at(2.0, 300.0, false);
+        assert!((state.document_zoom - 2.0).abs() < 1e-6);
+        // The view's top edge stays put on screen, so its document-unit
+        // position halves with the zoom.
+        state.view.area.y = 20.0;
+        assert!((under(&state, 300.0) - before).abs() < 1e-3);
+        state.zoom_at(1000.0, 300.0, false);
+        assert!((state.document_zoom as f64 * 100.0 - MAX).abs() < 1e-3);
     }
 }

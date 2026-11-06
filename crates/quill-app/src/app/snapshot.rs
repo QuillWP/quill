@@ -61,6 +61,8 @@ pub fn snapshot(
             cache: &mut cache,
         };
         match kind {
+            // Draw as macOS dark mode does.
+            "dark" => st.dark = true,
             "type" => {
                 if st.zoom_edit.is_some() {
                     st.zoom_text(arg);

@@ -67,7 +67,7 @@ impl DocView {
     /// after marking the paragraphs that show them for laying out again.
     pub(super) fn update_note_labels(&mut self) -> bool {
         let pages = self.bands.clone();
-        let tops = self.tops.clone();
+        let tops: Vec<f32> = self.tops.iter().map(|&t| self.unpad(t)).collect();
         let layouts = &self.layouts;
         let refs = self.note_refs();
         let page_of = |id: u32| -> usize {
@@ -531,7 +531,7 @@ impl DocView {
     pub(super) fn end_note_units(&self) -> Vec<paginate::Unit> {
         let mut out = Vec::new();
         for e in &self.endnotes {
-            let mut y = e.y;
+            let mut y = self.unpad(e.y);
             let mut line = 1_000_000;
             let mut push = |top: f32, bottom: f32| {
                 out.push(paginate::Unit {

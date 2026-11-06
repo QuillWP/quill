@@ -85,13 +85,16 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
                 s.text_boundaries,
             );
             d.group("Open Documents", 11.0, 134.0, 364.0, 104.0);
-            d.check(
-                "pagelayout",
-                "In Page Layout View",
-                16.0,
-                157.0,
-                s.open_page_layout,
-            );
+            d.text("In View:", 16.0, 157.0);
+            let views: Vec<&str> = settings::DefaultView::ALL
+                .iter()
+                .map(|v| v.label())
+                .collect();
+            let at = settings::DefaultView::ALL
+                .iter()
+                .position(|v| *v == s.default_view)
+                .unwrap_or(0);
+            d.popup("defaultview", &views, at, 90.0, 154.0, 140.0);
             d.check(
                 "formatting",
                 "With Formatting Toolbar On",
@@ -260,7 +263,10 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
             s.show_hidden = on("hidden");
             s.text_boundaries = on("boundaries");
             s.table_gridlines = on("gridlines");
-            s.open_page_layout = on("pagelayout");
+            s.default_view = settings::DefaultView::ALL
+                .get(d.selected("defaultview"))
+                .copied()
+                .unwrap_or_default();
             s.open_with_ruler = on("ruler");
             s.open_with_formatting_toolbar = on("formatting");
             s.open_with_paragraph_toolbar = on("paragraph");

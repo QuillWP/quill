@@ -25,7 +25,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
+use winit::event::{
+    ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, TouchPhase, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
@@ -150,6 +152,8 @@ pub struct WinState {
     /// Screen-only scale for the document. Layout and saved measurements stay
     /// in document points.
     document_zoom: f32,
+    /// macOS is in dark mode: the interface round the page goes dark.
+    pub dark: bool,
     zoom_edit: Option<zoom::Edit>,
     review_filter: revisions::Filter,
     review_closed: bool,
@@ -250,6 +254,31 @@ fn initial_window_size(screen_width: f64, screen_height: f64) -> LogicalSize<f64
     LogicalSize::new(width, height)
 }
 
+/// Where to open a window at the remembered `frame` (left, top, width,
+/// height in points), given the screens connected now (the same) and the
+/// top-left corners of windows already open. None if the frame's title bar
+/// is no longer on a screen, as after unplugging a display. A window
+/// already there pushes the new one down and right, as macOS does.
+fn restore_frame(frame: [i32; 4], screens: &[[f64; 4]], taken: &[(f64, f64)]) -> Option<[f64; 4]> {
+    let [x, y, w, h] = frame.map(f64::from);
+    // Enough of the title bar to grab: 100 points across, 20 down.
+    let screen = screens.iter().find(|[sx, sy, sw, sh]| {
+        let across = (x + w).min(sx + sw) - x.max(*sx);
+        let down = (y + 20.0).min(sy + sh) - y.max(*sy);
+        across >= 100.0 && down >= 20.0
+    })?;
+    let (w, h) = (w.min(screen[2]), h.min(screen[3]));
+    let (mut x, mut y) = (x, y);
+    while taken
+        .iter()
+        .any(|&(tx, ty)| (tx - x).abs() < 4.0 && (ty - y).abs() < 4.0)
+    {
+        x += 24.0;
+        y += 24.0;
+    }
+    Some([x, y, w, h])
+}
+
 /// Things the window needs from the application to build menus.
 pub struct Env<'a> {
     pub font_names: &'a [String],
@@ -265,12 +294,16 @@ impl WinState {
                 s.open_with_formatting_toolbar,
                 s.open_with_paragraph_toolbar,
                 s.open_with_ruler,
-                s.open_page_layout,
+                s.default_view,
                 s.document_zoom as f32 / 100.0,
             )
         });
         let mut view = view;
-        view.page_view = page;
+        match page {
+            crate::settings::DefaultView::Normal => {}
+            crate::settings::DefaultView::Outline => view.set_outline(true),
+            crate::settings::DefaultView::PageLayout => view.page_view = true,
+        }
         WinState {
             view,
             show_formatting_toolbar: formatting,
@@ -286,6 +319,7 @@ impl WinState {
             height: 0.0,
             ui: 1.0,
             document_zoom: zoom,
+            dark: false,
             zoom_edit: None,
             review_filter: revisions::Filter::All,
             review_closed: false,
@@ -1321,6 +1355,9 @@ pub struct App {
     proxy: EventLoopProxy<UserEvent>,
     #[cfg(target_os = "macos")]
     native: Option<crate::native_menu::NativeMenu>,
+    /// What each item of the last native context menu does.
+    #[cfg(target_os = "macos")]
+    context_actions: Vec<Action>,
     fonts_scan: Option<JoinHandle<Catalog>>,
     /// Cheaply cloned paths and face metadata for independent worker fonts.
     font_catalog: Option<Catalog>,
@@ -1355,6 +1392,8 @@ impl App {
             proxy,
             #[cfg(target_os = "macos")]
             native: None,
+            #[cfg(target_os = "macos")]
+            context_actions: Vec::new(),
             pending: files,
             recent: crate::recent::load(),
             windows: Vec::new(),
@@ -1540,6 +1579,21 @@ impl App {
         self.retitle();
     }
 
+    /// Remember where window `i` is and how big, for the next window.
+    fn remember_frame(&self, i: usize) {
+        let w = &self.windows[i].1.window;
+        let k = w.scale_factor();
+        let Ok(at) = w.outer_position() else {
+            return;
+        };
+        let at = at.to_logical::<f64>(k);
+        let size = w.inner_size().to_logical::<f64>(k);
+        let frame = [at.x, at.y, size.width, size.height].map(|v| v.round() as i32);
+        if crate::settings::get().window_frame != Some(frame) {
+            crate::settings::update(|s| s.window_frame = Some(frame));
+        }
+    }
+
     /// Close a window. The last window on a document asks about saving
     /// first; returns false if the user cancels.
     fn close_window(&mut self, id: WindowId) -> bool {
@@ -1562,6 +1616,7 @@ impl App {
             Some(k) => {
                 // Hand the document to a window that stays open.
                 self.take_doc(k);
+                self.remember_frame(i);
                 self.windows.retain(|(w, _)| *w != id);
                 let left = self.windows.iter().filter(|(_, w)| w.group == g).count();
                 if left == 1
@@ -1577,6 +1632,7 @@ impl App {
                     return false;
                 }
                 crate::recovery::remove(self.windows[i].1.recovery.take());
+                self.remember_frame(i);
                 self.windows.retain(|(w, _)| *w != id);
                 true
             }
@@ -1596,10 +1652,35 @@ impl App {
                 initial_window_size(size.width, size.height)
             })
             .unwrap_or_else(|| LogicalSize::new(1100.0, 850.0));
-        let attrs = Window::default_attributes()
+        let mut attrs = Window::default_attributes()
             .with_title(&title)
             .with_inner_size(size)
             .with_min_inner_size(LogicalSize::new(480.0, 240.0));
+        if let Some(frame) = crate::settings::get().window_frame {
+            let screens: Vec<[f64; 4]> = el
+                .available_monitors()
+                .map(|m| {
+                    let k = m.scale_factor();
+                    let at = m.position().to_logical::<f64>(k);
+                    let size = m.size().to_logical::<f64>(k);
+                    [at.x, at.y, size.width, size.height]
+                })
+                .collect();
+            let taken: Vec<(f64, f64)> = self
+                .windows
+                .iter()
+                .filter_map(|(_, w)| {
+                    let at = w.window.outer_position().ok()?;
+                    let at = at.to_logical::<f64>(w.window.scale_factor());
+                    Some((at.x, at.y))
+                })
+                .collect();
+            if let Some([x, y, w, h]) = restore_frame(frame, &screens, &taken) {
+                attrs = attrs
+                    .with_inner_size(LogicalSize::new(w, h))
+                    .with_position(winit::dpi::LogicalPosition::new(x, y));
+            }
+        }
         // The Mac takes the icon from the app bundle; elsewhere the window
         // carries it.
         #[cfg(not(target_os = "macos"))]
@@ -1621,9 +1702,8 @@ impl App {
         #[cfg(target_os = "macos")]
         crate::mac_text_input::install(&self.proxy);
         let id = window.id();
-        let st = WinState::new(DocView::new(doc, title));
-        #[cfg(target_os = "macos")]
-        let mut st = st;
+        let mut st = WinState::new(DocView::new(doc, title));
+        st.dark = window.theme() == Some(winit::window::Theme::Dark);
         #[cfg(target_os = "macos")]
         {
             st.native_scrollbars = scrollbars.is_some();
@@ -2430,6 +2510,17 @@ impl App {
             return;
         }
         if context {
+            // On the Mac the menu is the system's own.
+            #[cfg(target_os = "macos")]
+            if state == ElementState::Pressed {
+                if let Some((m, actions)) = w.st.context_menu_at(x, y, clip) {
+                    w.window.request_redraw();
+                    self.context_actions = actions;
+                    let w = &self.windows[i].1;
+                    crate::native_menu::show_context(&m, &w.window);
+                }
+                return;
+            }
             if state == ElementState::Pressed {
                 w.st.open_context(x, y, &mut label, clip);
             }
@@ -2829,6 +2920,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.sync_menus();
             }
             WindowEvent::RedrawRequested => self.redraw(id),
+            WindowEvent::ThemeChanged(theme) => {
+                let w = &mut self.windows[i].1;
+                w.st.dark = theme == winit::window::Theme::Dark;
+                w.window.request_redraw();
+            }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
                 self.windows[i].1.window.request_redraw();
             }
@@ -2918,14 +3014,30 @@ impl ApplicationHandler<UserEvent> for App {
                     w.window.request_redraw();
                 }
             }
-            WindowEvent::MouseWheel { delta, .. } => {
+            WindowEvent::MouseWheel { delta, phase, .. } => {
                 let w = &mut self.windows[i].1;
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_, y) => -y * 16.0 * 3.0,
                     MouseScrollDelta::PixelDelta(p) => -(p.y / w.window.scale_factor()) as f32,
                 };
-                w.st.wheel(dy);
+                if w.mods.super_key() && w.st.dialogs.is_empty() && w.st.menu.is_none() {
+                    // ⌘-scroll zooms: a tenth bigger for each click of a
+                    // wheel scrolled up.
+                    let line = matches!(delta, MouseScrollDelta::LineDelta(..));
+                    let save = line || phase == TouchPhase::Ended;
+                    w.st.zoom_at(1.1f64.powf(-dy as f64 / 48.0), w.st.pointer.1, save);
+                } else {
+                    w.st.wheel(dy);
+                }
                 w.window.request_redraw();
+            }
+            WindowEvent::PinchGesture { delta, phase, .. } => {
+                let w = &mut self.windows[i].1;
+                if w.st.dialogs.is_empty() && w.st.menu.is_none() {
+                    let save = matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled);
+                    w.st.zoom_at(1.0 + delta, w.st.pointer.1, save);
+                    w.window.request_redraw();
+                }
             }
             _ => {}
         }
@@ -3030,7 +3142,7 @@ mod tests {
         let body_scroll = state.main_view().scroll_y;
         assert!(body_scroll > 0.0);
         assert_eq!(state.pane_view().unwrap().scroll_y, 0.0);
-        state.pointer = (panel.x + 20.0, panel.y + 100.0);
+        state.pointer = (panel.x + 20.0, panel.y + 140.0);
         state.wheel(60.0);
         assert!(state.pane_view().unwrap().scroll_y > 0.0);
         assert_eq!(state.main_view().scroll_y, body_scroll);
@@ -3208,7 +3320,10 @@ mod tests {
         state.height = 700.0;
         state.ensure_review();
         let r = state.revisions_bounds().unwrap();
-        state.revision_click(r.x + 10.0, r.y + 72.0 + 45.0);
+        let buttons = revisions::review_buttons(r);
+        let center = |b: Rect| (b.x + b.w / 2.0, b.y + b.h / 2.0);
+        let (x, y) = center(buttons[2]);
+        state.revision_click(x, y);
         assert!(!state.main_view().doc.has_changes());
         assert_eq!(
             state.main_view().doc.annotation_text(id),
@@ -3216,7 +3331,8 @@ mod tests {
         );
         assert!(state.main_view_mut().doc.undo().is_some());
         assert!(state.main_view().doc.has_changes());
-        state.revision_click(r.x + r.w * 0.75, r.y + 72.0 + 45.0);
+        let (x, y) = center(buttons[3]);
+        state.revision_click(x, y);
         assert!(!state.main_view().doc.has_changes());
         assert!(
             state.main_view().doc.main.paras[0]
@@ -3885,5 +4001,32 @@ mod tests {
         assert_eq!(a.view.sel.focus, Position::new(0, 3));
         assert_eq!(a.view.scroll_y, 40.0);
         assert_eq!(bp.sel.focus, Position::new(0, 8));
+    }
+    #[test]
+    fn remembered_window_frames_stay_on_a_connected_screen() {
+        let laptop = [0.0, 0.0, 1512.0, 982.0];
+        let monitor = [1512.0, -200.0, 2560.0, 1440.0];
+        // On the laptop: as remembered.
+        assert_eq!(
+            restore_frame([100, 50, 900, 700], &[laptop], &[]),
+            Some([100.0, 50.0, 900.0, 700.0])
+        );
+        // Left on the monitor, which is now unplugged: the default place.
+        assert_eq!(restore_frame([2000, 100, 900, 700], &[laptop], &[]), None);
+        assert!(restore_frame([2000, 100, 900, 700], &[laptop, monitor], &[]).is_some());
+        // Too big for the screen now: shrunk to fit.
+        assert_eq!(
+            restore_frame([0, 0, 3000, 2000], &[laptop], &[]),
+            Some([0.0, 0.0, 1512.0, 982.0])
+        );
+        // A window already there: the next one steps down and right.
+        assert_eq!(
+            restore_frame(
+                [100, 50, 900, 700],
+                &[laptop],
+                &[(100.0, 50.0), (124.0, 74.0)]
+            ),
+            Some([148.0, 98.0, 900.0, 700.0])
+        );
     }
 }

@@ -240,6 +240,10 @@ pub struct DocumentProps {
     /// Record insertions, deletions and format changes as tracked changes
     /// (Tools > Track Changes).
     pub track_changes: bool,
+    /// The table of contents at the start is live: Quill keeps its entries
+    /// and page numbers up to date, made with these settings. None once it
+    /// is made editable, or when there is none.
+    pub live_toc: Option<crate::contents::TocOptions>,
 }
 
 impl Default for DocumentProps {
@@ -265,6 +269,7 @@ impl Default for DocumentProps {
             footnote_restart_each_page: false,
             footnote_start: 1,
             track_changes: false,
+            live_toc: None,
         }
     }
 }
@@ -953,6 +958,19 @@ impl Document {
         self.history.redo.last().map(|s| s.label)
     }
 
+    /// Reopen the last undoable step, so edits made now undo with it. Used
+    /// for changes that follow from an edit, like a live table of contents
+    /// catching up. Starts a new step labeled `label` when there is none.
+    pub fn continue_last(&mut self, label: &'static str, sel: Selection) {
+        if self.history.open.is_some() {
+            return;
+        }
+        match self.history.undo.pop() {
+            Some(step) => self.history.open = Some(step),
+            None => self.begin(label, sel),
+        }
+    }
+
     /// Undo the last step and return the selection from before it.
     pub fn undo(&mut self) -> Option<Selection> {
         self.commit_open();
@@ -1413,6 +1431,50 @@ impl Document {
             &remapped
         };
         let mut target = self.story(story).paras[at.para].clone();
+        // Tables arrive whole or as text, never as broken rows.
+        let fitted;
+        let frag = if frag.paras.iter().any(|p| p.pap.in_table) || target.pap.in_table {
+            let mut f = frag.clone();
+            crate::table::fit_pasted(&mut f.paras, target.pap.in_table);
+            if f.paras.is_empty() {
+                return at;
+            }
+            fitted = f;
+            &fitted
+        } else {
+            frag
+        };
+        // A pasted table starts and ends on a paragraph of its own: the
+        // text before `at` stays in its paragraph, and the text after it
+        // follows the table.
+        if !target.pap.in_table && frag.paras[0].pap.in_table {
+            let tail = target.split_off(at.offset);
+            let mut out = Vec::with_capacity(frag.paras.len() + 2);
+            if at.offset > 0 {
+                out.push(target);
+            }
+            out.extend(frag.paras.iter().cloned());
+            let mut tail = tail;
+            if !frag.ends_with_mark && !frag.paras.last().is_some_and(|p| p.pap.in_table) {
+                let mut last = out.pop().unwrap();
+                let offset = last.len();
+                last.append(&tail);
+                last.pap = tail.pap.clone();
+                last.mark = tail.mark;
+                last.row = tail.row.clone();
+                last.section = tail.section.clone();
+                last.mark_chp = tail.mark_chp;
+                out.push(last);
+                let end = Position::new(at.para + out.len() - 1, offset);
+                self.splice(story, at.para, 1, out);
+                return end;
+            }
+            tail.pap.in_table = false;
+            out.push(tail);
+            let end = Position::new(at.para + out.len() - 1, 0);
+            self.splice(story, at.para, 1, out);
+            return end;
+        }
         if frag.paras.len() == 1 && !frag.ends_with_mark {
             let piece = &frag.paras[0];
             let mut offset = at.offset;
@@ -1441,7 +1503,9 @@ impl Document {
         out.push(first);
         out.extend(frag.paras[1..].iter().cloned());
         let end;
-        if frag.ends_with_mark {
+        // A pasted table's last row keeps its mark: the text after `at`
+        // follows on a paragraph of its own.
+        if frag.ends_with_mark || out.last().is_some_and(|p| p.pap.in_table) {
             end = Position::new(at.para + out.len(), 0);
             out.push(tail);
         } else {
@@ -1924,6 +1988,28 @@ impl Document {
         });
         self.commit(sel);
         true
+    }
+
+    /// Change the document settings as part of the step already open (see
+    /// `begin`), so they undo with the rest of it.
+    pub fn change_document_props(&mut self, props: DocumentProps) {
+        if self.props == props {
+            return;
+        }
+        let old = std::mem::replace(&mut self.props, props);
+        if let Some(step) = self.history.open.as_mut() {
+            step.records.push(Record {
+                story: StoryId::Main,
+                first: 0,
+                old: Vec::new(),
+                new_len: 0,
+                sheet: None,
+                section: None,
+                props: Some(Box::new(old)),
+                summary: None,
+                hf_section: 0,
+            });
+        }
     }
 
     /// Replace File > Summary Info as one undoable action.

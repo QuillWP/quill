@@ -407,6 +407,67 @@ mod tests {
     }
 
     #[test]
+    fn hidden_deletions_never_swallow_a_keypress() {
+        // "OLD" is deleted and hidden; without tracking, Backspace and
+        // Delete each remove the visible letter beside it and nothing else.
+        let mut clip = Clipboard::new();
+        let shown = |v: &DocView| {
+            let p = &v.doc.main.paras[0];
+            (0..p.len())
+                .filter(|&i| !revision::is_deleted(p.chp_of_char(i).rev))
+                .map(|i| &p.text[i..i + 1])
+                .collect::<String>()
+        };
+        for (cmd, caret, left) in [
+            (Cmd::Backspace, 4, "new"),
+            (Cmd::Backspace, 1, "new"),
+            (Cmd::DeleteForward, 1, "aew"),
+            (Cmd::DeleteForward, 4, "aew"),
+        ] {
+            let mut v = tracked("aOLDnew");
+            v.doc.delete(MAIN, at(0, 1), at(0, 4));
+            v.doc.props.track_changes = false;
+            v.show_changes = false;
+            v.set_selection(Selection::caret(at(0, caret)));
+            v.exec(cmd, false, &mut clip);
+            assert_eq!(shown(&v), left, "{cmd:?} at {caret}");
+            assert!(
+                v.doc.main.paras[0].text.contains("OLD"),
+                "the deletion stays"
+            );
+        }
+        // Shown struck through, the deleted text is there to be removed.
+        let mut v = tracked("aOLDnew");
+        v.doc.delete(MAIN, at(0, 1), at(0, 4));
+        v.doc.props.track_changes = false;
+        v.set_selection(Selection::caret(at(0, 4)));
+        v.exec(Cmd::Backspace, false, &mut clip);
+        assert_eq!(v.doc.main.paras[0].text, "aOLnew");
+    }
+
+    #[test]
+    fn typing_inside_struck_text_adds_beside_it() {
+        // Clicking into a deletion and typing leaves the deletion alone:
+        // the new text is an insertion while tracking, plain text if not.
+        for tracking in [true, false] {
+            let mut v = tracked("aOLDnew");
+            v.doc.delete(MAIN, at(0, 1), at(0, 4));
+            v.doc.props.track_changes = tracking;
+            v.doc.author = "Bob".into();
+            v.set_selection(Selection::caret(at(0, 2)));
+            v.type_text("X");
+            let p = &v.doc.main.paras[0];
+            assert_eq!(p.text, "aOXLDnew");
+            let rev = p.chp_of_char(2).rev;
+            assert!(!revision::is_deleted(rev));
+            assert_eq!(revision::is_inserted(rev), tracking);
+            for i in [1, 3, 4] {
+                assert!(revision::is_deleted(p.chp_of_char(i).rev));
+            }
+        }
+    }
+
+    #[test]
     fn dates_read_plainly() {
         assert_eq!(readable_date("2026-10-23T14:05:00Z"), "2026-10-23 14:05");
         assert_eq!(readable_date("someday"), "someday");

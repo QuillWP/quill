@@ -14,6 +14,11 @@ impl ImportReport {
         }
     }
 
+    /// Take back a note that turned out not to apply.
+    pub fn forget(&mut self, what: &'static str) {
+        self.notes.retain(|n| *n != what);
+    }
+
     pub fn notes(&self) -> &[&'static str] {
         &self.notes
     }

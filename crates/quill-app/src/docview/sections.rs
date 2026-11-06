@@ -119,6 +119,7 @@ impl DocView {
 
     /// The column band holding continuous y `y`.
     pub(super) fn band_at(&self, y: f32) -> Option<&Band> {
+        let y = self.unpad(y);
         let k = self.bands.partition_point(|b| b.y <= y).checked_sub(1)?;
         self.bands.get(k)
     }

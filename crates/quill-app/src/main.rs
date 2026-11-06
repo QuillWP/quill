@@ -27,6 +27,8 @@ mod link_dialog;
 mod listbox;
 mod local_dictionary;
 #[cfg(target_os = "macos")]
+mod mac_color;
+#[cfg(target_os = "macos")]
 mod mac_dialog;
 #[cfg(target_os = "macos")]
 mod mac_open;

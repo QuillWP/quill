@@ -1,12 +1,24 @@
 //! One Review sidebar for tracked changes and editable comments.
 use super::*;
+use crate::canvas::round_rect;
 use quill_core::{Position, StoryId};
 
 pub(super) const BADGE_LANE: f32 = 44.0;
 /// Keep the grab strip outside native scroll views, including when their
 /// overlay scrollers are invisible but still receive mouse events.
 pub(super) const DIVIDER_WIDTH: f32 = 8.0;
-const HEADER: f32 = 72.0;
+/// The title row and the All / Comments / Changes switch.
+const HEADER: f32 = 68.0;
+/// Previous, Next, Accept and Reject: their widths, and the height of a
+/// row of them.
+const BUTTON_WIDTHS: [f32; 4] = [70.0, 50.0, 54.0, 50.0];
+const BUTTON_ROW: f32 = 28.0;
+/// The "Comments" heading above the comment list.
+const COMMENTS_HEADING: f32 = 34.0;
+const PANEL: u32 = 0xF5F5F5;
+const EDGE: u32 = 0xD0D0D0;
+const TEXT: u32 = 0x202020;
+const MUTED: u32 = 0x6E6E6E;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Filter {
     All,
@@ -95,9 +107,21 @@ impl WinState {
             return r.h;
         }
         if self.review_filter == Filter::Comments || !self.main_view().doc.has_changes() {
-            return (HEADER + 28.0).min(r.h);
+            return (HEADER + COMMENTS_HEADING).min(r.h);
         }
-        (HEADER + (r.h * 0.30).clamp(150.0, 230.0) + 28.0).min(r.h)
+        (HEADER + buttons_height(r) + card_height(r) + COMMENTS_HEADING).min(r.h)
+    }
+
+    /// The change card: from under the buttons to the comments heading, or
+    /// to the bottom of the pane when only changes show.
+    fn card_bounds(&self, r: Rect) -> Rect {
+        let top = r.y + HEADER + buttons_height(r);
+        let bottom = if self.review_filter == Filter::Changes {
+            r.bottom() - 12.0
+        } else {
+            r.y + self.review_text_top(r) - COMMENTS_HEADING
+        };
+        Rect::new(r.x + 12.0, top, r.w - 24.0, (bottom - top).max(0.0))
     }
 
     fn revision_index(&self) -> usize {
@@ -151,8 +175,8 @@ impl WinState {
         if !r.contains(x, y) {
             return None;
         }
-        if y < r.y + 32.0 {
-            if x > r.right() - 30.0 {
+        if y < r.y + 34.0 {
+            if close_box(r).inset(-4.0).contains(x, y) {
                 self.close_pane();
                 self.review_closed = true;
             }
@@ -160,7 +184,8 @@ impl WinState {
         }
         if y < r.y + HEADER {
             self.focus_main();
-            self.review_filter = match ((x - r.x) / (r.w / 3.0)) as usize {
+            let tabs = tab_bounds(r);
+            self.review_filter = match ((x - tabs.x) / (tabs.w / 3.0)).max(0.0) as usize {
                 0 => Filter::All,
                 1 => Filter::Comments,
                 _ => Filter::Changes,
@@ -174,26 +199,33 @@ impl WinState {
         }
         if self.review_filter != Filter::Comments && self.main_view().doc.has_changes() {
             let changes = self.main_view().doc.changes_in(StoryId::Main);
-            if y < r.y + HEADER + 32.0 {
-                self.focus_main();
-                let index = self.revision_index();
-                let next = if self.main_view().change_here().is_none() {
-                    0
-                } else if x < r.x + r.w / 2.0 {
-                    index.saturating_sub(1)
-                } else {
-                    (index + 1).min(changes.len() - 1)
-                };
-                let (a, b, _) = changes[next];
-                self.main_view_mut().select_found(a, b);
-            } else if y < r.y + HEADER + 64.0 {
-                self.focus_main();
-                if self.main_view().change_here().is_none() {
-                    let (a, b, _) = changes[self.revision_index()];
+            match review_buttons(r)
+                .iter()
+                .position(|b| b.inset(-3.0).contains(x, y))
+            {
+                Some(button @ (0 | 1)) => {
+                    self.focus_main();
+                    let index = self.revision_index();
+                    let next = if self.main_view().change_here().is_none() {
+                        0
+                    } else if button == 0 {
+                        index.saturating_sub(1)
+                    } else {
+                        (index + 1).min(changes.len() - 1)
+                    };
+                    let (a, b, _) = changes[next];
                     self.main_view_mut().select_found(a, b);
                 }
-                self.main_view_mut().resolve_change(x < r.x + r.w / 2.0);
-                self.sync_pane();
+                Some(button) => {
+                    self.focus_main();
+                    if self.main_view().change_here().is_none() {
+                        let (a, b, _) = changes[self.revision_index()];
+                        self.main_view_mut().select_found(a, b);
+                    }
+                    self.main_view_mut().resolve_change(button == 2);
+                    self.sync_pane();
+                }
+                None => {}
             }
         }
         Some(Effect::None)
@@ -203,155 +235,234 @@ impl WinState {
         let Some(r) = self.revisions_bounds() else {
             return;
         };
+        let font = quill_layout::fonts::UI_FONT;
         let comments = self.review_filter != Filter::Changes;
         let body_top = self.review_text_top(r);
+        let pointer = self.pointer;
+        let hover = |b: Rect| b.contains(pointer.0, pointer.1);
         let heading = Rect::new(r.x, r.y, r.w, if comments { body_top } else { r.h });
         let clip = c.set_clip(heading);
-        c.fill(heading, 0xF5F5F5);
-        let font = quill_layout::fonts::UI_FONT;
-        label.draw(
-            c,
-            font,
-            13.0,
-            true,
-            r.x + 12.0,
-            r.y + 22.0,
-            "Review",
-            color::BLACK,
-        );
-        label.draw(
-            c,
-            font,
-            16.0,
-            false,
-            r.right() - 24.0,
-            r.y + 23.0,
-            "×",
-            0x555555,
-        );
-        for (i, (text, filter)) in [
-            ("All", Filter::All),
-            ("Comments", Filter::Comments),
-            ("Changes", Filter::Changes),
-        ]
-        .iter()
-        .enumerate()
-        {
-            review_button(
-                c,
-                label,
-                Rect::new(
-                    r.x + i as f32 * r.w / 3.0 + 4.0,
-                    r.y + 36.0,
-                    r.w / 3.0 - 8.0,
-                    28.0,
-                ),
-                text,
-                self.review_filter == *filter,
-            );
+        c.fill(heading, PANEL);
+        label.draw(c, font, 13.0, true, r.x + 14.0, r.y + 24.0, "Review", TEXT);
+        let close = close_box(r);
+        if hover(close) {
+            round_rect(c, close, 5.0, 0xE2E2E2);
         }
+        centered(c, label, close, 15.0, false, "×", MUTED);
+
+        // A segmented switch, as in a Mac sidebar: one white segment for the
+        // current filter on a gray track.
+        let tabs = tab_bounds(r);
+        round_rect(c, tabs, 6.0, 0xE3E3E3);
+        let third = tabs.w / 3.0;
+        let size = if label.width(font, 12.0, true, "Comments") > third - 10.0 {
+            11.0
+        } else {
+            12.0
+        };
+        for (i, (text, filter)) in FILTERS.iter().enumerate() {
+            let segment = Rect::new(tabs.x + i as f32 * third, tabs.y, third, tabs.h);
+            let on = self.review_filter == *filter;
+            if on {
+                boxed(c, segment.inset(2.0), 5.0, 0xC8C8C8, color::WHITE);
+            } else if i > 0 && self.review_filter != FILTERS[i - 1].1 {
+                c.vline(segment.x, segment.y + 6.0, segment.bottom() - 6.0, 0xC4C4C4);
+            }
+            centered(c, label, segment, size, on, text, TEXT);
+        }
+
         let changes = self.main_view().doc.changes_in(StoryId::Main);
         if self.review_filter != Filter::Comments {
             if changes.is_empty() {
                 if self.review_filter == Filter::Changes {
-                    let mut y = r.y + HEADER + 24.0;
-                    revision_line(c, label, r, &mut y, "No tracked changes.", false);
+                    let y = r.y + HEADER + 20.0;
+                    label.draw(
+                        c,
+                        font,
+                        12.0,
+                        false,
+                        r.x + 14.0,
+                        y,
+                        "No tracked changes",
+                        MUTED,
+                    );
                 }
             } else {
+                let here = self.main_view().change_here();
                 let index = self.revision_index();
-                let width = r.w / 2.0;
-                for (i, text) in ["Previous", "Next", "Accept", "Reject"].iter().enumerate() {
-                    review_button(
-                        c,
-                        label,
-                        Rect::new(
-                            r.x + (i % 2) as f32 * width + 4.0,
-                            r.y + HEADER + (i / 2) as f32 * 32.0,
-                            width - 8.0,
-                            28.0,
-                        ),
-                        text,
-                        false,
-                    );
+                let enabled = [
+                    here.is_none() || index > 0,
+                    here.is_none() || index + 1 < changes.len(),
+                    true,
+                    true,
+                ];
+                let names = ["‹ Previous", "Next ›", "Accept", "Reject"];
+                for (i, b) in review_buttons(r).into_iter().enumerate() {
+                    push_button(c, label, b, names[i], enabled[i], hover(b));
                 }
                 let shown = changes[index];
                 if self.review_shown != Some(shown) {
                     self.review_detail_scroll = 0.0;
                     self.review_shown = Some(shown);
                 }
-                let detail_bottom = if comments {
-                    r.y + body_top - 30.0
+                let (a, b, id) = shown;
+                let rows = attribution(id);
+                let mut card = self.card_bounds(r);
+                let excerpt = self.change_excerpt(a, b);
+                let lines = if excerpt.is_empty() {
+                    Vec::new()
                 } else {
-                    r.bottom() - 8.0
+                    wrap(label, &format!("\u{201C}{excerpt}\u{201D}"), card.w - 28.0)
                 };
-                let detail_top = r.y + HEADER + 68.0;
-                let detail_clip = c.set_clip(Rect::new(
-                    r.x,
-                    detail_top,
-                    r.w,
-                    (detail_bottom - detail_top).max(0.0),
-                ));
-                let mut y = detail_top + 15.0 - self.review_detail_scroll;
-                revision_line(
-                    c,
-                    label,
-                    r,
-                    &mut y,
-                    &format!("Change {} of {}", index + 1, changes.len()),
-                    true,
-                );
-                for (kind, author, date) in attribution(changes[index].2) {
-                    revision_line(c, label, r, &mut y, &format!("{kind} {author}"), true);
-                    if !date.is_empty() {
-                        revision_line(c, label, r, &mut y, &date.replace('T', " "), false);
-                    }
-                    y += 8.0;
+                if self.review_filter == Filter::Changes {
+                    // With the pane to itself, the card is only as tall as its text.
+                    let dated = rows.iter().filter(|(_, _, date)| !date.is_empty()).count();
+                    let text = 42.0 + 22.0 * rows.len() as f32 + 16.0 * dated as f32;
+                    card.h = card.h.min(text + 17.0 * lines.len() as f32 + 2.0);
                 }
-                self.review_detail_max = (y + self.review_detail_scroll - detail_bottom).max(0.0);
+                boxed(c, card, 6.0, 0xD6D6D6, color::WHITE);
+                // A stripe in the editor's color, as their changes show in the text.
+                if let Some((_, author, _)) = rows.first() {
+                    c.fill(
+                        Rect::new(card.x + 1.0, card.y + 6.0, 3.0, (card.h - 12.0).max(0.0)),
+                        author_color(author),
+                    );
+                }
+                let detail_clip = c.set_clip(card.inset(1.0));
+                let x = card.x + 14.0;
+                let mut y = card.y + 20.0 - self.review_detail_scroll;
+                let count = format!("Change {} of {}", index + 1, changes.len());
+                label.draw(c, font, 11.0, false, x, y, &count, MUTED);
+                y += 22.0;
+                for (kind, author, date) in &rows {
+                    let w = label.draw(c, font, 12.0, true, x, y, author, author_color(author));
+                    let verb = kind.trim_end_matches(" by").to_lowercase();
+                    label.draw(c, font, 12.0, false, x + w + 4.0, y, &verb, TEXT);
+                    if !date.is_empty() {
+                        y += 16.0;
+                        label.draw(c, font, 11.0, false, x, y, &short_date(date), MUTED);
+                    }
+                    y += 22.0;
+                }
+                // The changed words, struck through when they are a deletion.
+                if !lines.is_empty() {
+                    let deleted = rows.iter().all(|(kind, _, _)| kind == "Deleted by");
+                    for (i, line) in lines.iter().enumerate() {
+                        let w = label.draw(c, font, 12.0, false, x, y, line, TEXT);
+                        if deleted {
+                            // Strike the words, not the quotation marks.
+                            let open = if i == 0 {
+                                label.width(font, 12.0, false, "\u{201C}")
+                            } else {
+                                0.0
+                            };
+                            let close = if i + 1 == lines.len() {
+                                label.width(font, 12.0, false, "\u{201D}")
+                            } else {
+                                0.0
+                            };
+                            c.hline(x + open, x + w - close, y - 4.0, TEXT);
+                        }
+                        y += 17.0;
+                    }
+                }
+                self.review_detail_max =
+                    (y - 5.0 + self.review_detail_scroll - card.bottom()).max(0.0);
                 self.review_detail_scroll = self.review_detail_scroll.min(self.review_detail_max);
                 c.restore_clip(detail_clip);
             }
         }
         if comments {
-            let y = r.y + body_top - 8.0;
-            label.draw(c, font, 12.0, true, r.x + 12.0, y, "Comments", color::BLACK);
-            c.hline(r.x, r.right(), r.y + body_top - 1.0, 0xD0D0D0);
+            let y = r.y + body_top - 12.0;
+            let w = label.draw(c, font, 12.0, true, r.x + 14.0, y, "Comments", TEXT);
+            let count =
+                quill_core::notes::annotation_ids(&self.main_view().doc.annotations.paras).len();
+            if count > 0 {
+                label.draw(
+                    c,
+                    font,
+                    12.0,
+                    false,
+                    r.x + 20.0 + w,
+                    y,
+                    &count.to_string(),
+                    MUTED,
+                );
+            }
+            c.hline(r.x, r.right(), r.y + body_top - 1.0, EDGE);
         }
         c.restore_clip(clip);
-        c.vline(r.x, r.y, r.bottom(), 0xD0D0D0);
-        let dragging =
-            self.review_resize.is_some() || self.review_divider_hit(self.pointer.0, self.pointer.1);
-        c.fill(
-            Rect::new(r.x - DIVIDER_WIDTH, r.y, DIVIDER_WIDTH, r.h),
-            if dragging { 0xDADADA } else { 0xF0F0F0 },
-        );
-        let center = r.x - DIVIDER_WIDTH / 2.0;
-        c.vline(
-            center,
-            r.y + (r.h - 28.0) / 2.0,
-            r.y + (r.h + 28.0) / 2.0,
-            0xA0A0A0,
+
+        // The divider: part of the sidebar, with a grip in the middle that
+        // darkens while it can be dragged.
+        let strip = Rect::new(r.x - DIVIDER_WIDTH, r.y, DIVIDER_WIDTH, r.h);
+        let active = self.review_resize.is_some() || self.review_divider_hit(pointer.0, pointer.1);
+        c.fill(strip, if active { 0xE6E6E6 } else { PANEL });
+        c.vline(strip.x, r.y, r.bottom(), EDGE);
+        round_rect(
+            c,
+            Rect::new(
+                strip.x + (DIVIDER_WIDTH - 3.0) / 2.0,
+                r.y + (r.h - 36.0) / 2.0,
+                3.0,
+                36.0,
+            ),
+            1.5,
+            if active { 0x8E8E8E } else { 0xC4C4C4 },
         );
         if comments && !self.has_comments() && !self.pane.as_ref().is_some_and(|p| p.focused) {
-            let empty = Rect::new(
-                r.x + 1.0,
-                r.y + body_top,
-                r.w - 1.0,
-                (r.h - body_top).max(0.0),
-            );
+            let empty = Rect::new(r.x, r.y + body_top, r.w, (r.h - body_top).max(0.0));
             let clip = c.set_clip(empty);
-            c.fill(empty, 0xFFFFFF);
+            c.fill(empty, color::WHITE);
             label.draw(
                 c,
                 font,
                 12.0,
                 false,
-                r.x + 12.0,
+                r.x + 14.0,
                 empty.y + 24.0,
-                "No comments.",
-                0x555555,
+                "No comments",
+                MUTED,
             );
             c.restore_clip(clip);
+        }
+    }
+
+    /// The text a change covers, on one line and cut short, for the card.
+    fn change_excerpt(&self, a: Position, b: Position) -> String {
+        const MOST: usize = 80;
+        let paras = &self.main_view().doc.main.paras;
+        let mut out = String::new();
+        let last = b.para.min(paras.len().saturating_sub(1));
+        for (i, para) in paras.iter().enumerate().take(last + 1).skip(a.para) {
+            let text = &para.text;
+            let start = if i == a.para {
+                a.offset.min(text.len())
+            } else {
+                0
+            };
+            let end = if i == b.para {
+                b.offset.min(text.len())
+            } else {
+                text.len()
+            };
+            if i > a.para {
+                out.push(' ');
+            }
+            // Leave out the marks that stand for pictures, fields and notes.
+            out.extend(text.get(start..end).unwrap_or("").chars().filter(|&ch| {
+                !ch.is_control() && !('\u{E000}'..='\u{F8FF}').contains(&ch) && ch != '\u{FFFC}'
+            }));
+            if out.chars().count() > MOST {
+                break;
+            }
+        }
+        let out = out.trim();
+        if out.chars().count() > MOST {
+            let cut: String = out.chars().take(MOST - 3).collect();
+            format!("{}...", cut.trim_end())
+        } else {
+            out.to_string()
         }
     }
 
@@ -411,14 +522,17 @@ impl WinState {
             if badge.changes.len() > 1 {
                 badge.tip.push_str("\nClick again to cycle changes");
             }
-            c.fill(badge.rect, 0xEDEDED);
-            c.frame(badge.rect, badge.color);
+            // A pill in a pale wash of the editor's color.
+            let font = quill_layout::fonts::UI_FONT;
+            let w = label.width(font, 10.0, true, &badge.text);
+            badge.rect.w = (w + 12.0).max(20.0);
+            round_rect(c, badge.rect, badge.rect.h / 2.0, tint(badge.color, 0.85));
             label.draw(
                 c,
-                quill_layout::fonts::UI_FONT,
+                font,
                 10.0,
                 true,
-                badge.rect.x + 5.0,
+                badge.rect.x + (badge.rect.w - w) / 2.0,
                 badge.rect.y + 13.0,
                 &badge.text,
                 badge.color,
@@ -445,20 +559,6 @@ fn initials(author: &str) -> String {
         result.push('?');
     }
     result
-}
-
-fn review_button(c: &mut Canvas, label: &mut Label, r: Rect, text: &str, selected: bool) {
-    c.fill(r, if selected { 0xD7E8FA } else { 0xE5E5E5 });
-    label.draw(
-        c,
-        quill_layout::fonts::UI_FONT,
-        12.0,
-        selected,
-        r.x + 5.0,
-        r.y + 19.0,
-        text,
-        color::BLACK,
-    );
 }
 
 fn attribution(id: u32) -> Vec<(String, String, String)> {
@@ -490,23 +590,168 @@ fn attribution(id: u32) -> Vec<(String, String, String)> {
     .collect()
 }
 
-fn revision_line(c: &mut Canvas, label: &mut Label, r: Rect, y: &mut f32, text: &str, bold: bool) {
+const FILTERS: [(&str, Filter); 3] = [
+    ("All", Filter::All),
+    ("Comments", Filter::Comments),
+    ("Changes", Filter::Changes),
+];
+
+fn close_box(r: Rect) -> Rect {
+    Rect::new(r.right() - 32.0, r.y + 7.0, 22.0, 22.0)
+}
+
+fn tab_bounds(r: Rect) -> Rect {
+    Rect::new(r.x + 12.0, r.y + 36.0, r.w - 24.0, 22.0)
+}
+
+/// How many rows the change buttons take: one when all four fit, else
+/// Previous and Next above Accept and Reject, else one button a row.
+fn button_rows(r: Rect) -> usize {
+    let room = r.w - 24.0;
+    let [prev, next, accept, reject] = BUTTON_WIDTHS;
+    if prev + next + accept + reject + 6.0 * 2.0 + 10.0 <= room {
+        1
+    } else if (prev + next).max(accept + reject) + 6.0 <= room {
+        2
+    } else {
+        4
+    }
+}
+
+fn buttons_height(r: Rect) -> f32 {
+    button_rows(r) as f32 * BUTTON_ROW + 4.0
+}
+
+/// Previous, Next, Accept and Reject. On one row, Previous and Next sit
+/// at the left and Accept and Reject at the right.
+pub(super) fn review_buttons(r: Rect) -> [Rect; 4] {
+    let top = r.y + HEADER;
+    let (left, right) = (r.x + 12.0, r.right() - 12.0);
+    let [prev, next, accept, reject] = BUTTON_WIDTHS;
+    let button = |x: f32, row: usize, w: f32| {
+        Rect::new(x, top + row as f32 * BUTTON_ROW, w, BUTTON_ROW - 6.0)
+    };
+    match button_rows(r) {
+        1 => [
+            button(left, 0, prev),
+            button(left + prev + 6.0, 0, next),
+            button(right - reject - 6.0 - accept, 0, accept),
+            button(right - reject, 0, reject),
+        ],
+        2 => [
+            button(left, 0, prev),
+            button(left + prev + 6.0, 0, next),
+            button(left, 1, accept),
+            button(left + accept + 6.0, 1, reject),
+        ],
+        _ => [0, 1, 2, 3].map(|n| button(left, n, BUTTON_WIDTHS[n].min(right - left))),
+    }
+}
+
+/// Room for the change card when comments share the pane.
+fn card_height(r: Rect) -> f32 {
+    (r.h * 0.22).clamp(96.0, 170.0)
+}
+
+fn author_color(author: &str) -> u32 {
+    quill_core::revision::author_color(author).0
+}
+
+/// Mix `color` toward white; `k` of 1 is white.
+fn tint(color: u32, k: f32) -> u32 {
+    let mix = |shift: u32| {
+        let v = ((color >> shift) & 0xFF) as f32;
+        ((v + (255.0 - v) * k).round() as u32) << shift
+    };
+    mix(16) | mix(8) | mix(0)
+}
+
+/// "2026-10-23T09:00:00Z" as "2026-10-23 09:00", as the comments show it.
+fn short_date(date: &str) -> String {
+    let date = date.replace('T', " ");
+    date.get(..16).unwrap_or(&date).to_string()
+}
+
+fn boxed(c: &mut Canvas, r: Rect, radius: f32, border: u32, fill: u32) {
+    round_rect(c, r, radius, border);
+    let hair = c.hair();
+    round_rect(c, r.inset(hair), (radius - hair).max(1.0), fill);
+}
+
+fn centered(
+    c: &mut Canvas,
+    label: &mut Label,
+    r: Rect,
+    size: f32,
+    bold: bool,
+    text: &str,
+    color: u32,
+) {
     let font = quill_layout::fonts::UI_FONT;
+    let w = label.width(font, size, bold, text);
+    let baseline = r.y + (r.h + size * 0.7) / 2.0;
+    label.draw(
+        c,
+        font,
+        size,
+        bold,
+        r.x + (r.w - w) / 2.0,
+        baseline,
+        text,
+        color,
+    );
+}
+
+/// A bordered push button, as in the dialogs.
+fn push_button(c: &mut Canvas, label: &mut Label, r: Rect, text: &str, enabled: bool, hover: bool) {
+    let fill = if enabled && hover {
+        0xEFEFEF
+    } else {
+        color::WHITE
+    };
+    boxed(c, r, 5.0, 0xC2C2C2, fill);
+    centered(
+        c,
+        label,
+        r,
+        11.5,
+        false,
+        text,
+        if enabled { TEXT } else { 0xA8A8A8 },
+    );
+}
+
+/// Break `text` into lines no wider than `width`, between words where it
+/// can and inside a word that is wider than a line on its own.
+fn wrap(label: &mut Label, text: &str, width: f32) -> Vec<String> {
+    let font = quill_layout::fonts::UI_FONT;
+    let mut lines = Vec::new();
     let mut line = String::new();
-    for ch in text.chars() {
-        line.push(ch);
-        if label.width(font, 12.0, bold, &line) > r.w - 30.0 || ch == '\n' {
-            let last = line.pop().unwrap();
-            label.draw(c, font, 12.0, bold, r.x + 12.0, *y, &line, color::BLACK);
-            *y += 17.0;
-            line.clear();
-            if last != '\n' {
-                line.push(last);
+    for word in text.split(' ') {
+        let candidate = if line.is_empty() {
+            word.to_string()
+        } else {
+            format!("{line} {word}")
+        };
+        if label.width(font, 12.0, false, &candidate) <= width {
+            line = candidate;
+            continue;
+        }
+        if !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+        for ch in word.chars() {
+            line.push(ch);
+            if line.chars().count() > 1 && label.width(font, 12.0, false, &line) > width {
+                line.pop();
+                lines.push(std::mem::replace(&mut line, ch.to_string()));
             }
         }
     }
-    label.draw(c, font, 12.0, bold, r.x + 12.0, *y, &line, color::BLACK);
-    *y += 17.0;
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -548,11 +793,15 @@ mod tests {
         state.width = 900.0;
         state.height = 700.0;
         let r = state.revisions_bounds().unwrap();
-        state.revision_click(r.x + 10.0, r.y + HEADER + 10.0);
+        let buttons = review_buttons(r);
+        let center = |b: Rect| (b.x + b.w / 2.0, b.y + b.h / 2.0);
+        let (x, y) = center(buttons[0]);
+        state.revision_click(x, y);
         assert_eq!(state.revision_index(), 0);
         let id = state.main_view().change_here().unwrap().2;
         assert_eq!(attribution(id)[0].1, "Ada");
-        state.revision_click(r.x + r.w * 0.75, r.y + HEADER + 10.0);
+        let (x, y) = center(buttons[1]);
+        state.revision_click(x, y);
         assert_eq!(state.revision_index(), 1);
         let id = state.main_view().change_here().unwrap().2;
         assert_eq!(attribution(id)[0].1, "Grace");

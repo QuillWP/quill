@@ -50,8 +50,8 @@ const MAGIC: &[u8; 8] = b"QUILLDOC";
 const MAJOR: u16 = 1;
 /// 1.1: sections' own headers and footers. 1.2: bounded picture previews.
 /// 1.3: hyperlinks. 1.4: tracked changes, and comments' ranges, replies and
-/// resolved state.
-const MINOR: u16 = 4;
+/// resolved state. 1.5: live tables of contents.
+const MINOR: u16 = 5;
 
 /// Whether `bytes` is a `.qwp` file rather than some other ZIP (.docx).
 pub fn is_quill(bytes: &[u8]) -> bool {
@@ -601,6 +601,7 @@ fn document_props(o: &mut Out, p: &DocumentProps) {
         footnote_restart_each_page,
         footnote_start,
         track_changes,
+        live_toc,
     } = p;
     o.int(1, *page_width as i64);
     o.int(2, *page_height as i64);
@@ -628,6 +629,14 @@ fn document_props(o: &mut Out, p: &DocumentProps) {
     o.flag(16, *footnote_restart_each_page);
     o.uint(17, *footnote_start as u64);
     o.flag(18, *track_changes);
+    if let Some(t) = live_toc {
+        o.nest(19, |o| {
+            o.flag(1, t.outline);
+            o.flag(2, t.page_numbers);
+            o.uint(3, t.from as u64);
+            o.uint(4, t.to as u64);
+        });
+    }
 }
 
 fn summary(o: &mut Out, s: &SummaryInfo) {
@@ -1205,6 +1214,20 @@ fn read_document_props(b: &[u8]) -> Result<DocumentProps, Damaged> {
             16 => p.footnote_restart_each_page = flag(f)?,
             17 => p.footnote_start = u16_of(f)?.max(1),
             18 => p.track_changes = flag(f)?,
+            19 => {
+                let mut t = quill_core::contents::TocOptions::default();
+                for (tag, g) in fields(f)? {
+                    match tag {
+                        1 => t.outline = flag(g)?,
+                        2 => t.page_numbers = flag(g)?,
+                        3 => t.from = (uint(g)?.clamp(1, 9)) as u8,
+                        4 => t.to = (uint(g)?.clamp(1, 9)) as u8,
+                        _ => {}
+                    }
+                }
+                t.to = t.to.max(t.from);
+                p.live_toc = Some(t);
+            }
             _ => {}
         }
     }

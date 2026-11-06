@@ -28,6 +28,7 @@ impl DocView {
             text
         };
         let end = self.doc.insert_text(MAIN, at, &text, chp);
+        self.caret_formats.clear();
         self.finish_edit(Selection::caret(end));
         match &mut self.repeat {
             Some(Repeatable::Text(t)) => t.push_str(&text),
@@ -85,6 +86,9 @@ impl DocView {
     pub(super) fn delete_range(&mut self, s: Position, e: Position) -> Position {
         if !self.crosses_table(s, e) {
             return self.doc.delete(MAIN, s, e);
+        }
+        if let Some(at) = self.doc.delete_whole_tables(MAIN, s, e) {
+            return at;
         }
         for p in (s.para..=e.para).rev() {
             let len = self.doc.main.paras[p].len();
@@ -346,6 +350,9 @@ impl DocView {
             InsertTable => return Effect::Dialog(DialogId::InsertTable),
             TableCells => return Effect::Dialog(DialogId::TableCells),
             TableLayout => return Effect::Dialog(DialogId::TableLayout),
+            SelectTable => self.select_table(),
+            UpdateToc => self.update_toc(),
+            MakeTocEditable => self.make_toc_editable(),
             StyleDialog => return Effect::Dialog(DialogId::Style),
             Preferences => return Effect::Dialog(DialogId::Preferences),
             DefaultFont => return Effect::Dialog(DialogId::DefaultFont),
@@ -422,6 +429,7 @@ impl DocView {
             TitleCase => self.change_case(quill_core::tools::Case::Title),
             SentenceCase => self.change_case(quill_core::tools::Case::Sentence),
             ToggleCase => self.change_case(quill_core::tools::Case::Toggle),
+            CycleCase => self.cycle_case(),
             Sort | SortDescending => self.sort(cmd == SortDescending),
             Calculate => self.calculate(clip),
             RepaginateNow => self.invalidate_layout(),
@@ -472,15 +480,34 @@ impl DocView {
                         DeleteForward => e = story.next_char(e),
                         _ => e = story.next_word(e),
                     }
-                    // With Track Changes on, deleted text stays where it
-                    // was. Step over it, so the key reaches text that is
-                    // still there.
-                    while tracking && cmd == Backspace && s != story.start() && self.deleted(s, e) {
+                    // Text deleted with Track Changes stays where it was,
+                    // struck through or hidden. Step over it while tracking
+                    // (it is deleted already) or while it is hidden (the
+                    // key would do nothing you can see), so the key reaches
+                    // text that is still there.
+                    let step_over = tracking || !self.show_changes;
+                    while step_over && cmd == Backspace && s != story.start() && self.deleted(s, e)
+                    {
                         s = story.prev_char(s);
                     }
-                    while tracking && cmd == DeleteForward && e != story.end() && self.deleted(s, e)
+                    while step_over
+                        && cmd == DeleteForward
+                        && e != story.end()
+                        && self.deleted(s, e)
                     {
                         e = story.next_char(e);
+                    }
+                    // Without tracking, that one character goes for good
+                    // and the hidden deletion beside it stays as it was.
+                    if step_over && !tracking {
+                        match cmd {
+                            Backspace => e = story.next_char(s),
+                            DeleteForward => s = story.prev_char(e),
+                            _ => {}
+                        }
+                        if self.deleted(s, e) {
+                            return Effect::None;
+                        }
                     }
                 }
                 // One key over a cell or table edge does nothing.
@@ -535,6 +562,15 @@ impl DocView {
             NonbreakingHyphen => self.type_special(chars::NONBREAKING_HYPHEN),
 
             Undo => {
+                // A format chosen at the insertion point, with nothing
+                // typed in it yet, is undone first.
+                if self.caret_format_pending()
+                    && let Some(before) = self.caret_formats.pop()
+                {
+                    self.typing_chp = before;
+                    return Effect::None;
+                }
+                self.caret_formats.clear();
                 if let Some(sel) = self.doc.undo() {
                     self.sel = sel;
                     self.typing_chp = None;
@@ -559,6 +595,14 @@ impl DocView {
                 let Some(content) = clip.get() else {
                     return Effect::None;
                 };
+                if let Clip::Picture(bytes) = content {
+                    // Bytes that are not a picture Quill can read paste
+                    // nothing, and leave the selection alone.
+                    if let Some(pic) = quill_formats::images::picture(bytes) {
+                        self.insert_picture(pic);
+                    }
+                    return Effect::None;
+                }
                 if let Clip::Plain(text) = &content
                     && !self.room_for(quill_core::limits::Size::of_text(text))
                 {
@@ -576,6 +620,7 @@ impl DocView {
                         let chp = self.doc.main.paras[at.para].chp_at(at.offset);
                         self.doc.insert_plain(MAIN, at, &text, chp)
                     }
+                    Clip::Picture(_) => at,
                 };
                 self.finish_edit(Selection::caret(end));
                 self.undo_if_too_large("paste");
@@ -703,7 +748,20 @@ impl DocView {
     }
 
     /// Label for the Edit menu's first item.
+    /// Whether a format chosen at the insertion point is waiting to be
+    /// undone before the document's own history.
+    fn caret_format_pending(&self) -> bool {
+        self.typing_chp.is_some() && !self.caret_formats.is_empty()
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.caret_format_pending() || self.doc.undo_label().is_some()
+    }
+
     pub fn undo_label(&self) -> String {
+        if self.caret_format_pending() {
+            return "Undo Formatting".to_string();
+        }
         match self.doc.undo_label() {
             Some(l) => format!("Undo {l}"),
             None => "Can't Undo".to_string(),
@@ -748,6 +806,7 @@ impl DocView {
         if self.sel.is_empty() {
             let mut c = self.current_chp();
             f(&mut c);
+            self.caret_formats.push(self.typing_chp);
             self.typing_chp = Some(c);
             return;
         }
@@ -757,10 +816,12 @@ impl DocView {
         self.finish_edit(self.sel);
     }
 
+    /// Apply a paragraph change to the selected paragraphs. A selection
+    /// that ends at the very start of a paragraph leaves that one alone.
     pub fn format_paras(&mut self, label: &'static str, f: impl FnMut(&mut ParaProps)) {
-        let (s, e) = self.sel.range();
+        let (first, last) = self.selected_paras();
         self.doc.begin(label, self.sel);
-        self.doc.format_paras(MAIN, s.para, e.para, f);
+        self.doc.format_paras(MAIN, first, last, f);
         let sel = self.sel;
         self.finish_edit(sel);
     }
@@ -826,10 +887,10 @@ impl DocView {
             Nest => self.format_paras(P, |p| p.left = (p.left / 720 + 1) * 720),
             Unnest => self.format_paras(P, |p| p.left = ((p.left - 1).max(0) / 720) * 720),
             NormalParagraph => {
-                let (s, e) = self.sel.range();
+                let (first, last) = self.selected_paras();
                 let styles = self.doc.styles.clone();
                 self.doc.begin(P, self.sel);
-                self.doc.format_paras(MAIN, s.para, e.para, |p| {
+                self.doc.format_paras(MAIN, first, last, |p| {
                     let style = p.style;
                     *p = styles.get(style).pap.clone();
                 });
@@ -875,9 +936,9 @@ impl DocView {
     }
 
     pub fn set_style(&mut self, style: u16) {
-        let (s, e) = self.sel.range();
+        let (first, last) = self.selected_paras();
         self.doc.begin("Style", self.sel);
-        self.doc.apply_style(MAIN, s.para, e.para, style);
+        self.doc.apply_style(MAIN, first, last, style);
         let sel = self.sel;
         self.finish_edit(sel);
     }
@@ -885,9 +946,9 @@ impl DocView {
     /// Start dragging something on the ruler. Returns the formats of the
     /// selected paragraphs as they are now, to apply the drag to.
     pub fn begin_ruler_drag(&mut self) -> Vec<ParaProps> {
-        let (s, e) = self.sel.range();
+        let (first, last) = self.selected_paras();
         self.doc.begin("Paragraph Formatting", self.sel);
-        self.doc.main.paras[s.para..=e.para]
+        self.doc.main.paras[first..=last]
             .iter()
             .map(|p| p.pap.clone())
             .collect()
@@ -896,9 +957,9 @@ impl DocView {
     /// Show the ruler drag so far: each paragraph gets its starting format
     /// with `f` applied.
     pub fn ruler_drag(&mut self, start: &[ParaProps], f: impl Fn(&mut ParaProps, &ParaProps)) {
-        let (s, e) = self.sel.range();
+        let (first, last) = self.selected_paras();
         let mut i = 0;
-        self.doc.format_paras(MAIN, s.para, e.para, |p| {
+        self.doc.format_paras(MAIN, first, last, |p| {
             if let Some(st) = start.get(i) {
                 f(p, st);
             }

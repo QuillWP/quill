@@ -260,7 +260,7 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
     }
 
     let undo = v.undo_label();
-    let can_undo = v.doc.undo_label().is_some();
+    let can_undo = v.can_undo();
     let repeat = v.repeat_label();
     let can_repeat = !repeat.starts_with("Can't");
     let edit = Menu {
@@ -391,6 +391,7 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             sep(),
             b.cmd("Table Cells…", Cmd::TableCells).enabled(in_table),
             b.cmd("Table Layout…", Cmd::TableLayout).enabled(in_table),
+            b.cmd("Select Table", Cmd::SelectTable).enabled(in_table),
             b.cmd("Frame…", Cmd::FrameDialog),
             sep(),
             b.cmd("Style…", Cmd::StyleDialog),
@@ -495,20 +496,37 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
             b.cmd("Section Break", Cmd::SectionBreak),
         ],
     };
+    // In a table of contents: update it, or turn it into ordinary text.
+    let toc = view
+        .doc
+        .existing_toc()
+        .filter(|&end| view.sel.start().para <= end)
+        .map(|_| view.doc.props.live_toc.is_some());
+    let mut toc_items = Vec::new();
+    if let Some(live) = toc {
+        toc_items.push(b.cmd("Update Table of Contents", Cmd::UpdateToc));
+        if live {
+            toc_items.push(b.cmd("Make Editable", Cmd::MakeTocEditable));
+        }
+        toc_items.push(Item::separator());
+    }
     let menu = Menu {
         title: String::new(),
-        items: vec![
-            b.cmd("Cut", Cmd::Cut).enabled(selected),
-            b.cmd("Copy", Cmd::Copy).enabled(selected),
-            b.cmd("Paste", Cmd::Paste).enabled(can_paste),
-            b.cmd("Paste as Text", Cmd::PasteText)
-                .enabled(can_paste_text),
-            Item::separator(),
-            b.item("Insert", Action::None).submenu(insert),
-            Item::separator(),
-            b.cmd("Font…", Cmd::CharacterDialog),
-            b.cmd("Paragraph…", Cmd::ParagraphDialog),
-        ],
+        items: toc_items
+            .into_iter()
+            .chain([
+                b.cmd("Cut", Cmd::Cut).enabled(selected),
+                b.cmd("Copy", Cmd::Copy).enabled(selected),
+                b.cmd("Paste", Cmd::Paste).enabled(can_paste),
+                b.cmd("Paste as Text", Cmd::PasteText)
+                    .enabled(can_paste_text),
+                Item::separator(),
+                b.item("Insert", Action::None).submenu(insert),
+                Item::separator(),
+                b.cmd("Font…", Cmd::CharacterDialog),
+                b.cmd("Paragraph…", Cmd::ParagraphDialog),
+            ])
+            .collect(),
     };
     (menu, b.actions)
 }

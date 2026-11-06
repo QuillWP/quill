@@ -43,6 +43,10 @@ impl DocView {
         let paras = self.toc_paragraphs(&o);
         self.doc.begin("Table of Contents", self.sel);
         self.doc.place_toc(paras);
+        self.doc.change_document_props(quill_core::DocumentProps {
+            live_toc: Some(o),
+            ..self.doc.props.clone()
+        });
         self.toc_refresh = Some(o);
         self.sel = Selection::caret(Position::new(0, 0));
     }
@@ -68,6 +72,93 @@ impl DocView {
         self.set_selection(sel);
         self.scroll_y = 0.0;
         !same
+    }
+
+    /// Bring a live table of contents up to date with its headings and
+    /// their pages, as part of the edit that changed them. Typing in it,
+    /// or formatting it, is undone the same way. Returns true if it
+    /// changed. A contents that is no longer whole (deleted, or its
+    /// section break gone) stops being live.
+    pub(super) fn keep_toc_live(&mut self) -> bool {
+        let Some(o) = self.doc.props.live_toc else {
+            return false;
+        };
+        let Some(end) = self.doc.existing_toc() else {
+            self.doc.continue_last("Table of Contents", self.sel);
+            self.doc.change_document_props(quill_core::DocumentProps {
+                live_toc: None,
+                ..self.doc.props.clone()
+            });
+            self.doc.commit(self.sel);
+            return false;
+        };
+        let paras = self.toc_paragraphs(&o);
+        let same = paras.len() == end + 1
+            && paras.iter().zip(&self.doc.main.paras).all(|(a, b)| {
+                a.text == b.text
+                    && a.pap.style == b.pap.style
+                    && a.run_bounds()
+                        .map(|r| *r.2)
+                        .eq(b.run_bounds().map(|r| *r.2))
+            });
+        if same {
+            return false;
+        }
+        // Typing or formatting in it goes back, with a word why.
+        if self.in_live_toc() {
+            self.status = Some(
+                "The table of contents keeps itself up to date. To change it by hand, right-click it and choose Make Editable."
+                    .into(),
+            );
+        }
+        self.doc.continue_last("Table of Contents", self.sel);
+        let n = self.doc.place_toc(paras);
+        // Keep the selection on the same text after the contents.
+        let shift = |p: Position| {
+            if p.para > end {
+                Position::new(p.para + n - (end + 1), p.offset)
+            } else {
+                Position::new(0, 0)
+            }
+        };
+        let sel = Selection::new(shift(self.sel.anchor), shift(self.sel.focus));
+        self.sel = sel;
+        self.doc.commit(sel);
+        true
+    }
+
+    /// Whether the selection is in a live table of contents.
+    pub fn in_live_toc(&self) -> bool {
+        self.doc.props.live_toc.is_some()
+            && self
+                .doc
+                .existing_toc()
+                .is_some_and(|end| self.sel.start().para <= end)
+    }
+
+    /// Update Table of Contents: make it again now, with the settings it
+    /// was made with (or the usual ones), and keep it live.
+    pub fn update_toc(&mut self) {
+        let o = self.doc.props.live_toc.unwrap_or_default();
+        if self.doc.existing_toc().is_none() {
+            return;
+        }
+        self.insert_toc(o);
+    }
+
+    /// Make Editable: the table of contents becomes ordinary text, kept
+    /// as it is, to change by hand. It no longer updates itself.
+    pub fn make_toc_editable(&mut self) {
+        if self.doc.props.live_toc.is_none() {
+            return;
+        }
+        let props = quill_core::DocumentProps {
+            live_toc: None,
+            ..self.doc.props.clone()
+        };
+        self.doc
+            .set_document_props("Make Editable", props, self.sel);
+        self.status = Some("The table of contents is now ordinary text.".into());
     }
 
     /// Start in the Index dialog: the index goes at the end of the
@@ -240,6 +331,101 @@ mod tests {
         assert_eq!(v.doc.main.paras.len(), 5);
         v.doc.undo();
         assert_eq!(v.doc.main.paras.len(), 3);
+        assert_eq!(v.doc.main.paras[0].text, "Chapter One");
+    }
+
+    #[test]
+    fn room_for_section_marks_leaves_pages_alone() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let text = (0..240)
+            .map(|i| format!("Line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut doc = quill_core::text::from_plain_text(&text);
+        for k in (15..240).step_by(20) {
+            let p = &mut doc.main.paras[k];
+            p.mark = quill_core::Mark::SectionBreak;
+            p.section = Some(Box::new(quill_core::SectionProps {
+                start: quill_core::SectionStart::NoBreak,
+                ..doc.section.clone()
+            }));
+        }
+        let mut v = DocView::new(doc, "T".into());
+        let mut by_view = Vec::new();
+        for page_view in [false, true] {
+            v.page_view = page_view;
+            v.update_layout(&mut fonts);
+            let starts: Vec<usize> = v.pages.iter().map(|p| p.para).collect();
+            let label = v.page_label(Position::new(239, 0)).1;
+            by_view.push((starts, label));
+        }
+        assert!(by_view[0].0.len() > 2);
+        assert_eq!(by_view[0], by_view[1]);
+        // Normal view has the room under each section's last line.
+        v.page_view = false;
+        v.update_layout(&mut fonts);
+        let gap = v.tops[16] - v.tops[15] - v.layout(15).height;
+        assert!((gap - SECTION_PAD).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_live_table_of_contents_follows_its_headings() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut doc = quill_core::text::from_plain_text("Chapter One\ntext\nChapter Two");
+        let h1 = doc.styles.find("heading 1").unwrap();
+        doc.apply_style(MAIN, 0, 0, h1);
+        doc.apply_style(MAIN, 2, 2, h1);
+        doc.forget_history();
+        let mut v = DocView::new(doc, "T".into());
+        let mut clip = crate::docview::Clipboard::new();
+        v.update_layout(&mut fonts);
+        v.insert_toc(TocOptions::default());
+        v.update_layout(&mut fonts);
+        assert!(v.doc.props.live_toc.is_some());
+        let toc = |v: &DocView| v.doc.main.paras[0].text.clone();
+        assert_eq!(toc(&v), "Chapter One\t1");
+
+        // Editing a heading updates it, and one Undo takes both back.
+        v.set_selection(Selection::caret(Position::new(2, 7)));
+        v.type_text("s");
+        v.update_layout(&mut fonts);
+        assert_eq!(toc(&v), "Chapters One\t1");
+        v.exec(crate::commands::Cmd::Undo, false, &mut clip);
+        v.update_layout(&mut fonts);
+        assert_eq!(toc(&v), "Chapter One\t1");
+        assert_eq!(v.doc.main.paras[2].text, "Chapter One");
+
+        // Typing in it does not stick while it is live.
+        v.set_selection(Selection::caret(Position::new(0, 3)));
+        v.type_text("xyz");
+        v.update_layout(&mut fonts);
+        assert_eq!(toc(&v), "Chapter One\t1");
+
+        // Made editable, it is ordinary text; Update makes it live again.
+        v.exec(crate::commands::Cmd::MakeTocEditable, false, &mut clip);
+        assert!(v.doc.props.live_toc.is_none());
+        v.set_selection(Selection::caret(Position::new(0, 3)));
+        v.type_text("xyz");
+        v.update_layout(&mut fonts);
+        assert_eq!(toc(&v), "Chaxyzpter One\t1");
+        v.exec(crate::commands::Cmd::UpdateToc, false, &mut clip);
+        v.update_layout(&mut fonts);
+        assert_eq!(toc(&v), "Chapter One\t1");
+        assert!(v.doc.props.live_toc.is_some());
+
+        // Deleted, it is gone for good: nothing brings it back.
+        let end = v.doc.existing_toc().unwrap();
+        v.set_selection(Selection::new(
+            Position::new(0, 0),
+            Position::new(end + 1, 0),
+        ));
+        v.exec(crate::commands::Cmd::Clear, false, &mut clip);
+        v.update_layout(&mut fonts);
+        assert!(v.doc.props.live_toc.is_none());
         assert_eq!(v.doc.main.paras[0].text, "Chapter One");
     }
 

@@ -350,9 +350,9 @@ pub fn reapply_ok(id: StyleId, d: &Dialog, view: &mut DocView) -> bool {
         view.invalidate_layout();
     } else {
         view.set_style(id);
-        let (s, e) = view.sel.range();
+        let (first, last) = view.selected_paras();
         view.doc.begin("Style", view.sel);
-        view.doc.revert_to_style(StoryId::Main, s.para, e.para);
+        view.doc.revert_to_style(StoryId::Main, first, last);
         view.doc.commit(view.sel);
     }
     true

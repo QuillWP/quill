@@ -5,40 +5,10 @@ use quill_core::StoryId;
 
 impl WinState {
     pub(super) fn open_context(&mut self, x: f32, y: f32, label: &mut Label, clip: &mut Clipboard) {
-        if self.dialogs.iter().any(|(_, d)| !d.modeless) {
+        let Some((m, actions)) = self.context_menu_at(x, y, clip) else {
             return;
-        }
+        };
         let (cx, cy) = (x / self.ui, y / self.ui);
-        if let Some((bounds, story)) = self.pane.as_ref().map(|p| (p.bounds, p.story)) {
-            if bounds.contains(cx, cy)
-                && pane::hit(bounds, story, self.same_as_previous_allowed(), cx, cy)
-                    == PaneHit::Text
-            {
-                self.focus_pane();
-            } else if !bounds.contains(cx, cy) {
-                self.focus_main();
-            } else {
-                return;
-            }
-        } else if let Some((_, other)) = self.active_rects()
-            && other.contains(cx, cy)
-        {
-            self.switch_pane();
-        }
-        let (dx, dy) = self.document_point(x, y);
-        if !self.view.area.contains(dx, dy) {
-            return;
-        }
-        for (_, dialog) in &mut self.dialogs {
-            if dialog.modeless {
-                dialog.inactive = true;
-            }
-        }
-        let (pos, upstream) = self.view.hit(dx, dy);
-        self.view.context_at(pos, upstream);
-        let forms = clip.forms();
-        let can_paste_text = forms.contains(&crate::paste_special::Form::Unformatted);
-        let (m, actions) = app_menus::context_menu(&self.view, !forms.is_empty(), can_paste_text);
         let bounds = Rect::new(0.0, 0.0, self.width, self.height);
         let anchor = Rect::new(cx, 0.0, 0.0, 0.0);
         let mut open = menu::place(label, &m, anchor, bounds, false);
@@ -52,6 +22,52 @@ impl WinState {
             opened: Instant::now(),
             held: false,
         });
+    }
+
+    /// Right-click at (`x`, `y`): put the insertion point there unless it
+    /// is in the selection, and build the menu for that place. None where
+    /// the document has no menu to offer.
+    pub(super) fn context_menu_at(
+        &mut self,
+        x: f32,
+        y: f32,
+        clip: &mut Clipboard,
+    ) -> Option<(crate::menu::Menu, Vec<Action>)> {
+        if self.dialogs.iter().any(|(_, d)| !d.modeless) {
+            return None;
+        }
+        let (cx, cy) = (x / self.ui, y / self.ui);
+        if let Some((bounds, story)) = self.pane.as_ref().map(|p| (p.bounds, p.story)) {
+            if bounds.contains(cx, cy)
+                && pane::hit(bounds, story, self.same_as_previous_allowed(), cx, cy)
+                    == PaneHit::Text
+            {
+                self.focus_pane();
+            } else if !bounds.contains(cx, cy) {
+                self.focus_main();
+            } else {
+                return None;
+            }
+        } else if let Some((_, other)) = self.active_rects()
+            && other.contains(cx, cy)
+        {
+            self.switch_pane();
+        }
+        let (dx, dy) = self.document_point(x, y);
+        if !self.view.area.contains(dx, dy) {
+            return None;
+        }
+        for (_, dialog) in &mut self.dialogs {
+            if dialog.modeless {
+                dialog.inactive = true;
+            }
+        }
+        let (pos, upstream) = self.view.hit(dx, dy);
+        self.view.context_at(pos, upstream);
+        let forms = clip.forms();
+        let can_paste_text = forms.contains(&crate::paste_special::Form::Unformatted);
+        let (m, actions) = app_menus::context_menu(&self.view, !forms.is_empty(), can_paste_text);
+        Some((m, actions))
     }
 
     pub(super) fn toolbar_top(&self) -> f32 {
@@ -170,7 +186,7 @@ impl WinState {
     pub(super) fn tool_state(&self) -> ToolState {
         ToolState {
             has_selection: !self.view.sel.is_empty(),
-            can_undo: self.view.doc.undo_label().is_some(),
+            can_undo: self.view.can_undo(),
             show_marks: self.view.show_marks,
         }
     }
@@ -254,6 +270,7 @@ impl WinState {
         focused: bool,
     ) {
         let (ww, wh) = c.size();
+        c.dark = self.dark;
         let k = self.ui;
         let z = self.view_zoom();
         let (w, h) = (ww / k, wh / k);

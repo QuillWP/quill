@@ -164,7 +164,7 @@ fn named_as_package(path: &Path) -> Option<&'static str> {
 /// Text rather than some other kind of file: no zero bytes, and hardly
 /// any control characters besides tabs, line ends and page breaks.
 fn looks_like_text(bytes: &[u8]) -> bool {
-    if utf16(bytes).is_some() {
+    if utf16(bytes).is_some() || unmarked_utf16(bytes).is_some() {
         return true;
     }
     let head = &bytes[..bytes.len().min(8192)];
@@ -184,6 +184,39 @@ fn utf16(bytes: &[u8]) -> Option<String> {
         _ => return None,
     };
     let units: Vec<u16> = bytes[2..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&b| {
+            if big {
+                u16::from_be_bytes(b)
+            } else {
+                u16::from_le_bytes(b)
+            }
+        })
+        .collect();
+    Some(String::from_utf16_lossy(&units))
+}
+
+/// Text in UTF-16 without a byte-order mark, as some Windows programs
+/// write it: told by the zero byte beside nearly every letter of English
+/// and other Latin-script text.
+fn unmarked_utf16(bytes: &[u8]) -> Option<String> {
+    let head = &bytes[..bytes.len().min(8192) & !1];
+    if head.len() < 4 || !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let pairs = head.len() / 2;
+    let zero_at = |k: usize| head.iter().skip(k).step_by(2).filter(|&&b| b == 0).count();
+    let (even, odd) = (zero_at(0), zero_at(1));
+    let big = if odd * 10 >= pairs * 7 && even * 10 <= pairs {
+        false
+    } else if even * 10 >= pairs * 7 && odd * 10 <= pairs {
+        true
+    } else {
+        return None;
+    };
+    let units: Vec<u16> = bytes
         .as_chunks::<2>()
         .0
         .iter()
@@ -227,12 +260,23 @@ fn too_large(path: &Path, size: quill_core::limits::Size) -> Result<(), String> 
 /// A file read as plain text, checked for size before any paragraphs are
 /// made, since a huge file of short lines would otherwise fill memory.
 fn plain_text(path: &Path, bytes: Vec<u8>) -> Result<Document, String> {
-    let text = match String::from_utf8(bytes) {
+    // UTF-16 first: its zero bytes can pass for UTF-8.
+    let text = match utf16(&bytes).or_else(|| unmarked_utf16(&bytes)) {
+        Some(text) => Ok(text),
+        None => String::from_utf8(bytes),
+    };
+    let text = match text {
         Ok(s) => s,
-        Err(e) if let Some(text) = utf16(e.as_bytes()) => text,
-        // Old files are often Mac Roman or Latin-1; Latin-1 keeps every
-        // byte readable even when a few accents come out wrong.
-        Err(e) => e.into_bytes().iter().map(|&b| b as char).collect(),
+        // Otherwise Windows' Western encoding (Windows-1252), which is
+        // Latin-1 with curly quotes, dashes and the euro sign in 0x80-0x9F.
+        Err(e) => e
+            .into_bytes()
+            .iter()
+            .map(|&b| match b {
+                0x80..=0x9F => crate::rtf::read::CP1252[(b - 0x80) as usize],
+                b => b as char,
+            })
+            .collect(),
     };
     too_large(path, quill_core::limits::Size::of_text(&text))?;
     Ok(quill_core::text::from_plain_text(&text))
@@ -687,6 +731,32 @@ mod tests {
         assert_eq!(
             load(&file("notepad.txt", &utf16)).unwrap().main.paras[0].text,
             "Caf\u{e9}"
+        );
+
+        // UTF-16 without its mark, and Windows-1252.
+        let bare: Vec<u8> = "Price \u{20ac}5"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(
+            load(&file("bare.txt", &bare)).unwrap().main.paras[0].text,
+            "Price \u{20ac}5"
+        );
+        let bare: Vec<u8> = "Big end"
+            .encode_utf16()
+            .flat_map(u16::to_be_bytes)
+            .collect();
+        assert_eq!(
+            load(&file("be.txt", &bare)).unwrap().main.paras[0].text,
+            "Big end"
+        );
+        assert_eq!(
+            load(&file("w1252.txt", b"\x93Caf\xe9\x94 \x80" as &[u8]))
+                .unwrap()
+                .main
+                .paras[0]
+                .text,
+            "\u{201c}Caf\u{e9}\u{201d} \u{20ac}"
         );
 
         // Text with more paragraphs than Quill holds is refused before it is

@@ -209,6 +209,10 @@ pub struct Pattern {
     pub whole_word: bool,
     pub chp: CharSpec,
     pub pap: ParaSpec,
+    /// Look past text deleted with Track Changes, as when the window
+    /// hides it: a match neither starts in it nor counts it, and a word
+    /// split by a hidden deletion is found whole.
+    pub skip_deleted: bool,
 }
 
 /// Which way to look.
@@ -314,6 +318,7 @@ impl Pattern {
             whole_word,
             chp,
             pap,
+            skip_deleted: false,
         }
     }
 
@@ -360,6 +365,22 @@ fn prev_pos(story: &Story, pos: Position) -> Option<Position> {
     Some(Position::new(pos.para - 1, story.paras[pos.para - 1].len()))
 }
 
+/// Whether the unit at `pos` is text, or a paragraph mark, deleted with
+/// Track Changes.
+fn deleted_at(story: &Story, pos: Position) -> bool {
+    let Some(p) = story.paras.get(pos.para) else {
+        return false;
+    };
+    let rev = if pos.offset < p.len() {
+        p.chp_of_char(pos.offset).rev
+    } else if pos.para + 1 < story.paras.len() {
+        p.mark_chp.rev
+    } else {
+        return false;
+    };
+    crate::revision::is_deleted(rev)
+}
+
 fn is_white(c: char) -> bool {
     matches!(
         c,
@@ -376,6 +397,27 @@ fn is_word_char(c: char) -> bool {
 }
 
 impl Pattern {
+    /// `pos`, moved on past any deleted text when that is skipped.
+    fn skip(&self, story: &Story, mut pos: Position) -> Position {
+        while self.skip_deleted && deleted_at(story, pos) {
+            match unit_at(story, pos) {
+                Some((_, next)) => pos = next,
+                None => break,
+            }
+        }
+        pos
+    }
+
+    /// The position before `pos`, stepping back over deleted text when
+    /// that is skipped.
+    fn prev(&self, story: &Story, pos: Position) -> Option<Position> {
+        let mut at = prev_pos(story, pos)?;
+        while self.skip_deleted && deleted_at(story, at) {
+            at = prev_pos(story, at)?;
+        }
+        Some(at)
+    }
+
     fn atom_matches(&self, atom: Atom, story: &Story, pos: Position, unit: Unit) -> bool {
         let p = &story.paras[pos.para];
         match (atom, unit) {
@@ -413,11 +455,14 @@ impl Pattern {
 
     /// Where a match starting at `start` ends, if there is one.
     fn match_at(&self, story: &Story, start: Position) -> Option<Position> {
+        if self.skip_deleted && deleted_at(story, start) {
+            return None;
+        }
         if self.atoms.is_empty() {
             return self.format_run_at(story, start);
         }
         if self.whole_word
-            && let Some(before) = prev_pos(story, start)
+            && let Some(before) = self.prev(story, start)
             && let Some((Unit::Char(c), _)) = unit_at(story, before)
             && is_word_char(c)
             && before.para == start.para
@@ -426,14 +471,19 @@ impl Pattern {
         }
         let mut pos = start;
         for &atom in &self.atoms {
+            pos = self.skip(story, pos);
             let (unit, next) = unit_at(story, pos)?;
             if !self.atom_matches(atom, story, pos, unit) || !self.format_ok(story, pos, unit) {
                 return None;
             }
             pos = next;
             if atom == Atom::White {
-                while let Some((u, n)) = unit_at(story, pos) {
-                    if matches!(u, Unit::Char(c) if is_white(c)) && self.format_ok(story, pos, u) {
+                loop {
+                    let at = self.skip(story, pos);
+                    let Some((u, n)) = unit_at(story, at) else {
+                        break;
+                    };
+                    if matches!(u, Unit::Char(c) if is_white(c)) && self.format_ok(story, at, u) {
                         pos = n;
                     } else {
                         break;
@@ -442,7 +492,7 @@ impl Pattern {
             }
         }
         if self.whole_word
-            && let Some((Unit::Char(c), _)) = unit_at(story, pos)
+            && let Some((Unit::Char(c), _)) = unit_at(story, self.skip(story, pos))
             && is_word_char(c)
         {
             return None;
@@ -472,12 +522,16 @@ impl Pattern {
         if !self.format_ok(story, start, unit) {
             return None;
         }
-        while let Some((u, next)) = unit_at(story, pos) {
+        loop {
+            let at = self.skip(story, pos);
+            let Some((u, next)) = unit_at(story, at) else {
+                break;
+            };
             let ok = match u {
                 Unit::Char(_) => true,
                 Unit::Mark(m) => m == Mark::Paragraph,
             };
-            if !ok || !self.format_ok(story, pos, u) {
+            if !ok || !self.format_ok(story, at, u) {
                 break;
             }
             pos = next;
@@ -673,6 +727,24 @@ pub fn replace(
     (start, out_end)
 }
 
+/// A position kept as its distance from the end of the story. Edits
+/// before it do not move it, so it can be found again after a replacement
+/// earlier in the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FromEnd(usize, usize);
+
+impl FromEnd {
+    pub fn new(s: &Story, at: Position) -> FromEnd {
+        let at = s.clamp(at);
+        FromEnd(s.paras.len() - at.para, s.paras[at.para].len() - at.offset)
+    }
+
+    pub fn get(self, s: &Story) -> Position {
+        let para = s.paras.len().saturating_sub(self.0);
+        Position::new(para, s.paras[para].len().saturating_sub(self.1))
+    }
+}
+
 /// Replace every match in `from..to`. Returns how many were replaced.
 pub fn replace_all(
     doc: &mut Document,
@@ -683,31 +755,24 @@ pub fn replace_all(
     to: Position,
     clip: Option<&Fragment>,
 ) -> usize {
-    // `to` is kept as a distance from the end of the story, which edits
-    // before it do not change.
-    let rel = {
-        let s = doc.story(story);
-        let to = s.clamp(to);
-        (s.paras.len() - to.para, s.paras[to.para].len() - to.offset)
-    };
-    let limit = |s: &Story| {
-        let para = s.paras.len().saturating_sub(rel.0);
-        Position::new(para, s.paras[para].len().saturating_sub(rel.1))
-    };
+    let limit = FromEnd::new(doc.story(story), to);
     let mut pos = from;
     let mut count = 0;
     loop {
         let s = doc.story(story);
-        let to = limit(s);
         let Some((a, b)) = find(s, pat, pos, Direction::Down) else {
             break;
         };
-        if b > to {
+        if b > limit.get(s) {
             break;
         }
+        // While tracking, the replaced text stays behind, struck through,
+        // after the replacement. Go on from past it, or it is found again
+        // and replaced forever.
+        let past = FromEnd::new(s, b);
         let (_, e) = replace(doc, story, a, b, rep, pat.match_case, clip);
         count += 1;
-        pos = e;
+        pos = e.max(past.get(doc.story(story)));
     }
     count
 }
@@ -749,6 +814,49 @@ mod tests {
             find(&d.main, &case, p(0, 0), Direction::Down),
             Some((p(0, 15), p(0, 18)))
         );
+    }
+
+    #[test]
+    fn hidden_deletions_are_looked_past() {
+        let mut d = doc(&["an OLDword here"]);
+        d.props.track_changes = true;
+        d.author = "Ada".into();
+        d.delete(StoryId::Main, p(0, 3), p(0, 6));
+        let find_in = |d: &Document, text: &str, skip: bool, whole: bool| {
+            let mut pat =
+                Pattern::new(text, false, whole, CharSpec::default(), ParaSpec::default());
+            pat.skip_deleted = skip;
+            find(&d.main, &pat, p(0, 0), Direction::Down)
+        };
+        // Shown, the deleted text is found like any other.
+        assert_eq!(find_in(&d, "old", false, false), Some((p(0, 3), p(0, 6))));
+        assert_eq!(find_in(&d, "an word", false, false), None);
+        // Hidden, Find reads what the reader sees.
+        assert_eq!(find_in(&d, "old", true, false), None);
+        assert_eq!(
+            find_in(&d, "an word", true, false),
+            Some((p(0, 0), p(0, 10)))
+        );
+        assert_eq!(find_in(&d, "word", true, true), Some((p(0, 6), p(0, 10))));
+        assert_eq!(find_in(&d, "word", false, true), None);
+        // Replacing across the hidden text, while tracking, leaves only
+        // the replacement once the changes are accepted.
+        let mut pat = Pattern::new(
+            "an word",
+            false,
+            false,
+            CharSpec::default(),
+            ParaSpec::default(),
+        );
+        pat.skip_deleted = true;
+        let rep = Replacement::new("one", CharSpec::default(), ParaSpec::default());
+        let end = d.main.end();
+        assert_eq!(
+            replace_all(&mut d, StoryId::Main, &pat, &rep, p(0, 0), end, None),
+            1
+        );
+        let accepted = crate::tracking::accepted(&d.main.paras);
+        assert_eq!(accepted[0].text, "one here");
     }
 
     #[test]

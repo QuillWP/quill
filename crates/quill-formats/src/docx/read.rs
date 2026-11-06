@@ -79,6 +79,12 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
         floating: Vec::new(),
         in_box: 0,
         in_table: false,
+        table_styles: HashMap::new(),
+        default_table_style: None,
+        defaults: (ParaProps::default(), CharProps::default()),
+        cell_layers: Vec::new(),
+        toc_field: None,
+        other_generated: false,
     };
     // .docm and .dotm files keep their Visual Basic project here.
     if zip.names().any(|n| n.ends_with("vbaProject.bin")) {
@@ -388,6 +394,14 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
         .filter_map(|(key, &prov)| Some((prov, *r.comment_ids.get(key)?)))
         .collect();
     crate::comments::settle(&mut r.doc, &real);
+    // A TOC field Quill can keep up to date, made as Quill makes its own (at
+    // the start, before a section break), stays live.
+    if r.toc_field.is_some() && r.doc.existing_toc().is_some() {
+        r.doc.props.live_toc = r.toc_field;
+        if !r.other_generated {
+            r.report.forget(notes::GENERATED_INDEXES);
+        }
+    }
     r.doc.forget_history();
     Ok((r.doc, r.report))
 }
@@ -642,6 +656,22 @@ struct Reader {
     style_nums: HashMap<String, (String, Option<usize>)>,
     /// Numbering styles, by the file's style id, and the numId each uses.
     list_styles: HashMap<String, String>,
+    /// Table styles by the file's id: each one's w:style element and those
+    /// of the styles it is based on, base first.
+    table_styles: HashMap<String, Vec<Element>>,
+    /// The table style tables without one of their own use.
+    default_table_style: Option<String>,
+    /// The document's default paragraph and character format.
+    defaults: (ParaProps, CharProps),
+    /// While a table cell is read: the parts of its table style that apply
+    /// to it, in order (the whole table, then banding, first and last rows
+    /// and columns). Each may hold a pPr, an rPr and a tcPr.
+    cell_layers: Vec<Element>,
+    /// The first TOC field met in the main text, as the settings Quill
+    /// would make it with.
+    toc_field: Option<quill_core::contents::TocOptions>,
+    /// An index, or a second table of contents, kept as plain text.
+    other_generated: bool,
     /// The lists that have numbered a paragraph, by numId.
     lists_used: HashSet<String>,
     /// The pictures the part being read refers to, by relationship id.
@@ -841,13 +871,15 @@ impl Reader {
                 self.theme.minor.clone()
             }
         };
+        // Only the Latin fonts count. An rFonts naming just the East Asian
+        // or complex-script font leaves Latin text in the font it inherits,
+        // as in Word.
         let name = rfonts
             .attr("ascii")
             .or_else(|| rfonts.attr("hAnsi"))
             .map(str::to_string)
             .or_else(|| rfonts.attr("asciiTheme").and_then(theme))
-            .or_else(|| rfonts.attr("hAnsiTheme").and_then(theme))
-            .or_else(|| rfonts.attr("cs").map(str::to_string))?;
+            .or_else(|| rfonts.attr("hAnsiTheme").and_then(theme))?;
         Some(self.doc.font_id(&name))
     }
 
@@ -1119,6 +1151,7 @@ impl Reader {
         }
         let mut raw: HashMap<String, RawStyle> = HashMap::new();
         let mut char_raw: HashMap<String, RawStyle> = HashMap::new();
+        let mut table_raw: HashMap<String, (Option<String>, Element)> = HashMap::new();
         let mut order = Vec::new();
         for s in e.children_named("style") {
             let id = s.attr("styleId").unwrap_or_default().to_string();
@@ -1151,6 +1184,12 @@ impl Reader {
                 "character" => {
                     char_raw.insert(id, style);
                 }
+                "table" => {
+                    if s.attr("default").is_some_and(|v| v == "1" || v == "true") {
+                        self.default_table_style = Some(id.clone());
+                    }
+                    table_raw.insert(id, (style.based_on.clone(), s.clone()));
+                }
                 "numbering" => {
                     let num = style.ppr.as_ref().and_then(|p| p.child("numPr"));
                     if let Some(n) = num
@@ -1162,6 +1201,18 @@ impl Reader {
                 }
                 _ => {}
             }
+        }
+        // Table styles become their chain of styles, base first.
+        for id in table_raw.keys() {
+            let mut chain = Vec::new();
+            let mut cur = table_raw.get(id);
+            while let Some((based_on, e)) = cur
+                && chain.len() < 20
+            {
+                chain.insert(0, e.clone());
+                cur = based_on.as_ref().and_then(|b| table_raw.get(b));
+            }
+            self.table_styles.insert(id.clone(), chain);
         }
         // Character styles become lists of rPr layers to apply, base first.
         for (id, style) in &char_raw {
@@ -1209,6 +1260,7 @@ impl Reader {
             resolved.insert(id.to_string(), (pap.clone(), chp));
             (pap, chp)
         }
+        self.defaults = (base_pap.clone(), base_chp);
         let base = (base_pap, base_chp);
         for id in &order {
             let (pap, chp) = resolve(self, id, &raw, &mut resolved, &base, 0);
@@ -1354,6 +1406,44 @@ impl Reader {
         }
     }
 
+    /// A table style's paragraph and character formats sit between the
+    /// document's defaults and the paragraph's style: they show wherever
+    /// the paragraph style leaves a setting at its default.
+    fn table_style_under(&mut self, pap: &mut ParaProps, chp: &mut CharProps) {
+        let (dp, dc) = self.defaults.clone();
+        let (mut tp, mut tc) = (dp.clone(), dc);
+        for layer in self.cell_layers.clone() {
+            if let Some(p) = layer.child("pPr") {
+                self.apply_ppr(p, &mut tp);
+            }
+            if let Some(r) = layer.child("rPr") {
+                self.apply_rpr(r, &mut tc);
+            }
+        }
+        macro_rules! under {
+            ($to:ident, $from:ident, $default:ident, $($f:ident),*) => {
+                $( if $to.$f == $default.$f { $to.$f = $from.$f.clone(); } )*
+            };
+        }
+        under!(
+            pap,
+            tp,
+            dp,
+            align,
+            left,
+            right,
+            first,
+            before,
+            after,
+            line,
+            keep_with_next,
+            keep_together
+        );
+        under!(
+            chp, tc, dc, font, size, bold, italic, underline, strike, small_caps, all_caps, color
+        );
+    }
+
     fn read_table(&mut self, tbl: &Element, out: &mut Vec<Paragraph>, nested: bool) {
         if nested {
             self.report.note(notes::NESTED_TABLES);
@@ -1368,6 +1458,36 @@ impl Reader {
         }
         // The table's own settings, shared by its rows.
         let tblpr = tbl.child("tblPr");
+        // Its table style, or the document's default one.
+        let chain: Vec<Element> = tblpr
+            .and_then(|p| p.child("tblStyle"))
+            .and_then(|s| s.attr("val"))
+            .map(str::to_string)
+            .or_else(|| self.default_table_style.clone())
+            .and_then(|id| self.table_styles.get(&id))
+            .cloned()
+            .unwrap_or_default();
+        let look = Look::read(tblpr.and_then(|p| p.child("tblLook")));
+        let band_rows = chain
+            .iter()
+            .rev()
+            .find_map(|s| s.child("tblPr")?.child("tblStyleRowBandSize")?.int("val"))
+            .unwrap_or(1)
+            .max(1) as usize;
+        let band_cols = chain
+            .iter()
+            .rev()
+            .find_map(|s| s.child("tblPr")?.child("tblStyleColBandSize")?.int("val"))
+            .unwrap_or(1)
+            .max(1) as usize;
+        // The table's borders: the style's, then its own, side by side.
+        let mut edges = TableBorders::default();
+        for pr in chain.iter().filter_map(|s| s.child("tblPr")).chain(tblpr) {
+            if let Some(b) = pr.child("tblBorders") {
+                edges.overlay(b);
+            }
+        }
+        let n_rows = wrapped(tbl, "tr").len();
         let grid: Vec<i32> = tbl
             .child("tblGrid")
             .map(|g| {
@@ -1389,7 +1509,11 @@ impl Reader {
                 side(["right", "end"], default.1),
             )
         };
-        let table_margins = gap_in(tblpr, (115, 115));
+        let table_margins = chain
+            .iter()
+            .filter_map(|s| s.child("tblPr"))
+            .chain(tblpr)
+            .fold((115, 115), |m, pr| gap_in(Some(pr), m));
         let ind = tblpr
             .and_then(|p| p.child("tblInd"))
             .map(|i| twips_or(i, "w", 0))
@@ -1402,8 +1526,9 @@ impl Reader {
             Some("right") | Some("end") => Align::Right,
             _ => Align::Left,
         };
-        for tr in wrapped(tbl, "tr") {
+        for (r, tr) in wrapped(tbl, "tr").into_iter().enumerate() {
             let row_start = out.len();
+            let n_cells = wrapped(tr, "tc").len();
             let mut row_chp = self.doc.styles.get(0).chp;
             let mut cells = Vec::new();
             let trpr = tr.child("trPr");
@@ -1434,9 +1559,18 @@ impl Reader {
                 (_, Some(i)) => i + gap / 2,
                 _ => ind + gap / 2,
             };
-            for tc in wrapped(tr, "tc") {
+            for (c, tc) in wrapped(tr, "tc").into_iter().enumerate() {
                 let start = out.len();
+                let at = CellAt {
+                    row: r,
+                    rows: n_rows,
+                    col: c,
+                    cols: n_cells,
+                };
+                let layers = style_layers(&chain, &look.conditions(at, band_rows, band_cols));
+                let held = std::mem::replace(&mut self.cell_layers, layers);
                 self.read_block(tc, out, true);
+                let layers = std::mem::replace(&mut self.cell_layers, held);
                 if out.len() == start {
                     let n = self.doc.styles.get(0);
                     let mut p = Paragraph::new(n.pap.clone(), n.chp);
@@ -1461,13 +1595,22 @@ impl Reader {
                     .map(|w| twips_or(w, "w", 0))
                     .unwrap_or(0);
                 let width = if from_grid > 0 { from_grid } else { own };
+                // Borders and shading: the table's edges, then its style's
+                // for this cell, then the cell's own.
+                let mut borders = edges.for_cell(at);
+                let mut shading = 0;
+                for pr in layers.iter().filter_map(|l| l.child("tcPr")).chain(tcpr) {
+                    if let Some(b) = pr.child("tcBorders") {
+                        borders = cell_borders(b, &borders, at);
+                    }
+                    if let Some(shd) = pr.child("shd") {
+                        shading = read_shading(shd);
+                    }
+                }
                 cells.push(CellProps {
                     width,
-                    borders: tcpr
-                        .and_then(|p| p.child("tcBorders"))
-                        .map(|b| read_borders(b, &Borders::default()))
-                        .unwrap_or_default(),
-                    shading: tcpr.and_then(|p| p.child("shd")).map_or(0, read_shading),
+                    borders,
+                    shading,
                 });
             }
             let height = tr
@@ -1523,7 +1666,10 @@ impl Reader {
         let style = self.styles.get(&style_id).copied().unwrap_or(0);
         let st = self.doc.styles.get(style);
         let mut pap = st.pap.clone();
-        let base_chp = st.chp;
+        let mut base_chp = st.chp;
+        if in_table && !self.cell_layers.is_empty() {
+            self.table_style_under(&mut pap, &mut base_chp);
+        }
         let mut mark_chp = base_chp;
         let mut prefix = None;
         if let Some(ppr) = ppr {
@@ -1862,6 +2008,17 @@ impl Reader {
                             self.read_runs(child, p, base, field)
                         }
                     }
+                }
+                // A break written straight into the paragraph, outside a
+                // run. Word shows it, so it is kept, not run together.
+                "br" | "cr" => {
+                    let c = if child.attr("type") == Some("page") {
+                        chars::PAGE_BREAK
+                    } else {
+                        chars::LINE_BREAK
+                    };
+                    let at = p.len();
+                    p.insert(at, &c.to_string(), base);
                 }
                 "smartTag" | "customXml" | "bdo" | "dir" => self.read_runs(child, p, base, field),
                 "commentRangeStart" | "commentRangeEnd" => self.comment_edge(child),
@@ -2234,6 +2391,19 @@ impl Reader {
 
     /// A field Quill keeps as its current text.
     fn note_field(&mut self, instr: &str) {
+        let toc = super::write::toc_options(instr);
+        if self.part == Part::Main && self.toc_field.is_none() && toc.is_some() {
+            self.toc_field = toc;
+        } else if matches!(
+            instr
+                .split_whitespace()
+                .next()
+                .map(str::to_ascii_uppercase)
+                .as_deref(),
+            Some("TOC" | "INDEX")
+        ) {
+            self.other_generated = true;
+        }
         let name = instr.split_whitespace().next().unwrap_or_default();
         let what = match name.to_ascii_uppercase().as_str() {
             "" => return,
@@ -2735,6 +2905,188 @@ fn read_border(e: &Element) -> (BorderLine, bool) {
 
 /// Borders over `was`, the style's or the paragraph's so far: each side
 /// the element names replaces that side, as in Word, and the others stay.
+/// Where a cell is in its table.
+#[derive(Clone, Copy, Debug)]
+struct CellAt {
+    row: usize,
+    rows: usize,
+    col: usize,
+    cols: usize,
+}
+
+/// A table's w:tblLook: which of its style's special rows and columns
+/// it shows.
+#[derive(Clone, Copy, Debug)]
+struct Look {
+    first_row: bool,
+    last_row: bool,
+    first_col: bool,
+    last_col: bool,
+    h_bands: bool,
+    v_bands: bool,
+}
+
+impl Look {
+    fn read(e: Option<&Element>) -> Look {
+        // Word's own default: header row, first column and row banding.
+        let mut look = Look {
+            first_row: true,
+            last_row: false,
+            first_col: true,
+            last_col: false,
+            h_bands: true,
+            v_bands: false,
+        };
+        let Some(e) = e else {
+            return look;
+        };
+        // Older files give the flags as one hexadecimal number.
+        if let Some(v) = e.attr("val").and_then(|v| u32::from_str_radix(v, 16).ok()) {
+            look.first_row = v & 0x20 != 0;
+            look.last_row = v & 0x40 != 0;
+            look.first_col = v & 0x80 != 0;
+            look.last_col = v & 0x100 != 0;
+            look.h_bands = v & 0x200 == 0;
+            look.v_bands = v & 0x400 == 0;
+        }
+        let flag = |name: &str, was: bool| e.attr(name).map_or(was, |v| v == "1" || v == "true");
+        look.first_row = flag("firstRow", look.first_row);
+        look.last_row = flag("lastRow", look.last_row);
+        look.first_col = flag("firstColumn", look.first_col);
+        look.last_col = flag("lastColumn", look.last_col);
+        look.h_bands = !flag("noHBand", !look.h_bands);
+        look.v_bands = !flag("noVBand", !look.v_bands);
+        look
+    }
+
+    /// The style's special formats that apply to the cell at `at`, in the
+    /// order Word applies them, later ones winning.
+    fn conditions(&self, at: CellAt, band_rows: usize, band_cols: usize) -> Vec<&'static str> {
+        let first_row = self.first_row && at.row == 0;
+        let last_row = self.last_row && at.row + 1 == at.rows;
+        let first_col = self.first_col && at.col == 0;
+        let last_col = self.last_col && at.col + 1 == at.cols;
+        let mut out = vec!["wholeTable"];
+        if self.v_bands && !first_col && !last_col {
+            let k = at.col - usize::from(self.first_col);
+            out.push(if (k / band_cols).is_multiple_of(2) {
+                "band1Vert"
+            } else {
+                "band2Vert"
+            });
+        }
+        if self.h_bands && !first_row && !last_row {
+            let k = at.row - usize::from(self.first_row);
+            out.push(if (k / band_rows).is_multiple_of(2) {
+                "band1Horz"
+            } else {
+                "band2Horz"
+            });
+        }
+        for (on, name) in [
+            (first_col, "firstCol"),
+            (last_col, "lastCol"),
+            (first_row, "firstRow"),
+            (last_row, "lastRow"),
+            (first_row && last_col, "neCell"),
+            (first_row && first_col, "nwCell"),
+            (last_row && last_col, "seCell"),
+            (last_row && first_col, "swCell"),
+        ] {
+            if on {
+                out.push(name);
+            }
+        }
+        out
+    }
+}
+
+/// The parts of a table style (its chain, base first) that apply to a
+/// cell: each style's whole-table settings, then each condition's, in
+/// order.
+fn style_layers(chain: &[Element], conditions: &[&str]) -> Vec<Element> {
+    let mut out: Vec<Element> = chain.to_vec();
+    for cond in conditions {
+        for s in chain {
+            out.extend(
+                s.children_named("tblStylePr")
+                    .filter(|c| c.attr("type") == Some(cond))
+                    .cloned(),
+            );
+        }
+    }
+    out
+}
+
+/// A table's outside and inside borders (w:tblBorders).
+#[derive(Clone, Copy, Debug, Default)]
+struct TableBorders {
+    top: BorderLine,
+    bottom: BorderLine,
+    left: BorderLine,
+    right: BorderLine,
+    inside_h: BorderLine,
+    inside_v: BorderLine,
+}
+
+impl TableBorders {
+    /// Take each side `e` gives; the sides it leaves out stay.
+    fn overlay(&mut self, e: &Element) {
+        for (names, side) in [
+            (&["top"][..], &mut self.top),
+            (&["bottom"], &mut self.bottom),
+            (&["left", "start"], &mut self.left),
+            (&["right", "end"], &mut self.right),
+            (&["insideH"], &mut self.inside_h),
+            (&["insideV"], &mut self.inside_v),
+        ] {
+            if let Some(b) = names.iter().find_map(|n| e.child(n)) {
+                *side = read_border(b).0;
+            }
+        }
+    }
+
+    /// The borders of the cell at `at`: the table's outside edges on the
+    /// outside, its inside lines between cells.
+    fn for_cell(&self, at: CellAt) -> Borders {
+        let pick = |outer: bool, edge: BorderLine, inside: BorderLine| {
+            if outer { edge } else { inside }
+        };
+        Borders {
+            top: pick(at.row == 0, self.top, self.inside_h),
+            bottom: pick(at.row + 1 == at.rows, self.bottom, self.inside_h),
+            left: pick(at.col == 0, self.left, self.inside_v),
+            right: pick(at.col + 1 == at.cols, self.right, self.inside_v),
+            ..Borders::default()
+        }
+    }
+}
+
+/// A cell's w:tcBorders over `was`. In a table style's special rows and
+/// columns, insideH and insideV give the lines between that part's cells.
+fn cell_borders(e: &Element, was: &Borders, at: CellAt) -> Borders {
+    let mut b = read_borders(e, was);
+    if let Some(h) = e.child("insideH") {
+        let line = read_border(h).0;
+        if at.row > 0 && e.child("top").is_none() {
+            b.top = line;
+        }
+        if at.row + 1 < at.rows && e.child("bottom").is_none() {
+            b.bottom = line;
+        }
+    }
+    if let Some(v) = e.child("insideV") {
+        let line = read_border(v).0;
+        if at.col > 0 && e.child("left").or_else(|| e.child("start")).is_none() {
+            b.left = line;
+        }
+        if at.col + 1 < at.cols && e.child("right").or_else(|| e.child("end")).is_none() {
+            b.right = line;
+        }
+    }
+    b
+}
+
 fn read_borders(e: &Element, was: &Borders) -> Borders {
     let side = |names: &[&str], was: &BorderLine| {
         names
@@ -2862,6 +3214,90 @@ mod tests {
         let mut zip = crate::zip::Writer::new(0);
         zip.add("word/document.xml", xml.as_bytes());
         zip.finish()
+    }
+
+    #[test]
+    fn latin_text_keeps_the_default_font_past_other_scripts_fonts() {
+        let ns = r#"xmlns:w="w""#;
+        let styles = format!(
+            r#"<w:styles {ns}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="MS Mincho" w:cs="Times New Roman"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:eastAsia="Times New Roman" w:cs="Times New Roman"/></w:rPr></w:style></w:styles>"#
+        );
+        let xml = format!(
+            r#"<?xml version="1.0"?><w:document {ns}><w:body><w:p><w:r><w:t>Hello</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let mut zip = crate::zip::Writer::new(0);
+        zip.add("word/document.xml", xml.as_bytes());
+        zip.add("word/styles.xml", styles.as_bytes());
+        let doc = read(&zip.finish()).unwrap();
+        let font = doc.main.paras[0].chp_of_char(0).font;
+        assert_eq!(doc.font_name(font), "Calibri");
+    }
+
+    #[test]
+    fn tables_take_their_style() {
+        let ns = r#"xmlns:w="w""#;
+        let line = |side: &str| format!(r#"<w:{side} w:val="single" w:sz="4"/>"#);
+        let grid: String = ["top", "left", "bottom", "right", "insideH", "insideV"]
+            .iter()
+            .map(|s| line(s))
+            .collect();
+        let styles = format!(
+            r#"<w:styles {ns}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri"/><w:sz w:val="22"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="160" w:line="259" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style><w:style w:type="table" w:styleId="Grid"><w:name w:val="Grid"/><w:basedOn w:val="TableNormal"/><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:tblPr><w:tblBorders>{grid}</w:tblBorders></w:tblPr><w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr><w:tcPr><w:shd w:val="clear" w:fill="000000"/></w:tcPr></w:tblStylePr></w:style></w:styles>"#
+        );
+        let cell = |t: &str| format!(r#"<w:tc><w:p><w:r><w:t>{t}</w:t></w:r></w:p></w:tc>"#);
+        let row = |a: &str, b: &str| format!("<w:tr>{}{}</w:tr>", cell(a), cell(b));
+        let table = |style: &str, look: &str| {
+            format!(
+                r#"<w:tbl><w:tblPr>{style}{look}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>{}{}</w:tbl><w:p/>"#,
+                row("H1", "H2"),
+                row("a", "b")
+            )
+        };
+        let body = table(r#"<w:tblStyle w:val="Grid"/>"#, "")
+            + &table("", "")
+            + &table(
+                r#"<w:tblStyle w:val="Grid"/>"#,
+                r#"<w:tblLook w:firstRow="0"/>"#,
+            );
+        let xml = format!(
+            r#"<?xml version="1.0"?><w:document {ns}><w:body>{body}</w:body></w:document>"#
+        );
+        let mut zip = crate::zip::Writer::new(0);
+        zip.add("word/document.xml", xml.as_bytes());
+        zip.add("word/styles.xml", styles.as_bytes());
+        let doc = read(&zip.finish()).unwrap();
+        let paras = &doc.main.paras;
+        // Each table: H1 H2 row-end a b row-end, then the paragraph after.
+        let (grid, plain, no_header) = (0, 7, 14);
+        let row = |p: usize| paras[p + 2].row.as_ref().unwrap();
+        // The style's borders go round every cell; the default style has none.
+        let b = &row(grid).cells[0].borders;
+        assert!(!b.top.is_none() && !b.left.is_none() && !b.bottom.is_none() && !b.right.is_none());
+        assert!(row(plain).cells[0].borders.is_none());
+        // Its paragraph spacing replaces the document default.
+        assert_eq!(paras[grid + 3].pap.after, 0);
+        assert_eq!(paras[grid + 3].pap.line, LineSpacing::Auto);
+        assert_eq!(paras[plain + 3].pap.after, 160);
+        // The header row is bold and shaded, unless the table turns it off.
+        assert!(paras[grid].chp_of_char(0).bold);
+        assert!(row(grid).cells[0].shading > 0);
+        assert!(!paras[grid + 3].chp_of_char(0).bold);
+        assert!(!paras[no_header].chp_of_char(0).bold);
+        assert_eq!(row(no_header).cells[0].shading, 0);
+        // The default style's cell margins: 108 a side.
+        assert_eq!(row(plain).gap, 216);
+    }
+
+    #[test]
+    fn a_break_outside_any_run_is_kept() {
+        let doc = read(&docx(
+            r#"<w:p><w:r><w:t>First</w:t></w:r><w:br/><w:r><w:t>Second</w:t></w:r><w:br w:type="page"/><w:r><w:t>Third</w:t></w:r></w:p>"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            doc.main.paras[0].text,
+            format!("First{}Second{}Third", chars::LINE_BREAK, chars::PAGE_BREAK)
+        );
     }
 
     #[test]

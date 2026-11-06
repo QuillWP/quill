@@ -141,7 +141,7 @@ fn draw_note_icon(r: Rect, c: &mut Canvas) {
 pub fn changed(which: &mut Which, d: &mut Dialog, view: &DocView, id: &str) {
     match which {
         Which::Style(st) => crate::style_dialog::changed(st, d, view, id),
-        Which::Character(_) => character_changed(d, id),
+        Which::Character(base) => character_changed(d, id, Some(base.color)),
         Which::Border(st) => border_dialog::changed(st, d, id),
         Which::Section if id == "margin_numbers" => page_dialogs::margin_numbers_changed(d),
         Which::Toc | Which::Index => crate::contents_dialogs::level_changed(d, id),
@@ -343,12 +343,8 @@ pub fn character(
         120.0,
     );
     d.text("Color:", 146.0, 56.0);
-    let colors: Vec<&str> = WORD_COLORS.iter().map(|(n, _)| *n).collect();
-    let color = WORD_COLORS
-        .iter()
-        .position(|(_, rgb)| *rgb == c.color)
-        .unwrap_or(0);
-    d.popup("color", &colors, color, 146.0, 74.0, 134.0);
+    let (colors, color) = color_options(Some(c.color), false);
+    d.popup_owned("color", colors, color, 146.0, 74.0, 134.0);
 
     d.group("Style", 12.0, 104.0, 128.0, 152.0);
     let styles = [
@@ -394,7 +390,74 @@ pub fn character(
 
 /// Keep the "By:" fields in step with their radio buttons, filling in
 /// The original's defaults (3 pt up, 2 pt down, 1.5 pt condensed, 3 pt expanded).
-pub fn character_changed(d: &mut Dialog, id: &str) {
+/// The last entry in the Color popup, which opens a color picker.
+pub const OTHER_COLOR: &str = "Other…";
+
+/// The Color popup's entries and which is selected: the original's eight colors,
+/// `have` if it is none of those (as "#RRGGBB"), then Other…. With `any`,
+/// a blank first entry means any color, for Find and Replace.
+pub fn color_options(have: Option<Rgb>, any: bool) -> (Vec<String>, usize) {
+    let mut names: Vec<String> = Vec::new();
+    if any {
+        names.push(String::new());
+    }
+    names.extend(WORD_COLORS.iter().map(|(n, _)| n.to_string()));
+    let selected = match have {
+        None => 0,
+        Some(c) => match WORD_COLORS.iter().position(|(_, x)| *x == c) {
+            Some(i) => i + usize::from(any),
+            None => {
+                names.push(format!("#{:06X}", c.0 & 0xFF_FFFF));
+                names.len() - 1
+            }
+        },
+    };
+    names.push(OTHER_COLOR.to_string());
+    (names, selected)
+}
+
+/// The color a Color popup entry names: one of the original's, or "#RRGGBB".
+pub fn color_named(name: &str) -> Option<Rgb> {
+    if let Some(hex) = name.strip_prefix('#') {
+        return u32::from_str_radix(hex, 16).ok().map(Rgb);
+    }
+    WORD_COLORS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, c)| *c)
+}
+
+/// Other… was chosen in a Color popup: pick a color, starting from
+/// `start`, and add it to the popup. Canceled, the popup goes back to
+/// `start`.
+pub fn color_other(d: &mut Dialog, start: Option<Rgb>) {
+    if d.selected_text("color") != OTHER_COLOR {
+        return;
+    }
+    let any = d.options("color").first().is_some_and(|n| n.is_empty());
+    let picked = pick_color(start.unwrap_or(Rgb::BLACK)).or(start);
+    let (names, selected) = color_options(picked, any);
+    d.set_options("color", names, selected);
+}
+
+#[cfg(target_os = "macos")]
+fn pick_color(start: Rgb) -> Option<Rgb> {
+    if cfg!(test) {
+        return None;
+    }
+    crate::mac_color::choose("Text Color", start)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pick_color(_start: Rgb) -> Option<Rgb> {
+    None
+}
+
+pub fn character_changed(d: &mut Dialog, id: &str, start: Option<Rgb>) {
+    if id == "color" {
+        color_other(d, start);
+        return;
+    }
     let default = match id {
         "pos_normal" | "sp_normal" => Some(""),
         "pos_super" => Some("3 pt"),
@@ -432,9 +495,8 @@ fn read_character(d: &Dialog, base: &CharProps, view: &mut DocView) -> Option<Ch
     }
     c.size = (size * 2.0).round() as u16;
     c.underline = UNDERLINE_KINDS[d.selected("underline").min(4)];
-    c.color = WORD_COLORS
-        .get(d.selected("color"))
-        .map_or(Rgb::BLACK, |(_, rgb)| *rgb);
+    // Other… with nothing picked leaves the color as it was.
+    c.color = color_named(&d.selected_text("color")).unwrap_or(base.color);
     c.bold = d.is_on("bold");
     c.italic = d.is_on("italic");
     c.outline = d.is_on("outline");
@@ -458,6 +520,41 @@ fn read_character(d: &Dialog, base: &CharProps, view: &mut DocView) -> Option<Ch
 }
 
 /// Format > Paragraph (⌘M).
+/// The Line popup in Paragraph. Multiple is a share of the auto height
+/// ("1.5 li"); the original had no such setting, but documents from elsewhere
+/// use it.
+pub const LINE_RULES: [&str; 4] = ["Auto", "At Least", "Exactly", "Multiple"];
+
+/// A Multiple line spacing (240 = single) as the field shows it.
+pub fn lines(m: u16) -> String {
+    let v = format!("{:.2}", m as f32 / 240.0);
+    format!("{} li", v.trim_end_matches('0').trim_end_matches('.'))
+}
+
+/// Read the Line popup choice `rule` (an index into `LINE_RULES`) and
+/// its "line_by" field. None means the field could not be read.
+pub fn read_line_rule(d: &Dialog, rule: usize) -> Option<Option<LineSpacing>> {
+    let text = d.field_text("line_by");
+    if rule == 3 {
+        let m = units::parse(&text, "li")?.abs();
+        return Some(Some(match m {
+            0 => LineSpacing::Auto,
+            m => LineSpacing::Multiple(m.clamp(60, 2400) as u16),
+        }));
+    }
+    let by = if text.trim().is_empty() {
+        0
+    } else {
+        units::parse(&text, "pt")?.abs()
+    };
+    Some(Some(match rule {
+        0 => LineSpacing::Auto,
+        1 if by == 0 => LineSpacing::Auto,
+        1 => LineSpacing::AtLeast(by),
+        _ => LineSpacing::Exactly(by.max(20)),
+    }))
+}
+
 pub fn paragraph(view: &DocView) -> (Dialog, Which) {
     let p = view.current_pap().clone();
     let mut d = Dialog::new("Paragraph", 438.0, 200.0);
@@ -471,16 +568,9 @@ pub fn paragraph(view: &DocView) -> (Dialog, Which) {
         LineSpacing::Auto => (0, String::new()),
         LineSpacing::AtLeast(t) => (1, units::points(t)),
         LineSpacing::Exactly(t) => (2, units::points(t)),
-        LineSpacing::Multiple(m) => (1, units::points(m as i32)),
+        LineSpacing::Multiple(m) => (3, lines(m)),
     };
-    d.popup(
-        "line",
-        &["Auto", "At Least", "Exactly"],
-        rule,
-        164.0,
-        46.0,
-        72.0,
-    );
+    d.popup("line", &LINE_RULES, rule, 164.0, 46.0, 72.0);
     d.field("line_by", &value, 240.0, 46.0, 54.0);
 
     d.group("Indentation", 10.0, 80.0, 140.0, 102.0);
@@ -530,13 +620,7 @@ fn read_paragraph(d: &Dialog, base: &ParaProps) -> Option<ParaProps> {
     let mut p = base.clone();
     p.before = units::parse(&d.field_text("before"), "pt")?.max(0);
     p.after = units::parse(&d.field_text("after"), "pt")?.max(0);
-    let by = units::parse(&d.field_text("line_by"), "pt")?.abs();
-    p.line = match d.selected("line") {
-        0 => LineSpacing::Auto,
-        1 if by == 0 => LineSpacing::Auto,
-        1 => LineSpacing::AtLeast(by),
-        _ => LineSpacing::Exactly(by.max(20)),
-    };
+    p.line = read_line_rule(d, d.selected("line"))?.unwrap_or_default();
     p.left = units::parse_length(&d.field_text("left"))?;
     p.right = units::parse_length(&d.field_text("right"))?;
     p.first = units::parse_length(&d.field_text("first"))?;
@@ -685,5 +769,57 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
             view.set_summary(new);
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quill_core::{Document, Position, Selection};
+
+    fn view(text: &str) -> DocView {
+        let mut v = DocView::new(Document::new(), "t".into());
+        v.type_text(text);
+        v.set_selection(Selection::new(
+            Position::new(0, 0),
+            Position::new(0, text.len()),
+        ));
+        v
+    }
+
+    #[test]
+    fn ok_without_changes_keeps_line_spacing() {
+        for line in [
+            LineSpacing::Auto,
+            LineSpacing::AtLeast(300),
+            LineSpacing::Exactly(280),
+            LineSpacing::Multiple(360),
+            LineSpacing::Multiple(276),
+        ] {
+            let mut v = view("Some text");
+            v.doc.main.paras[0].pap.line = line;
+            let (mut d, mut which) = paragraph(&v);
+            assert!(apply(&mut which, &mut d, &mut v));
+            assert_eq!(v.doc.main.paras[0].pap.line, line);
+        }
+        assert_eq!(lines(360), "1.5 li");
+        assert_eq!(lines(480), "2 li");
+    }
+
+    #[test]
+    fn ok_without_changes_keeps_a_color_not_in_the_menu() {
+        let mut v = view("Some text");
+        v.format_chars("Formatting", |c| c.color = Rgb(0x123456));
+        let (mut d, mut which) = character(&v, &[]);
+        assert_eq!(d.selected_text("color"), "#123456");
+        assert!(apply(&mut which, &mut d, &mut v));
+        assert_eq!(v.doc.main.paras[0].chp_of_char(0).color, Rgb(0x123456));
+        // Other… with nothing picked goes back to the color it had.
+        let n = d.options("color").len();
+        d.set_selected("color", n - 1);
+        character_changed(&mut d, "color", Some(Rgb(0x123456)));
+        assert_eq!(d.selected_text("color"), "#123456");
+        assert_eq!(color_named("Red"), Some(Rgb(0xFF0000)));
+        assert_eq!(color_named("#00FF7F"), Some(Rgb(0x00FF7F)));
     }
 }

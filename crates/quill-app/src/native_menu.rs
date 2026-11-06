@@ -144,8 +144,13 @@ enum NativeItem {
 
 impl NativeItem {
     fn new(model: &Item) -> Self {
+        Self::with_prefix(model, 'a')
+    }
+
+    /// An item whose id is `prefix` and its action's index.
+    fn with_prefix(model: &Item, prefix: char) -> Self {
         let label = model.label.replace('&', "&&");
-        let id = format!("a{}", model.id);
+        let id = format!("{prefix}{}", model.id);
         let item = if model.checkable {
             Self::State(CheckMenuItem::with_id(
                 id,
@@ -263,6 +268,59 @@ fn keep_autofill_out() {
             ];
         }
     });
+}
+
+/// Context menu item ids are "c<index into the menu's actions>".
+pub fn context_index(id: &str) -> Option<usize> {
+    id.strip_prefix('c').and_then(|n| n.parse().ok())
+}
+
+/// Show `menu` as a native context menu at the pointer in `window`.
+/// Returns once the menu closes; a choice arrives later, like the menu
+/// bar's, with a "c" id.
+pub fn show_context(menu: &Menu, window: &winit::window::Window) {
+    use muda::ContextMenu;
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let build = || -> muda::Result<muda::Menu> {
+        let root = muda::Menu::new();
+        for it in &menu.items {
+            if it.separator {
+                root.append(&PredefinedMenuItem::separator())?;
+            } else if let Some(children) = &it.submenu {
+                let nested = Submenu::new(it.label.replace('&', "&&"), it.enabled);
+                for child in &children.items {
+                    if child.separator {
+                        nested.append(&PredefinedMenuItem::separator())?;
+                    } else {
+                        NativeItem::with_prefix(child, 'c').append(&nested)?;
+                    }
+                }
+                root.append(&nested)?;
+            } else {
+                match NativeItem::with_prefix(it, 'c') {
+                    NativeItem::Action(i) => root.append(&i)?,
+                    NativeItem::State(i) => root.append(&i)?,
+                }
+            }
+        }
+        Ok(root)
+    };
+    let Ok(root) = build() else {
+        return;
+    };
+    // No position: AppKit opens it where the pointer is. A position in
+    // the view lands far off, since winit's view counts down from the top.
+    // SAFETY: winit owns this NSView for as long as the window is open,
+    // and the menu shows and closes within this call.
+    unsafe {
+        root.show_context_menu_for_nsview(handle.ns_view.as_ptr().cast(), None);
+    }
 }
 
 impl NativeMenu {

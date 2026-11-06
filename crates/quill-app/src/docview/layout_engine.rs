@@ -163,9 +163,13 @@ impl DocView {
             self.layout_notes(fonts, &opts);
             changed = true;
         }
-        if changed || self.frames_on() != self.placed_frames_on {
+        if changed
+            || self.frames_on() != self.placed_frames_on
+            || self.page_view != self.placed_page_view
+        {
             self.place_and_wrap(fonts, &opts);
             self.repaginate();
+            self.toc_stale = true;
             // Frames placed by page need the new pages.
             if self.has_page_frames() {
                 self.place_and_wrap(fonts, &opts);
@@ -182,6 +186,7 @@ impl DocView {
                 )
             {
                 self.repaginate();
+                self.toc_stale = true;
             }
         }
         // Header/footer height participates in pagination when a margin is
@@ -210,6 +215,17 @@ impl DocView {
         if self.toc_refresh.is_some() && self.refresh_toc() {
             self.update_layout(fonts);
             return;
+        }
+        // A live table of contents follows its headings and their pages. A
+        // few rounds settle it; a contents that keeps changing its own
+        // page numbers stops there.
+        if std::mem::take(&mut self.toc_stale) {
+            if self.toc_rounds < 3 && self.keep_toc_live() {
+                self.toc_rounds += 1;
+                self.update_layout(fonts);
+                return;
+            }
+            self.toc_rounds = 0;
         }
         // Numbers that restart on each page depend on the pages just
         // worked out.
@@ -422,6 +438,8 @@ impl DocView {
         let end_groups = self.end_note_groups();
         let mut endnotes = Vec::new();
         let mut y = 0.0;
+        let mut pads = Vec::new();
+        let pad_marks = !self.page_view && !self.outline;
         let mut end_notes = |y: &mut f32, after: usize| {
             for (_, ids) in end_groups.iter().filter(|g| g.0 == after) {
                 let height =
@@ -513,6 +531,12 @@ impl DocView {
                     row: None,
                 });
                 y += height(i);
+                // Normal view: room under a section's last paragraph for
+                // its mark, so the mark's label covers no text.
+                if pad_marks && paras[i].mark == Mark::SectionBreak && i + 1 < n {
+                    pads.push(y);
+                    y += SECTION_PAD;
+                }
                 i += 1;
                 continue;
             };
@@ -560,6 +584,8 @@ impl DocView {
         self.frames = frames;
         self.want_wrap = want_wrap;
         self.placed_frames_on = frames_on;
+        self.section_pads = pads;
+        self.placed_page_view = self.page_view;
     }
 
     /// The block holding continuous y `y`.
@@ -571,6 +597,31 @@ impl DocView {
     }
 
     /// Break the laid-out text into pages.
+    /// `y` down the text as pages count it: without Normal view's room
+    /// for section marks, so every view numbers pages alike.
+    pub(super) fn unpad(&self, y: f32) -> f32 {
+        let mut out = y;
+        for &s in &self.section_pads {
+            if y >= s + SECTION_PAD {
+                out -= SECTION_PAD;
+            } else if y > s {
+                out -= y - s;
+            }
+        }
+        out
+    }
+
+    /// The other way: where page-counting `y` is down the text as shown.
+    pub(super) fn pad(&self, y: f32) -> f32 {
+        let mut v = y;
+        for &s in &self.section_pads {
+            if v >= s {
+                v += SECTION_PAD;
+            }
+        }
+        v
+    }
+
     pub(super) fn repaginate(&mut self) {
         let p = &self.doc.props;
         let base_height = (p.page_height - p.margin_top - p.margin_bottom).max(720) as f32 / 20.0;
@@ -586,12 +637,16 @@ impl DocView {
         let mut units = Vec::new();
         for b in &self.blocks {
             match &b.row {
-                None => units.extend(paginate::line_units(b.first, self.layout(b.first), b.top)),
+                None => units.extend(paginate::line_units(
+                    b.first,
+                    self.layout(b.first),
+                    self.unpad(b.top),
+                )),
                 Some(_) => units.push(paginate::Unit {
                     para: b.first,
                     line: 0,
-                    top: b.top,
-                    bottom: b.top + b.height,
+                    top: self.unpad(b.top),
+                    bottom: self.unpad(b.top) + b.height,
                     first: true,
                     last: true,
                     hard_break: false,

@@ -133,6 +133,72 @@ impl DocView {
         self.finish_edit(sel);
     }
 
+    /// The table around paragraph `p`: its first and last paragraphs.
+    pub fn table_around(&self, p: usize) -> Option<(usize, usize)> {
+        let paras = &self.doc.main.paras;
+        if !paras.get(p)?.pap.in_table {
+            return None;
+        }
+        let mut first = p;
+        while first > 0 && paras[first - 1].pap.in_table {
+            first -= 1;
+        }
+        let mut last = p;
+        while last + 1 < paras.len() && paras[last + 1].pap.in_table {
+            last += 1;
+        }
+        Some((first, last))
+    }
+
+    /// Select Table: the whole table the insertion point is in, ready to
+    /// cut, copy or move.
+    pub fn select_table(&mut self) {
+        let Some((first, last)) = self.table_around(self.sel.focus.para) else {
+            return;
+        };
+        let end = if last + 1 < self.doc.main.paras.len() {
+            Position::new(last + 1, 0)
+        } else {
+            Position::new(last, self.doc.main.paras[last].len())
+        };
+        self.set_selection(Selection::new(Position::new(first, 0), end));
+        self.doc.break_typing();
+    }
+
+    /// Shift-F3: lowercase, then UPPERCASE, then Title Case, then round
+    /// again. With nothing selected it works on the word at the insertion
+    /// point and leaves the insertion point where it was.
+    pub fn cycle_case(&mut self) {
+        let caret = self.sel.is_empty().then_some(self.sel);
+        let (s, e) = if caret.is_some() {
+            match self.word_at_caret() {
+                Some(w) => w,
+                None => return,
+            }
+        } else {
+            self.sel.range()
+        };
+        let text = self.doc.main.text_of(s, e);
+        let case = if !text.chars().any(char::is_alphabetic) {
+            return;
+        } else if !text.chars().any(char::is_uppercase) {
+            Case::Upper
+        } else if !text.chars().any(char::is_lowercase) {
+            Case::Title
+        } else {
+            Case::Lower
+        };
+        let sel = self.sel;
+        self.sel = Selection::new(s, e);
+        self.change_case(case);
+        if let Some(caret) = caret {
+            self.sel = caret;
+            self.clamp_selection();
+        } else if sel.anchor > sel.focus {
+            self.sel = Selection::new(self.sel.end(), self.sel.start());
+        }
+    }
+
     /// Tools > Sort (Shift for descending). In a table, rows are ordered by
     /// the column the selection starts in.
     pub fn sort(&mut self, descending: bool) {
