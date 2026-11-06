@@ -107,10 +107,15 @@ impl App {
         }
         match (action, front) {
             (Action::About, _) => about(),
+            (Action::Licenses, _) => licenses(),
             (Action::Recent(index), _) => {
                 if let Some(path) = self.recent.get(index).cloned() {
                     self.open_files(el, &[path]);
                 }
+            }
+            (Action::RemoveRecent(index), _) => {
+                crate::recent::remove(&mut self.recent, index);
+                self.sync_menus();
             }
             (Action::ClearRecent, _) => {
                 crate::recent::clear(&mut self.recent);

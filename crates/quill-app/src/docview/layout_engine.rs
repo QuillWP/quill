@@ -1,5 +1,6 @@
 //! Pagination, section geometry, headers, footers, and layout invalidation.
 
+use super::sections::PageSections;
 use super::*;
 use quill_core::props::Twips;
 
@@ -34,6 +35,7 @@ impl DocView {
                     })
                     .collect(),
             ),
+            comment_scale: self.comment_scale,
             ..fields(1)
         }
     }
@@ -277,24 +279,26 @@ impl DocView {
         }
         let fonts_table = self.doc.fonts.clone();
         let name = |id: u16| fonts_table.get(id as usize).cloned().unwrap_or_default();
+        let pages = self.page_sections();
+        let sets = self.doc.header_sets();
+        let even_odd = self.doc.props.even_odd_headers;
         for k in 0..self.pages.len() {
-            let (h, f) = self.headers_for_page(k);
+            let (h, f) = page_header_stories(&pages, even_odd, k);
+            let (source, set) = sets[pages.section[k].min(sets.len() - 1)];
             for story in [h, f] {
-                let key = self.hf_key(story, k);
-                let paras = &self.page_header(story, k).paras;
+                let paras = &set[story.header_index()].paras;
                 let empty = paras.len() == 1 && paras[0].text.is_empty();
+                let key = (story, source, hf_page_key(paras, k));
                 if empty || self.hf.contains_key(&key) {
                     continue;
                 }
-                let (number, format) = self.page_number(k);
+                let (number, format) = pages.number[k];
                 let o = LayoutOptions {
                     page_number: number,
                     page_format: format,
                     ..opts.clone()
                 };
-                let ls = self
-                    .page_header(story, k)
-                    .paras
+                let ls = paras
                     .iter()
                     .map(|p| layout_paragraph_joined(p, &name, fonts, &o, Joins::default()))
                     .collect();
@@ -310,13 +314,24 @@ impl DocView {
         let p = &self.doc.props;
         let (margin_top, margin_bottom) =
             (p.margin_top as f32 / 20.0, p.margin_bottom as f32 / 20.0);
+        let pages = self.page_sections();
+        let sets = self.doc.header_sets();
         (0..self.pages.len())
             .map(|k| {
-                let sec = self.page_section(k);
-                let (header, footer) = self.headers_for_page(k);
-                let height = |story| {
+                let sec = self
+                    .secs
+                    .get(pages.section[k])
+                    .map_or(&self.doc.section, |(_, s)| s);
+                let (header, footer) = page_header_stories(&pages, p.even_odd_headers, k);
+                let (source, set) = sets[pages.section[k].min(sets.len() - 1)];
+                let height = |story: StoryId| {
+                    let key = (
+                        story,
+                        source,
+                        hf_page_key(&set[story.header_index()].paras, k),
+                    );
                     self.hf
-                        .get(&self.hf_key(story, k))
+                        .get(&key)
                         .map(|layouts| layouts.iter().map(|layout| layout.height).sum::<f32>())
                 };
                 let top = if p.top_exact {
@@ -542,6 +557,15 @@ impl DocView {
                 if pad_marks && paras[i].mark == Mark::SectionBreak && i + 1 < n {
                     pads.push(y);
                     y += SECTION_PAD;
+                }
+                // The comments pane: room between one comment's box and the
+                // next.
+                if self.captions
+                    && paras
+                        .get(i + 1)
+                        .is_some_and(|p| p.text.starts_with(chars::ANNOTATION))
+                {
+                    y += comment_cards::CARD_GAP * self.comment_scale;
                 }
                 i += 1;
                 continue;
@@ -927,3 +951,24 @@ fn place_cell(
 
 /// The room left under a table at the end of a cell, in points.
 const AFTER_TABLE: f32 = 3.0;
+
+/// The header and footer stories page `k` uses, from `page_sections`.
+fn page_header_stories(pages: &PageSections, even_odd: bool, k: usize) -> (StoryId, StoryId) {
+    if pages.first_page[k] {
+        (StoryId::FirstHeader, StoryId::FirstFooter)
+    } else if even_odd && k % 2 == 1 {
+        (StoryId::EvenHeader, StoryId::EvenFooter)
+    } else {
+        (StoryId::Header, StoryId::Footer)
+    }
+}
+
+/// The page part of a header's layout key: the page when it shows the page
+/// number, 0 when every page looks the same.
+fn hf_page_key(paras: &[quill_core::Paragraph], k: usize) -> u32 {
+    if paras.iter().any(|p| p.text.contains(chars::FIELD_PAGE)) {
+        k as u32 + 1
+    } else {
+        0
+    }
+}

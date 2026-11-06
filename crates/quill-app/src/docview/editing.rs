@@ -335,6 +335,30 @@ impl DocView {
 
     /// Run a command. Returns what the application should do next.
     pub fn exec(&mut self, cmd: Cmd, extend: bool, clip: &mut Clipboard) -> Effect {
+        if !self.captions {
+            return self.exec_inner(cmd, extend, clip);
+        }
+        // The comments pane: a comment's box holds only its own text.
+        if matches!(cmd, Cmd::SelectAll) {
+            let (start, end) = self.comment_body(self.sel.focus.para);
+            self.sel = Selection::new(start, end);
+            self.reset_blink();
+            return Effect::None;
+        }
+        let Some(cmd) = self.contain_delete(cmd) else {
+            return Effect::None;
+        };
+        let ids = self.comment_ids();
+        let effect = self.exec_inner(cmd, extend, clip);
+        if matches!(cmd, Cmd::Paste | Cmd::PasteText) && self.comment_ids() != ids {
+            // Pasted text carried comment marks: put it back as it was.
+            self.exec_inner(Cmd::Undo, false, clip);
+        }
+        self.confine_to_comment();
+        effect
+    }
+
+    fn exec_inner(&mut self, cmd: Cmd, extend: bool, clip: &mut Clipboard) -> Effect {
         use Cmd::*;
         let story = &self.doc.main;
         let focus = self.sel.focus;
@@ -687,6 +711,8 @@ impl DocView {
                 self.scroll_to_caret();
                 return Effect::None;
             }
+            MarkdownSource => return Effect::MarkdownSource,
+            MarkdownWysiwyg => return Effect::MarkdownWysiwyg,
             OutlinePrefix => self.outline_prefix = true,
             PromoteHeading => self.promote(),
             DemoteHeading => self.demote(),

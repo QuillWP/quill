@@ -13,6 +13,10 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 OUTPUT = ROOT / "THIRD-PARTY-NOTICES.txt"
 NOTICE_NAMES = ("license", "copying", "unlicense", "notice")
+DATA_NOTICES = (
+    ("Thesaurus data (WordNet, Princeton University)", "WordNet_license.txt"),
+    ("Hyphenation patterns (hyph_en_US)", "README_hyph_en_US.txt"),
+)
 
 
 def metadata() -> dict:
@@ -45,7 +49,13 @@ def notice_files(package: dict) -> list[pathlib.Path]:
 
 def main() -> int:
     packages = sorted(
-        (package for package in metadata()["packages"] if package.get("source")),
+        # Crates from crates.io, and the patched copies in vendor/.
+        (
+            package
+            for package in metadata()["packages"]
+            if package.get("source")
+            or pathlib.Path(package["manifest_path"]).is_relative_to(ROOT / "vendor")
+        ),
         key=lambda package: (package["name"].lower(), package["version"]),
     )
     documents: dict[str, tuple[str, list[str]]] = {}
@@ -143,6 +153,13 @@ def main() -> int:
                 "",
                 text,
             ]
+        )
+    # The language data in data/ is not Cargo-sourced; its license texts live
+    # in data/licenses and are repeated here so every package carries them.
+    for title, name in DATA_NOTICES:
+        text = (ROOT / "data" / "licenses" / name).read_text(encoding="utf-8")
+        lines.extend(
+            ["", title, "-" * len(title), f"Source: data/licenses/{name}", "", text.strip()]
         )
     OUTPUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"wrote {OUTPUT} ({len(packages)} packages, {len(documents)} documents)")

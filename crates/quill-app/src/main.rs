@@ -13,6 +13,7 @@ mod color_glyph;
 mod commands;
 mod commands_dialog;
 mod contents_dialogs;
+mod crash_log;
 mod customize;
 mod dialog;
 mod docview;
@@ -24,6 +25,7 @@ mod icon;
 mod image;
 mod lang_dialogs;
 mod language;
+mod licenses;
 mod link_dialog;
 mod listbox;
 mod local_dictionary;
@@ -32,6 +34,8 @@ mod local_dictionary;
 mod mac_dialog;
 #[cfg(target_os = "macos")]
 mod mac_hyphen;
+#[cfg(target_os = "macos")]
+mod mac_licenses;
 #[cfg(target_os = "macos")]
 mod mac_lookup;
 #[cfg(target_os = "macos")]
@@ -94,6 +98,7 @@ fn main() {
         return;
     }
     settings::load();
+    crash_log::install();
     // Finding the installed fonts can take a moment on a cold start, so do
     // it while the window system starts up.
     let fonts = std::thread::spawn(Catalog::scan_system);

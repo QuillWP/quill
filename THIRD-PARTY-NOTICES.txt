@@ -7460,3 +7460,103 @@ MIT License
     LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
     OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
     SOFTWARE
+
+Thesaurus data (WordNet, Princeton University)
+----------------------------------------------
+Source: data/licenses/WordNet_license.txt
+
+WordNet Release 2.1
+
+This software and database is being provided to you, the LICENSEE, by  
+Princeton University under the following license.  By obtaining, using  
+and/or copying this software and database, you agree that you have  
+read, understood, and will comply with these terms and conditions.:  
+  
+Permission to use, copy, modify and distribute this software and  
+database and its documentation for any purpose and without fee or  
+royalty is hereby granted, provided that you agree to comply with  
+the following copyright notice and statements, including the disclaimer,  
+and that the same appear on ALL copies of the software, database and  
+documentation, including modifications that you make for internal  
+use or for distribution.  
+  
+WordNet 2.1 Copyright 2005 by Princeton University.  All rights reserved.  
+  
+THIS SOFTWARE AND DATABASE IS PROVIDED "AS IS" AND PRINCETON  
+UNIVERSITY MAKES NO REPRESENTATIONS OR WARRANTIES, EXPRESS OR  
+IMPLIED.  BY WAY OF EXAMPLE, BUT NOT LIMITATION, PRINCETON  
+UNIVERSITY MAKES NO REPRESENTATIONS OR WARRANTIES OF MERCHANT-  
+ABILITY OR FITNESS FOR ANY PARTICULAR PURPOSE OR THAT THE USE  
+OF THE LICENSED SOFTWARE, DATABASE OR DOCUMENTATION WILL NOT  
+INFRINGE ANY THIRD PARTY PATENTS, COPYRIGHTS, TRADEMARKS OR  
+OTHER RIGHTS.  
+  
+The name of Princeton University or Princeton may not be used in  
+advertising or publicity pertaining to distribution of the software  
+and/or database.  Title to copyright in this software, database and  
+any associated documentation shall at all times remain with  
+Princeton University and LICENSEE agrees to preserve same.
+
+Hyphenation patterns (hyph_en_US)
+---------------------------------
+Source: data/licenses/README_hyph_en_US.txt
+
+hyph_en_US.dic - American English hyphenation patterns for OpenOffice.org
+
+version 2011-10-07
+
+- remove unnecessary parts for the new Hyphen 2.8.2
+
+version 2010-03-16
+
+Changes
+
+- forbid hyphenation at 1-character distances from dashes (eg. ad=d-on)
+  and at the dashes (fix for OpenOffice.org 3.2)
+- set correct LEFTHYPHENMIN = 2, RIGHTHYPHENMIN = 3
+- handle apostrophes (forbid *o'=clock etc.)
+- set COMPOUNDLEFTHYPHENMIN, COMPOUNDRIGHTHYPHENMIN values
+- UTF-8 encoding
+- Unicode ligature support
+
+License
+
+BSD-style. Unlimited copying, redistribution and modification of this file
+is permitted with this copyright and license information.
+
+See original license in this file.
+
+Conversion and modifications by László Németh (nemeth at OOo).
+
+Based on the plain TeX hyphenation table
+(http://tug.ctan.org/text-archive/macros/plain/base/hyphen.tex) and
+the TugBoat hyphenation exceptions log in
+http://www.ctan.org/tex-archive/info/digests/tugboat/tb0hyf.tex, processed
+by the hyphenex.sh script (see in the same directory).
+
+Originally developed and distributed with the Hyphen hyphenation library,
+see http://hunspell.sourceforge.net/ for the source files and the conversion
+scripts.
+
+Licenses
+
+hyphen.tex:
+% The Plain TeX hyphenation tables [NOT TO BE CHANGED IN ANY WAY!]
+% Unlimited copying and redistribution of this file are permitted as long
+% as this file is not modified. Modifications are permitted, but only if
+% the resulting file is not named hyphen.tex.
+
+output of hyphenex.sh:
+% Hyphenation exceptions for US English, based on hyphenation exception
+% log articles in TUGboat.
+%
+% Copyright 2007 TeX Users Group.
+% You may freely use, modify and/or distribute this file.
+%
+% This is an automatically generated file.  Do not edit!
+%
+% Please contact the TUGboat editorial staff <tugboat@tug.org>
+% for corrections and omissions.
+
+hyph_en_US.txt:
+See the previous licenses.

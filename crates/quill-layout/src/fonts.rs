@@ -1,11 +1,12 @@
 //! Installed fonts: finding them, loading them on demand, and measuring.
 //!
-//! Font files are copied into private memory and parsed lazily when used.
-//! The private copy remains valid if an installed font is replaced or truncated.
+//! Font files are parsed lazily when used. Fonts you installed are copied into
+//! private memory, which stays valid if the file is replaced or truncated; the
+//! Mac's read-only system fonts are memory-mapped.
 
 use ab_glyph::{Font, FontRef, GlyphId, VariableFont};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 pub type FaceId = u16;
@@ -65,7 +66,40 @@ impl Catalog {
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
         let mut catalog = Catalog::default();
-        let mut index: HashMap<String, usize> = HashMap::new();
+        catalog.add_faces(&db);
+        catalog
+    }
+
+    /// This catalog plus the fonts found in `folders`, each searched down
+    /// `levels` folder levels below it. A family that is already here gains
+    /// the new faces; the rest join the list. Nothing is installed: drop the
+    /// folder and call this again to take the fonts away.
+    pub fn with_folders(&self, folders: &[PathBuf], levels: u8) -> Catalog {
+        let mut files = Vec::new();
+        for folder in folders {
+            collect_font_files(folder, levels, &mut files);
+        }
+        if files.is_empty() {
+            return self.clone();
+        }
+        let mut db = fontdb::Database::new();
+        for file in &files {
+            // A broken or unreadable font file is skipped, not fatal.
+            let _ = db.load_font_file(file);
+        }
+        let mut catalog = self.clone();
+        catalog.add_faces(&db);
+        catalog
+    }
+
+    /// Fold the font files in `db` into the family list, keeping it sorted.
+    fn add_faces(&mut self, db: &fontdb::Database) {
+        let mut index: HashMap<String, usize> = self
+            .families
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.name.to_lowercase(), i))
+            .collect();
         for face in db.faces() {
             let fontdb::Source::File(path) = &face.source else {
                 continue;
@@ -75,25 +109,31 @@ impl Catalog {
             };
             let key = name.to_lowercase();
             let fam = *index.entry(key).or_insert_with(|| {
-                catalog.families.push(Family {
+                self.families.push(Family {
                     name: name.clone(),
                     faces: Vec::new(),
                     hidden: name.starts_with('.'),
                 });
-                catalog.families.len() - 1
+                self.families.len() - 1
             });
             if face.post_script_name.starts_with('.') {
-                catalog.families[fam].hidden = true;
+                self.families[fam].hidden = true;
             }
-            catalog.families[fam].faces.push(FaceSource {
+            if self.families[fam]
+                .faces
+                .iter()
+                .any(|f| f.path == *path && f.index == face.index)
+            {
+                continue;
+            }
+            self.families[fam].faces.push(FaceSource {
                 path: path.clone(),
                 index: face.index,
                 weight: face.weight.0,
                 italic: face.style != fontdb::Style::Normal,
             });
         }
-        catalog.families.sort_by_key(|f| f.name.to_lowercase());
-        catalog
+        self.families.sort_by_key(|f| f.name.to_lowercase());
     }
 
     /// A catalog of specific font files, for tests and for bundled fonts.
@@ -122,6 +162,49 @@ impl Catalog {
         self.families
             .iter()
             .find(|f| f.name.eq_ignore_ascii_case(name))
+    }
+}
+
+/// Most font files Quill will pick up from the extra folders in one go, so
+/// pointing a slot at a whole disk can't hang the scan.
+const MAX_FOLDER_FONT_FILES: usize = 20_000;
+
+fn is_font_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "ttf" | "otf" | "ttc" | "otc"
+        )
+    })
+}
+
+/// Font files in `dir` and in folders up to `levels` below it (0 means the
+/// folder itself only). Shortcuts to folders are not followed, so a loop can't
+/// trap the search; hidden files and folders are skipped.
+pub fn collect_font_files(dir: &Path, levels: u8, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        if out.len() >= MAX_FOLDER_FONT_FILES {
+            return;
+        }
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_dir() {
+            if levels > 0 {
+                collect_font_files(&path, levels - 1, out);
+            }
+        } else if is_font_file(&path) && (kind.is_file() || path.is_file()) {
+            out.push(path);
+        }
     }
 }
 
@@ -332,9 +415,12 @@ pub struct Fonts {
 }
 
 /// Font bytes live for the whole run, so faces can borrow them as `'static`.
-/// A file is read once however many faces use it. Keeping a private copy is
-/// deliberate: an installed font can be replaced or truncated while Quill is
-/// open, which can turn a live memory map into a process-killing SIGBUS.
+/// A file is read once however many faces use it. Fonts you installed get a
+/// private copy: they can be replaced or truncated while Quill is open, which
+/// can turn a live memory map into a process-killing SIGBUS. The Mac's own
+/// fonts sit on the sealed system volume and cannot change under us, so they
+/// are mapped instead: only the pages a document touches are read in, which
+/// matters for a 190 MB emoji font or a 55 MB CJK one.
 fn map_file(path: &PathBuf) -> Option<&'static [u8]> {
     static MAPS: OnceLock<std::sync::Mutex<HashMap<PathBuf, &'static [u8]>>> = OnceLock::new();
     let maps = MAPS.get_or_init(Default::default);
@@ -342,10 +428,31 @@ fn map_file(path: &PathBuf) -> Option<&'static [u8]> {
     if let Some(data) = maps.get(path) {
         return Some(data);
     }
-    let bytes = std::fs::read(path).ok()?;
-    let data: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    let data = match map_immutable(path) {
+        Some(data) => data,
+        None => Box::leak(std::fs::read(path).ok()?.into_boxed_slice()),
+    };
     maps.insert(path.clone(), data);
     Some(data)
+}
+
+/// Map a font file from the Mac's read-only system volume.
+#[cfg(target_os = "macos")]
+fn map_immutable(path: &Path) -> Option<&'static [u8]> {
+    if !path.starts_with("/System/") {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    // SAFETY: the file is on the sealed system volume, which nothing can
+    // modify or truncate while the process runs.
+    let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+    let map: &'static memmap2::Mmap = Box::leak(Box::new(map));
+    Some(&map[..])
+}
+
+#[cfg(not(target_os = "macos"))]
+fn map_immutable(_: &Path) -> Option<&'static [u8]> {
+    None
 }
 
 impl Fonts {
@@ -650,6 +757,61 @@ mod tests {
         let k = fonts.resolve("No Such Font Anywhere", false, false);
         let face = fonts.face(k.face);
         assert!(face.units_per_em > 0.0);
+    }
+
+    fn font_folder_tree(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("quill-fonts-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for sub in ["", "a", "a/b", "a/b/c", ".hidden"] {
+            std::fs::create_dir_all(root.join(sub)).unwrap();
+            std::fs::write(root.join(sub).join("x.ttf"), b"not a font").unwrap();
+            std::fs::write(root.join(sub).join("notes.txt"), b"text").unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn folder_search_stops_at_the_chosen_depth_and_takes_only_font_files() {
+        let root = font_folder_tree("depth");
+        for (levels, expected) in [(0u8, 1usize), (1, 2), (2, 3), (7, 4)] {
+            let mut found = Vec::new();
+            collect_font_files(&root, levels, &mut found);
+            assert_eq!(found.len(), expected, "levels {levels}");
+            assert!(
+                found
+                    .iter()
+                    .all(|p| !p.to_string_lossy().contains(".hidden"))
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn extra_folders_add_families_and_dropping_them_takes_them_away() {
+        let base = Catalog::scan_system();
+        let Some(source) = base
+            .families
+            .iter()
+            .flat_map(|f| f.faces.iter())
+            .map(|f| f.path.clone())
+            .find(|p| is_font_file(p))
+        else {
+            return;
+        };
+        let name = format!("copy.{}", source.extension().unwrap().to_string_lossy());
+        let root = font_folder_tree("merge");
+        let deep = root.join("a/b");
+        std::fs::copy(&source, deep.join(&name)).unwrap();
+        let shallow = base.with_folders(std::slice::from_ref(&root), 1);
+        let deeper = base.with_folders(std::slice::from_ref(&root), 3);
+        let count = |c: &Catalog| c.families.iter().map(|f| f.faces.len()).sum::<usize>();
+        assert_eq!(count(&shallow), count(&base), "too deep for one level");
+        assert!(
+            count(&deeper) > count(&base),
+            "the copied font joined its family"
+        );
+        assert_eq!(count(&base.with_folders(&[], 4)), count(&base));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

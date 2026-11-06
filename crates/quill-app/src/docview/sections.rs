@@ -8,6 +8,16 @@ use super::*;
 use quill_core::{PageNumberFormat, SectionProps};
 use quill_layout::paginate::Band;
 
+/// Per-page section facts for a whole layout pass.
+pub(super) struct PageSections {
+    /// The section each page starts in.
+    pub section: Vec<usize>,
+    /// Whether the page gets its section's first page header.
+    pub first_page: Vec<bool>,
+    /// The number printed on each page and how it is written.
+    pub number: Vec<(u32, PageNumberFormat)>,
+}
+
 impl DocView {
     /// Each section's first paragraph and settings.
     pub(super) fn section_list(&self) -> Vec<(usize, SectionProps)> {
@@ -81,6 +91,48 @@ impl DocView {
             };
         }
         (n, self.page_section(k).page_number_format)
+    }
+
+    /// What `page_section_index`, `headers_for_page` and `page_number` say
+    /// for every page, worked out in one sweep for loops over all pages.
+    pub(super) fn page_sections(&self) -> PageSections {
+        let pages = self.pages.len();
+        let sections = self.bands.iter().map(|b| b.section + 1).max().unwrap_or(0);
+        let mut first_band = vec![usize::MAX; sections];
+        for b in &self.bands {
+            if let Some(slot) = first_band.get_mut(b.section)
+                && *slot == usize::MAX
+            {
+                *slot = b.page;
+            }
+        }
+        let mut out = PageSections {
+            section: Vec::with_capacity(pages),
+            first_page: Vec::with_capacity(pages),
+            number: Vec::with_capacity(pages),
+        };
+        let mut band = 0;
+        let mut n = 0;
+        for k in 0..pages {
+            while band < self.bands.len() && self.bands[band].page < k {
+                band += 1;
+            }
+            let s = self.bands.get(band).map_or(0, |b| b.section);
+            let props = self.secs.get(s).map_or(&self.doc.section, |(_, p)| p);
+            let starts = k == 0
+                || first_band
+                    .get(s)
+                    .is_some_and(|&p| p != usize::MAX && p >= k);
+            n = if props.restart_page_numbers && starts {
+                1
+            } else {
+                n + 1
+            };
+            out.section.push(s);
+            out.first_page.push(props.different_first_page && starts);
+            out.number.push((n, props.page_number_format));
+        }
+        out
     }
 
     /// The width of the column the insertion point is in.

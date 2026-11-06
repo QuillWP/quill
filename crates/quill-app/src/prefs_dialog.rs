@@ -8,18 +8,41 @@ use crate::settings::{self, Unit};
 
 /// Panels: name and icon. Grammar, Thesaurus and Hyphenation have no
 /// settings in Quill yet, so their panels are left out.
-const PANELS: [&str; 6] = [
+const PANELS: [&str; 7] = [
     "General",
     "View",
     "Open And Save",
     "Default Font",
     "Spelling",
     "Toolbar",
+    "Advanced",
 ];
 /// The Spelling panel, which the Spelling window's Options… opens.
 pub const DEFAULT_FONT_PANEL: usize = 3;
 pub const SPELLING_PANEL: usize = 4;
 pub const TOOLBAR_PANEL: usize = 5;
+pub const ADVANCED_PANEL: usize = 6;
+/// Item ids for the ten font folder slots.
+const FOLDER_ON: [&str; 10] = [
+    "fon0", "fon1", "fon2", "fon3", "fon4", "fon5", "fon6", "fon7", "fon8", "fon9",
+];
+const FOLDER_CHOOSE: [&str; 10] = [
+    "fchoose0", "fchoose1", "fchoose2", "fchoose3", "fchoose4", "fchoose5", "fchoose6", "fchoose7",
+    "fchoose8", "fchoose9",
+];
+const FOLDER_CLEAR: [&str; 10] = [
+    "fclear0", "fclear1", "fclear2", "fclear3", "fclear4", "fclear5", "fclear6", "fclear7",
+    "fclear8", "fclear9",
+];
+/// How often the recovery copy is saved, in seconds (0 is never).
+const AUTOSAVE: [(&str, u32); 6] = [
+    ("Never", 0),
+    ("Every 30 seconds", 30),
+    ("Every minute", 60),
+    ("Every 2 minutes", 120),
+    ("Every 5 minutes", 300),
+    ("Every 10 minutes", 600),
+];
 const SIZES: [&str; 11] = [
     "9", "10", "12", "14", "18", "24", "36", "48", "60", "72", "96",
 ];
@@ -27,7 +50,12 @@ const SIZES: [&str; 11] = [
 /// The Preferences window showing `panel`, with `fonts` for Default Font.
 pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
     let s = settings::get();
-    let mut d = Dialog::new("Preferences", 442.0, 332.0);
+    let height = if panel == ADVANCED_PANEL {
+        412.0
+    } else {
+        332.0
+    };
+    let mut d = Dialog::new("Preferences", 442.0, height);
     d.close_box = true;
     d.modeless = true;
     d.text("Show:", 11.0, 10.0);
@@ -132,7 +160,7 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
                 s.open_with_paragraph_toolbar,
             );
             d.check("ruler", "With Ruler On", 16.0, 211.0, s.open_with_ruler);
-            d.group("Menus", 11.0, 246.0, 364.0, 80.0);
+            d.group("Menus", 11.0, 246.0, 364.0, 44.0);
             d.check(
                 "recent",
                 "List Recently Opened Documents",
@@ -140,15 +168,6 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
                 269.0,
                 s.recent_files,
             );
-            d.text("Documents to remember (1-50):", 16.0, 296.0);
-            d.field(
-                "recent_count",
-                &s.recent_count.to_string(),
-                274.0,
-                293.0,
-                48.0,
-            );
-            d.enable("recent_count", s.recent_files);
         }
         2 => {
             d.check("rtf", "Always Interpret RTF", 13.0, 45.0, s.interpret_rtf);
@@ -250,6 +269,62 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
             d.radio("tbright", "Right (Vertical)", 20.0, 155.0, 1, at == 2);
             d.button("customize", "Customize…", 9.0, 195.0, 110.0, false);
         }
+        ADVANCED_PANEL => {
+            d.group("Extra Font Folders", 11.0, 36.0, 420.0, 272.0);
+            for slot in 0..settings::MAX_FONT_FOLDERS {
+                let y = 56.0 + 21.0 * slot as f32;
+                let folder = s.font_folders.get(slot);
+                let label = folder.map_or("(empty)".to_string(), |f| shorten(&f.path));
+                d.check(
+                    FOLDER_ON[slot],
+                    &label,
+                    18.0,
+                    y + 2.0,
+                    folder.is_some_and(|f| f.enabled),
+                );
+                d.button(FOLDER_CHOOSE[slot], "Choose…", 318.0, y, 70.0, false);
+                d.button(FOLDER_CLEAR[slot], "Clear", 390.0, y, 36.0, false);
+                d.enable(FOLDER_ON[slot], folder.is_some());
+                d.enable(FOLDER_CLEAR[slot], folder.is_some());
+            }
+            d.text("Folder levels to search (0-7):", 18.0, 282.0);
+            d.field(
+                "font_levels",
+                &s.font_folder_levels.to_string(),
+                200.0,
+                279.0,
+                40.0,
+            );
+            d.note(
+                "font_help",
+                "Fonts load only while a folder is checked. Documents that use them",
+                11.0,
+                314.0,
+                420.0,
+            );
+            d.note(
+                "font_help2",
+                "show in other fonts on a computer, or a time, when they are not loaded.",
+                11.0,
+                327.0,
+                420.0,
+            );
+            d.text("Save a recovery copy:", 11.0, 358.0);
+            let at = AUTOSAVE
+                .iter()
+                .position(|a| a.1 == s.autosave_secs)
+                .unwrap_or(1);
+            let names: Vec<&str> = AUTOSAVE.iter().map(|a| a.0).collect();
+            d.popup("autosave", &names, at, 139.0, 355.0, 150.0);
+            d.text("Documents in Open Recent (1-50):", 11.0, 386.0);
+            d.field(
+                "recent_count",
+                &s.recent_count.to_string(),
+                200.0,
+                383.0,
+                48.0,
+            );
+        }
         _ => {
             d.text("Default Font:", 11.0, 43.0);
             let mut list: Vec<String> = fonts.to_vec();
@@ -274,11 +349,78 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
     d
 }
 
+/// A folder path for a checkbox label: the home folder as ~, and the middle
+/// cut out when it is too long to fit.
+fn shorten(path: &std::path::Path) -> String {
+    let mut text = path.to_string_lossy().into_owned();
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from)
+        && let Ok(rest) = path.strip_prefix(&home)
+    {
+        text = format!("~/{}", rest.display());
+    }
+    const MAX: usize = 46;
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= MAX {
+        return text;
+    }
+    let head: String = chars[..MAX / 3].iter().collect();
+    let tail: String = chars[chars.len() - (MAX - MAX / 3 - 1)..].iter().collect();
+    format!("{head}…{tail}")
+}
+
+/// Whether `id` is a Choose… or Clear button of a font folder slot.
+pub fn is_folder_button(id: &str) -> bool {
+    FOLDER_CHOOSE.contains(&id) || FOLDER_CLEAR.contains(&id)
+}
+
+/// Put `path` in font folder slot `slot` (the next free one if the slot is
+/// empty), switched on.
+fn set_folder(slot: usize, path: std::path::PathBuf) {
+    settings::update(|s| {
+        let folder = settings::FontFolder {
+            path,
+            enabled: true,
+        };
+        if let Some(old) = s.font_folders.get_mut(slot) {
+            *old = folder;
+        } else if s.font_folders.len() < settings::MAX_FONT_FOLDERS {
+            s.font_folders.push(folder);
+        }
+    });
+}
+
+fn clear_folder(slot: usize) {
+    settings::update(|s| {
+        if slot < s.font_folders.len() {
+            s.font_folders.remove(slot);
+        }
+    });
+}
+
+/// Carry out Choose… or Clear for a font folder slot. Choosing asks for a
+/// folder and warns that documents depend on it.
+pub fn folder_button(id: &str) {
+    if let Some(slot) = FOLDER_CLEAR.iter().position(|b| *b == id) {
+        clear_folder(slot);
+    } else if let Some(slot) = FOLDER_CHOOSE.iter().position(|b| *b == id) {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose a Font Folder");
+        if let Some(old) = settings::with(|s| s.font_folders.get(slot).map(|f| f.path.clone())) {
+            dialog = dialog.set_directory(old);
+        }
+        if let Some(path) = dialog.pick_folder() {
+            set_folder(slot, path);
+            crate::app::warn(
+                "These fonts are not installed.",
+                "Quill loads them only while the folder is checked. A document that uses them \
+                 will show in other fonts, and lines may break differently, on a computer \
+                 without these fonts or when the folder is switched off.",
+            );
+        }
+    }
+}
+
 /// Something changed in the panel: put it into effect.
 pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
-    if panel == 1 && id == "recent" {
-        d.enable("recent_count", d.is_on("recent"));
-    }
     if id == "sizes" {
         let z = SIZES[d.selected("sizes").min(SIZES.len() - 1)];
         d.set_field("size", z);
@@ -286,7 +428,7 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
     let on = |id| d.is_on(id);
     match panel {
         0 => {
-            let unit = Unit::ALL[d.selected("unit").min(3)];
+            let unit = Unit::ALL[d.selected("unit").min(Unit::ALL.len() - 1)];
             settings::update(|s| {
                 s.name = d.field_text("name");
                 s.initials = d.field_text("initials");
@@ -315,11 +457,6 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
             s.open_with_formatting_toolbar = on("formatting");
             s.open_with_paragraph_toolbar = on("paragraph");
             s.recent_files = on("recent");
-            if let Ok(count) = d.field_text("recent_count").parse::<usize>()
-                && (1..=50).contains(&count)
-            {
-                s.recent_count = count;
-            }
         }),
         2 => settings::update(|s| {
             s.interpret_rtf = on("rtf");
@@ -348,6 +485,26 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
             s.words_to_system = d.selected("add_words") == 1;
             s.ignore_uppercase = on("upper");
             s.ignore_numbers = on("numbers");
+        }),
+        ADVANCED_PANEL => settings::update(|s| {
+            for (slot, folder) in s.font_folders.iter_mut().enumerate() {
+                folder.enabled = on(FOLDER_ON[slot]);
+            }
+            if let Ok(levels) = d.field_text("font_levels").trim().parse::<u8>()
+                && levels <= settings::MAX_FONT_LEVELS
+            {
+                s.font_folder_levels = levels;
+            }
+            if id == "autosave"
+                && let Some(&(_, secs)) = AUTOSAVE.get(d.selected("autosave"))
+            {
+                s.autosave_secs = secs;
+            }
+            if let Ok(count) = d.field_text("recent_count").trim().parse::<usize>()
+                && (1..=50).contains(&count)
+            {
+                s.recent_count = count;
+            }
         }),
         _ => {
             let font = d.selected_text("font");
@@ -393,16 +550,14 @@ mod tests {
     #[test]
     fn recent_count_and_save_format_preferences_are_live_and_bounded() {
         settings::update(|s| *s = settings::Settings::default());
-        let mut d = preferences(1, &[]);
+        assert_eq!(settings::get().recent_count, 10);
+        let mut d = preferences(ADVANCED_PANEL, &[]);
         d.set_field("recent_count", "25");
-        changed(1, &mut d, "recent_count");
+        changed(ADVANCED_PANEL, &mut d, "recent_count");
         assert_eq!(settings::get().recent_count, 25);
         d.set_field("recent_count", "0");
-        changed(1, &mut d, "recent_count");
+        changed(ADVANCED_PANEL, &mut d, "recent_count");
         assert_eq!(settings::get().recent_count, 25);
-        d.set_on("recent", false);
-        changed(1, &mut d, "recent");
-        assert!(!d.is_enabled("recent_count"));
         let mut d = preferences(2, &[]);
         assert!(d.is_on("foreign_quill"));
         d.set_on("foreign_quill", false);
@@ -459,7 +614,7 @@ mod tests {
                 d.items
                     .iter()
                     .filter(|item| !item.enabled)
-                    .all(|item| item.id == "recent_count")
+                    .all(|item| item.id.starts_with("fon") || item.id.starts_with("fclear"))
             );
         }
     }
@@ -504,5 +659,69 @@ mod tests {
                 .page_width,
             11906
         );
+    }
+
+    #[test]
+    fn font_folders_toggle_clear_and_fit_the_advanced_panel() {
+        settings::update(|s| *s = settings::Settings::default());
+        set_folder(0, "/Fonts/Google".into());
+        set_folder(1, "/Fonts/Trial".into());
+        let mut d = preferences(ADVANCED_PANEL, &[]);
+        assert!(d.is_on("fon0") && d.is_on("fon1"));
+        assert!(!d.is_enabled("fon2") && !d.is_enabled("fclear2"));
+        d.set_on("fon1", false);
+        changed(ADVANCED_PANEL, &mut d, "fon1");
+        let folders = settings::get().font_folders;
+        assert!(folders[0].enabled && !folders[1].enabled);
+        // The off folder stays in its slot and survives a save and reload.
+        let back = settings::Settings::from_text(&settings::get().to_text());
+        assert_eq!(back.font_folders, folders);
+        clear_folder(0);
+        assert_eq!(settings::get().font_folders.len(), 1);
+        assert_eq!(
+            settings::get().font_folders[0].path,
+            std::path::Path::new("/Fonts/Trial")
+        );
+        for item in &d.items {
+            assert!(item.rect.right() <= d.width, "{} is too wide", item.id);
+            assert!(item.rect.bottom() <= d.height, "{} is too low", item.id);
+        }
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
+    fn font_search_depth_and_autosave_are_bounded_and_saved() {
+        settings::update(|s| *s = settings::Settings::default());
+        assert_eq!(settings::get().font_folder_levels, 4);
+        assert_eq!(settings::get().autosave_secs, 30);
+        let mut d = preferences(ADVANCED_PANEL, &[]);
+        d.set_field("font_levels", "7");
+        changed(ADVANCED_PANEL, &mut d, "font_levels");
+        assert_eq!(settings::get().font_folder_levels, 7);
+        d.set_field("font_levels", "8");
+        changed(ADVANCED_PANEL, &mut d, "font_levels");
+        assert_eq!(settings::get().font_folder_levels, 7);
+        d.set_selected("autosave", 4);
+        changed(ADVANCED_PANEL, &mut d, "autosave");
+        assert_eq!(settings::get().autosave_secs, 300);
+        let back = settings::Settings::from_text(&settings::get().to_text());
+        assert_eq!((back.font_folder_levels, back.autosave_secs), (7, 300));
+        d.set_selected("autosave", 0);
+        changed(ADVANCED_PANEL, &mut d, "autosave");
+        assert_eq!(settings::get().autosave_secs, 0);
+        assert_eq!(
+            settings::Settings::from_text("font_folder_levels = 99\n").font_folder_levels,
+            7
+        );
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
+    fn long_folder_paths_are_shortened_in_the_middle() {
+        let long = std::path::Path::new("/Volumes/Archive/Fonts/Collections/Downloads/Latest");
+        let text = shorten(long);
+        assert!(text.chars().count() <= 46);
+        assert!(text.contains('…') && text.starts_with("/Volumes") && text.ends_with("Latest"));
+        assert_eq!(shorten(std::path::Path::new("/Fonts")), "/Fonts");
     }
 }

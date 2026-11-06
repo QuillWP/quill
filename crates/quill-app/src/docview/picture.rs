@@ -129,27 +129,42 @@ impl DocView {
         ]
     }
 
+    /// The handle under a window point on the selected picture, or the one
+    /// being dragged, for the pointer.
+    pub fn picture_cursor(&self, wx: f32, wy: f32) -> Option<Handle> {
+        if let Some(d) = &self.pic_drag {
+            return Some(d.handle);
+        }
+        let r = self.picture_rect(self.selected_picture()?)?;
+        Self::handles(r)
+            .into_iter()
+            .find(|(_, h)| Self::grown(*h).contains(wx, wy))
+            .map(|(handle, _)| handle)
+    }
+
+    /// A handle with the few points around it that still grab it.
+    fn grown(h: Rect) -> Rect {
+        Rect::new(h.x - 2.0, h.y - 2.0, h.w + 4.0, h.h + 4.0)
+    }
+
     /// A click on a picture: select it, or start dragging one of its
     /// handles. Returns true if the click was the picture's.
     pub(super) fn picture_mouse_down(&mut self, wx: f32, wy: f32, shift: bool) -> bool {
         if let Some(at) = self.selected_picture()
             && let Some(r) = self.picture_rect(at)
-        {
-            let grow = |h: Rect| Rect::new(h.x - 2.0, h.y - 2.0, h.w + 4.0, h.h + 4.0);
-            if let Some((handle, _)) = Self::handles(r)
+            && let Some((handle, _)) = Self::handles(r)
                 .into_iter()
-                .find(|(_, h)| grow(*h).contains(wx, wy))
-            {
-                self.pic_drag = Some(PicDrag {
-                    at,
-                    handle,
-                    shift,
-                    start: r,
-                    to: (wx, wy),
-                });
-                self.drag_status();
-                return true;
-            }
+                .find(|(_, h)| Self::grown(*h).contains(wx, wy))
+        {
+            self.pic_drag = Some(PicDrag {
+                at,
+                handle,
+                shift,
+                start: r,
+                to: (wx, wy),
+            });
+            self.drag_status();
+            return true;
         }
         let (pos, _) = self.hit(wx, wy);
         let story = &self.doc.main;
@@ -278,5 +293,40 @@ impl DocView {
                 y += 2.0;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_pointer_finds_the_handles_of_the_selected_picture() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut v = DocView::new(quill_core::Document::new(), "Pic".into());
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x40\0\0\0\x30\x08\x02\0\0\0".to_vec();
+        v.insert_picture(Picture::from_bytes(png).unwrap());
+        v.update_layout(&mut fonts);
+        let at = Position::new(0, 0);
+        let end = Position::new(0, chars::OBJECT.len_utf8());
+        // Not selected: no handles.
+        v.set_selection(Selection::caret(end));
+        let r = v.picture_rect(at).unwrap();
+        assert_eq!(v.picture_cursor(r.right() - 3.0, r.bottom() - 3.0), None);
+        v.set_selection(Selection::new(at, end));
+        let corner = (r.right() - 3.0, r.bottom() - 3.0);
+        assert_eq!(v.picture_cursor(corner.0, corner.1), Some(Handle::Corner));
+        let right = (r.right() - 3.0, r.y + r.h / 2.0);
+        assert_eq!(v.picture_cursor(right.0, right.1), Some(Handle::Right));
+        let bottom = (r.x + r.w / 2.0, r.bottom() - 3.0);
+        assert_eq!(v.picture_cursor(bottom.0, bottom.1), Some(Handle::Bottom));
+        // Just outside the grab margin, and the middle of the picture.
+        assert_eq!(v.picture_cursor(r.right() + 4.0, r.bottom() + 4.0), None);
+        assert_eq!(v.picture_cursor(r.x + 5.0, r.y + 5.0), None);
+        // While a handle is being dragged the pointer keeps its shape.
+        assert!(v.picture_mouse_down(corner.0, corner.1, false));
+        assert_eq!(v.picture_cursor(0.0, 0.0), Some(Handle::Corner));
     }
 }

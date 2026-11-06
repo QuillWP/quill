@@ -8,7 +8,7 @@ dictionaries repository (https://github.com/LibreOffice/dictionaries,
 | File | Built from | License |
 |---|---|---|
 | `hyph_en_US.pat` | `hyph_en_US.dic` (TeX hyphenation patterns and TUGboat exceptions) | BSD-style, see `licenses/README_hyph_en_US.txt` |
-| `th_en_US.dat` | `th_en_US_v2.dat` (MyThes thesaurus generated from WordNet) | WordNet license (Princeton University), see below |
+| `th_en_US.dat` | `th_en_US_v2.dat` (MyThes thesaurus generated from WordNet) | WordNet license (Princeton University), see `licenses/WordNet_license.txt` |
 
 On macOS Quill hyphenates with the system's own patterns, so the Mac
 package leaves `hyph_en_US.pat` and its license out.

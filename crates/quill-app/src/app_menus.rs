@@ -31,8 +31,11 @@ pub enum Action {
     ToolbarPosition(u8),
     CustomizeToolbar,
     About,
+    Licenses,
     /// Open an entry from File > Open Recent.
     Recent(usize),
+    /// Take one entry out of the recent list (Open Recent > Remove from List).
+    RemoveRecent(usize),
     ClearRecent,
     /// Bring the n-th window to the front.
     Window(usize),
@@ -198,7 +201,11 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
 
     // On the Mac, Quit lives in the application menu.
     let mac = cfg!(target_os = "macos");
-    let mut app_items = vec![b.item("About Quill…", Action::About)];
+    let mut app_items = vec![
+        b.item("About Quill…", Action::About),
+        // (The Mac's menu bar leaves out an item titled just "Licenses…".)
+        b.item("Quill Licenses…", Action::Licenses),
+    ];
     if mac {
         // Mac apps keep their settings here too, under ⌘,.
         app_items.push(sep());
@@ -212,25 +219,41 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
 
     let mut file_items = vec![b.cmd("New", Cmd::New), b.cmd("Open…", Cmd::Open)];
     if crate::settings::with(|settings| settings.recent_files) {
+        let shown = crate::settings::with(|s| s.recent_count.clamp(1, 50));
+        let name_of = |path: &std::path::Path| {
+            path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        };
         let mut items: Vec<Item> = cx
             .recent
             .iter()
-            .take(crate::settings::with(|s| s.recent_count.clamp(1, 50)))
+            .take(shown)
             .enumerate()
-            .map(|(index, path)| {
-                b.item(
-                    path.file_name().map_or_else(
-                        || path.display().to_string(),
-                        |name| name.to_string_lossy().into_owned(),
-                    ),
-                    Action::Recent(index),
-                )
-            })
+            .map(|(index, path)| b.item(name_of(path), Action::Recent(index)))
             .collect();
         if items.is_empty() {
             items.push(b.item("No Recent Documents", Action::None).enabled(false));
         }
         items.push(sep());
+        // Quill remembers more documents than the menu shows. Taking one out
+        // here lets the next one in line move up into view.
+        let removals: Vec<Item> = cx
+            .recent
+            .iter()
+            .take(shown)
+            .enumerate()
+            .map(|(index, path)| b.item(name_of(path), Action::RemoveRecent(index)))
+            .collect();
+        items.push(
+            b.item("Remove from List", Action::None)
+                .enabled(!removals.is_empty())
+                .submenu(Menu {
+                    title: "Remove from List".into(),
+                    items: removals,
+                }),
+        );
         items.push(
             b.item("Clear Menu", Action::ClearRecent)
                 .enabled(!cx.recent.is_empty()),
@@ -321,6 +344,16 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Outline", Cmd::OutlineView).checked(v.outline),
             b.cmd("Page Layout", Cmd::PageLayoutView)
                 .checked(v.page_view),
+            sep(),
+            b.item("Markdown", Action::None).submenu(Menu {
+                title: "Markdown".into(),
+                items: vec![
+                    b.cmd("Source", Cmd::MarkdownSource)
+                        .checked(v.in_markdown_source()),
+                    b.cmd("WYSIWYG", Cmd::MarkdownWysiwyg)
+                        .checked(!v.in_markdown_source()),
+                ],
+            }),
             sep(),
             b.item("Standard Toolbar", Action::ToggleToolbar)
                 .checked(crate::settings::with(|s| s.view_toolbar)),
@@ -868,6 +901,34 @@ mod tests {
     }
 
     #[test]
+    fn the_licenses_item_sits_under_about_in_the_help_or_application_menu() {
+        let view = DocView::new(quill_core::Document::new(), String::new());
+        let cx = MenuContext {
+            view: &view,
+            font_families: &[],
+            show_formatting_toolbar: true,
+            show_paragraph_toolbar: true,
+            show_ruler: true,
+            full_screen: false,
+            recent: &[],
+            windows: &[],
+        };
+        let (menus, actions) = build_menus(&cx);
+        let menu = if cfg!(target_os = "macos") {
+            &menus[0]
+        } else {
+            menus.last().unwrap()
+        };
+        let actions_in_menu: Vec<_> = menu
+            .items
+            .iter()
+            .map(|i| actions[i.id as usize].clone())
+            .collect();
+        assert_eq!(actions_in_menu[0], Action::About);
+        assert_eq!(actions_in_menu[1], Action::Licenses);
+    }
+
+    #[test]
     fn coverage_groups_preserve_exact_font_and_style_actions() {
         let families = [
             "Arial",
@@ -999,6 +1060,17 @@ mod tests {
         assert_eq!(
             actions[submenu.items.last().unwrap().id as usize],
             Action::ClearRecent
+        );
+        let remove = submenu
+            .items
+            .iter()
+            .find(|i| i.label == "Remove from List")
+            .and_then(|i| i.submenu.as_ref())
+            .expect("a Remove from List submenu");
+        assert_eq!(remove.items[0].label, "First.qwp");
+        assert_eq!(
+            actions[remove.items[0].id as usize],
+            Action::RemoveRecent(0)
         );
     }
 

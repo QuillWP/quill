@@ -5,10 +5,12 @@ use super::*;
 /// The annotation mark: a flat speech balloon 21 x 20 points, its tail
 /// at the bottom left on the baseline `base`. The writer's initials are
 /// drawn over it.
-pub(super) fn draw_balloon(c: &mut dyn Surface, x: f32, base: f32) {
+pub(super) fn draw_balloon(c: &mut dyn Surface, x: f32, base: f32, advance: f32) {
     const NOTE: u32 = 0xF6D26B;
     let top = base - 20.0;
-    crate::canvas::round_rect(c, Rect::new(x + 2.0, top, 19.0, 16.0), 4.0, NOTE);
+    // Wider than the usual 19 points when the initials and number need it.
+    let width = (advance - 4.0).max(19.0);
+    crate::canvas::round_rect(c, Rect::new(x + 2.0, top, width, 16.0), 4.0, NOTE);
     // The tail narrows from the balloon's bottom edge to a point.
     let (from, to) = (top + 15.0, base);
     let step = 0.25;
@@ -67,8 +69,14 @@ pub fn paint_paragraph(
                 Kind::Field(n) => {
                     // An annotation mark: the balloon, the initials in it.
                     let balloon = p.text[g.offset as usize..].starts_with(chars::ANNOTATION);
-                    let (size, fy) = if balloon {
-                        draw_balloon(c, ox + g.x, y);
+                    // In the comments pane the mark is only the line saying
+                    // who wrote the comment: its icon is drawn with the
+                    // comment's box, not as text.
+                    let card = balloon && l.card_text > 0.0;
+                    let (size, fy) = if card {
+                        (l.card_text, y)
+                    } else if balloon {
+                        draw_balloon(c, ox + g.x, y, g.advance);
                         (quill_layout::layout::ANNOTATION_TEXT, y - 10.0)
                     } else {
                         (st.size, y)
@@ -79,8 +87,9 @@ pub fn paint_paragraph(
                     };
                     let chp = if balloon { &plain } else { chp };
                     for fg in l.fields.get(n as usize).into_iter().flatten() {
-                        // The pane's caption beside the balloon is gray.
-                        let caption = balloon && fg.x >= quill_layout::layout::ANNOTATION_WIDTH;
+                        // The pane's line saying who wrote a comment is gray;
+                        // the initials and number in a balloon are not.
+                        let caption = card;
                         draw_styled_glyph(
                             c,
                             fonts,
@@ -528,7 +537,12 @@ impl DocView {
                 self.draw_page(c, fonts, cache, focused, k, left, top);
             }
         } else {
-            c.fill(area, color::WHITE);
+            if self.captions {
+                c.fill(area, comment_cards::PANE_BACKGROUND);
+                self.draw_comment_cards(c, focused);
+            } else {
+                c.fill(area, color::WHITE);
+            }
             let oy = area.y + TEXT_TOP - self.scroll_y;
             let top = self.scroll_y - TEXT_TOP;
             self.draw_text(c, fonts, cache, focused, ox, oy, top, top + area.h);

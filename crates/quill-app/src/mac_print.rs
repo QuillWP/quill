@@ -362,6 +362,8 @@ pub fn page_setup(
         let context = Box::into_raw(context);
         let _: () = msg_send![button, setTag: context as isize];
         observe_panel(context);
+        // Modal inside winit's event handler: needs the patched winit in
+        // vendor/winit (see vendor/README.md).
         let response: isize = msg_send![&*panel, runModalWithPrintInfo: &*info];
         page_setup_finished(
             std::ptr::null_mut(),
@@ -419,6 +421,8 @@ pub fn print(
         });
         let context = Box::into_raw(context);
         observe_panel(context);
+        // Runs the Print panel modally inside winit's event handler: needs
+        // the patched winit in vendor/winit (see vendor/README.md).
         let success: Bool = msg_send![&*operation, runOperation];
         printed(
             std::ptr::null_mut(),

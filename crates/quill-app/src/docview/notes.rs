@@ -83,18 +83,29 @@ impl DocView {
             pages.get(k).map_or(0, |b| b.page)
         };
         let labels = self.doc.note_labels(Some(&page_of));
-        // Annotation marks show their writer's initials.
+        // Annotation marks show their writer's initials and the comment's
+        // number, counting from the top of the text: the same in the text and
+        // in the comments pane, so each can be found from the other.
         let initials: std::collections::HashMap<u32, String> =
             quill_core::notes::annotation_ids(&self.doc.main.paras)
                 .into_iter()
-                .map(|id| {
+                .enumerate()
+                .map(|(n, id)| {
                     let i = self.doc.annotation_info.get(&id);
                     let initials = i.map_or(String::new(), |i| i.initials.clone());
-                    // The pane says who wrote each one, after a tab.
+                    let tag = format!("{initials}{}", n + 1);
+                    // The pane says who wrote each one, after a tab, and
+                    // draws the icon itself.
                     if self.captions {
-                        (id, format!("{initials}\t{}", self.caption(id)))
+                        let caption = self.caption(id);
+                        let rest = if caption.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  {caption}")
+                        };
+                        (id, format!("\t{tag}{rest}"))
                     } else {
-                        (id, initials)
+                        (id, tag)
                     }
                 })
                 .collect();
@@ -576,6 +587,36 @@ impl DocView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_comment_has_the_same_number_in_the_text_and_in_the_comments_pane() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let info = |author: &str| quill_core::notes::AnnotationInfo {
+            author: author.into(),
+            initials: "RV".into(),
+            ..Default::default()
+        };
+        let mut doc = quill_core::text::from_plain_text("First line\nSecond line");
+        // The second comment is made first but sits lower in the text.
+        let late = doc.insert_annotation(Position::new(1, 3), Default::default(), info("Late"));
+        let early = doc.insert_annotation(Position::new(0, 3), Default::default(), info("Early"));
+        let mut main = DocView::new(doc.clone(), "Text".into());
+        main.update_layout(&mut fonts);
+        // Numbers count from the top of the text, not in the order made.
+        assert_eq!(main.annotation_labels[&early], "RV1");
+        assert_eq!(main.annotation_labels[&late], "RV2");
+        let mut pane = DocView::new(
+            doc.copy_story_for_edit(StoryId::Annotations),
+            "Comments".into(),
+        );
+        pane.captions = true;
+        pane.area = Rect::new(0.0, 0.0, 300.0, 700.0);
+        pane.update_layout(&mut fonts);
+        assert!(pane.annotation_labels[&early].starts_with("\tRV1  Early"));
+        assert!(pane.annotation_labels[&late].starts_with("\tRV2  Late"));
+    }
 
     #[test]
     fn comment_captions_get_a_line_and_body_reflows_with_sidebar_width() {

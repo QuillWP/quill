@@ -95,12 +95,12 @@ pub fn document(view: &DocView) -> Dialog {
 /// valid measurement.
 fn read_document(d: &Dialog, base: &DocumentProps) -> Option<DocumentProps> {
     let mut p = base.clone();
-    let len = |id| units::parse_length(&d.field_text(id));
-    p.margin_left = len("left")?;
-    p.margin_right = len("right")?;
-    p.margin_top = len("top")?.max(0);
-    p.margin_bottom = len("bottom")?.max(0);
-    p.gutter = len("gutter")?.max(0);
+    let len = |id, old| units::parse_length_from(&d.field_text(id), old);
+    p.margin_left = len("left", base.margin_left)?;
+    p.margin_right = len("right", base.margin_right)?;
+    p.margin_top = len("top", base.margin_top)?.max(0);
+    p.margin_bottom = len("bottom", base.margin_bottom)?.max(0);
+    p.gutter = len("gutter", base.gutter)?.max(0);
     p.top_exact = d.selected("top_rule") == 1;
     p.bottom_exact = d.selected("bottom_rule") == 1;
     p.mirror_margins = d.is_on("mirror");
@@ -110,7 +110,7 @@ fn read_document(d: &Dialog, base: &DocumentProps) -> Option<DocumentProps> {
     p.widow_control = d.is_on("widow");
     p.print_hidden = d.is_on("hidden");
     p.even_odd_headers = d.is_on("evenodd");
-    p.default_tab = len("deftab")?;
+    p.default_tab = len("deftab", base.default_tab)?;
     // Text needs some room between the margins.
     if p.default_tab <= 0 || p.text_width() < 720 {
         return None;
@@ -406,23 +406,23 @@ pub fn margin_numbers_changed(d: &mut Dialog) {
 
 fn read_section(d: &Dialog, base: &SectionProps) -> Option<SectionProps> {
     let mut s = base.clone();
-    let len = |id| units::parse_length(&d.field_text(id));
+    let len = |id, old| units::parse_length_from(&d.field_text(id), old);
     s.start = STARTS[d.selected("start").min(4)].1;
     s.include_endnotes = d.is_on("endnotes");
     s.columns = d.field_text("columns").trim().parse().ok()?;
     if !(1..=100).contains(&s.columns) {
         return None;
     }
-    s.column_spacing = len("spacing")?.max(0);
-    s.header_from_top = len("hdr_top")?.max(0);
-    s.footer_from_bottom = len("ftr_bottom")?.max(0);
+    s.column_spacing = len("spacing", base.column_spacing)?.max(0);
+    s.header_from_top = len("hdr_top", base.header_from_top)?.max(0);
+    s.footer_from_bottom = len("ftr_bottom", base.footer_from_bottom)?.max(0);
     s.different_first_page = d.is_on("firstpage");
     s.page_number_format = FORMATS[d.selected("format").min(4)].1;
     s.restart_page_numbers = d.is_on("restart");
     s.margin_page_numbers = d.is_on("margin_numbers");
     if s.margin_page_numbers {
-        s.page_number_from_top = len("pn_top")?.max(0);
-        s.page_number_from_right = len("pn_right")?.max(0);
+        s.page_number_from_top = len("pn_top", base.page_number_from_top)?.max(0);
+        s.page_number_from_right = len("pn_right", base.page_number_from_right)?.max(0);
     }
     Some(s)
 }
@@ -484,6 +484,23 @@ mod tests {
         let d = document(&v);
         assert_eq!(d.field_text("left"), "1.5 in");
         assert_eq!(read_document(&d, &v.doc.props), Some(v.doc.props.clone()));
+    }
+
+    #[test]
+    fn document_and_section_ok_without_changes_keep_metric_lengths() {
+        // 2 cm and 1.25 cm show as "0.79 in" and "0.49 in", which would
+        // read back as 1138 and 706 twips.
+        let mut v = view();
+        v.doc.props.margin_left = 1134;
+        v.doc.props.default_tab = 709;
+        let d = document(&v);
+        assert_eq!(read_document(&d, &v.doc.props), Some(v.doc.props.clone()));
+        // 0.75 cm shows as "0.3 in".
+        v.doc.section.column_spacing = 425;
+        let d = section(&v);
+        assert_eq!(d.field_text("spacing"), "0.3 in");
+        let s = v.current_section().clone();
+        assert_eq!(read_section(&d, &s), Some(s.clone()));
     }
 
     #[test]

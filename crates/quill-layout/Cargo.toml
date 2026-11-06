@@ -11,3 +11,6 @@ quill-core.workspace = true
 ab_glyph = { version = "0.2.32", default-features = false, features = ["std", "variable-fonts"] }
 fontdb = { version = "0.24", default-features = false, features = ["std", "fs", "memmap"] }
 ab_glyph_rasterizer = "0.1.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+memmap2 = "0.9"

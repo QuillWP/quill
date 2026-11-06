@@ -82,18 +82,28 @@ impl App {
                     self.windows.len() - 1
                 }
             };
+            // Laying the document out now finds tables too wide for their
+            // columns; the window's first drawing reuses the layout.
+            let mut wide = Vec::new();
             if let Some((_, w)) = self.windows.get_mut(i) {
-                w.st.main_view_mut().path = Some(path.clone());
+                let v = w.st.main_view_mut();
+                v.path = Some(path.clone());
+                if let Some(fonts) = self.fonts.as_mut() {
+                    v.update_layout(fonts);
+                    wide = v.wide_table_pages();
+                }
             }
             crate::recent::note(&mut self.recent, path);
-            if let Some(detail) = open_warning(&report, &missing) {
-                warn(
-                    &format!(
+            if let Some(detail) = open_warning(&report, &missing, &wide) {
+                let message = if report.is_empty() && missing.is_empty() {
+                    format!("\u{201c}{}\u{201d} may not look right.", file_name(path))
+                } else {
+                    format!(
                         "Quill opened \u{201c}{}\u{201d} with some changes.",
                         file_name(path)
-                    ),
-                    &detail,
-                );
+                    )
+                };
+                warn(&message, &detail);
             }
         }
     }
@@ -110,6 +120,8 @@ impl App {
         {
             dialog = dialog.set_directory(dir);
         }
+        // Modal inside winit's event handler: needs the patched winit in
+        // vendor/winit (see vendor/README.md).
         if let Some(paths) = dialog.pick_files() {
             self.open_files(el, &paths);
         }
@@ -190,6 +202,26 @@ impl App {
                 }
             }
         }
+        if format == Format::Markdown && !w.st.main_view().in_markdown_source() {
+            let view = w.st.main_view_mut();
+            let lost = quill_formats::markdown::losses(&view.doc);
+            let unwarned = lost.iter().any(|l| !view.md_warned.contains(l));
+            if (chosen && !lost.is_empty()) || unwarned {
+                let answer = rfd::MessageDialog::new()
+                    .set_level(rfd::MessageLevel::Warning)
+                    .set_title("Some Features Will Be Left Out")
+                    .set_description(format!(
+                        "Markdown cannot carry these, so the saved file will leave them out:\n\n{}\n\nThe document you're editing keeps them, but the next time you open the file they will be gone. Save a .qwp copy to keep them. Save as Markdown anyway?",
+                        super::markdown::bullet_list(&lost)
+                    ))
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show();
+                if answer != rfd::MessageDialogResult::Yes {
+                    return false;
+                }
+            }
+            view.md_warned = lost;
+        }
         if chosen
             && matches!(format, Format::Odt | Format::Html | Format::Text)
             && w.st.main_view().doc.has_changes()
@@ -222,7 +254,20 @@ impl App {
                 return false;
             }
         }
-        match quill_formats::save(&w.st.main_view().doc, &path, format) {
+        // In Markdown source view the text is the file for Markdown, and
+        // every other format gets the document the text stands for.
+        let saved = {
+            let view = w.st.main_view();
+            match (view.markdown_text(), format) {
+                (Some(text), Format::Markdown) => quill_formats::save_markdown_text(&text, &path),
+                (Some(_), _) => match view.markdown_document() {
+                    Some(doc) => quill_formats::save(&doc, &path, format),
+                    None => Err("The Markdown could not be read back.".into()),
+                },
+                (None, _) => quill_formats::save(&view.doc, &path, format),
+            }
+        };
+        match saved {
             Ok(()) => {
                 let editable_saved = record_saved_file(w.st.main_view_mut(), &path, format, chosen);
                 if editable_saved {
@@ -410,6 +455,7 @@ fn missing_fonts(doc: &quill_core::Document, fonts: &quill_layout::Fonts) -> Vec
 fn open_warning(
     report: &quill_formats::report::ImportReport,
     missing: &[(String, String)],
+    wide_tables: &[usize],
 ) -> Option<String> {
     const MOST_FONTS: usize = 12;
     let mut parts = Vec::new();
@@ -434,7 +480,28 @@ fn open_warning(
             lines.join("\n")
         ));
     }
+    if !wide_tables.is_empty() {
+        parts.push(format!(
+            "There may be a formatting error on {}: a table is wider than its column \
+             and may run over the text beside it.",
+            page_list(wide_tables)
+        ));
+    }
     (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+/// "page 8", "pages 8 and 12", "pages 3, 8 and 12", or the first few and
+/// how many more.
+fn page_list(pages: &[usize]) -> String {
+    const MOST: usize = 8;
+    let mut shown: Vec<String> = pages.iter().take(MOST).map(|p| p.to_string()).collect();
+    if pages.len() > MOST {
+        shown.push(format!("{} more", pages.len() - MOST));
+    }
+    match shown.len() {
+        1 => format!("page {}", shown[0]),
+        n => format!("pages {} and {}", shown[..n - 1].join(", "), shown[n - 1]),
+    }
 }
 
 #[cfg(test)]
@@ -447,19 +514,36 @@ mod tests {
     #[test]
     fn the_open_warning_lists_losses_then_fonts() {
         use quill_formats::report::{self, ImportReport};
-        assert_eq!(super::open_warning(&ImportReport::default(), &[]), None);
+        assert_eq!(
+            super::open_warning(&ImportReport::default(), &[], &[]),
+            None
+        );
         let mut r = ImportReport::default();
         r.note(report::EQUATIONS);
         let fonts: Vec<(String, String)> = (0..14)
             .map(|i| (format!("Font {i}"), "Times".to_string()))
             .collect();
-        let text = super::open_warning(&r, &fonts).unwrap();
+        let text = super::open_warning(&r, &fonts, &[]).unwrap();
         assert!(text.starts_with(&format!(
             "Some of it could not be kept exactly:\n• {}",
             report::EQUATIONS
         )));
         assert!(text.contains("• Font 0, shown as Times"));
         assert!(text.ends_with("• and 2 more"));
+    }
+
+    #[test]
+    fn the_open_warning_names_pages_with_tables_too_wide_for_their_column() {
+        use quill_formats::report::ImportReport;
+        let text = super::open_warning(&ImportReport::default(), &[], &[8]).unwrap();
+        assert!(text.starts_with("There may be a formatting error on page 8: a table"));
+        assert_eq!(super::page_list(&[8, 12]), "pages 8 and 12");
+        assert_eq!(super::page_list(&[3, 8, 12]), "pages 3, 8 and 12");
+        let many: Vec<usize> = (1..=10).collect();
+        assert_eq!(
+            super::page_list(&many),
+            "pages 1, 2, 3, 4, 5, 6, 7, 8 and 2 more"
+        );
     }
 
     #[test]

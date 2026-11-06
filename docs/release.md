@@ -6,8 +6,8 @@ tests.
 
 ## Before tagging
 
-Use Python 3.11+ and run `python3 tools/package.py --check --with-source`
-on macOS/Linux, or `py -3 tools/package.py --check --with-source` in Windows
+Use Python 3.11+ and run `python3 tools/package.py --dist --check --with-source`
+on macOS/Linux, or `py -3 tools/package.py --dist --check --with-source` in Windows
 PowerShell. Packages are built on their matching operating system and written to
 `dist/`: macOS `.dmg` (plus `Quill.app`), Linux `.tar.gz`, Windows `.zip`, and one
 portable source `.zip`. Other packages in `dist/` are retained. The source archive
@@ -32,6 +32,10 @@ for all three platforms through GitHub Actions. Only tag pushes create a draft r
       (sources, licenses);
       the files in data/licenses ship with every package (they do, as part
       of data/).
+- [ ] Git history holds no copied artwork from the original product, such as
+      pixel copies of its toolbar icons. Before the repository goes public,
+      check every commit that will be published, or publish a fresh history,
+      and check the icons are clearly Quill's own.
 - [ ] The bundle identifier in tools/Info.plist (com.quillwp.Quill) is the one
       to keep: changing it later loses users' settings on the Mac.
 - [ ] For a public macOS build, import the Developer ID Application

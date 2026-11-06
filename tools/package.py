@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Build native Quill packages, or a small source ZIP for any build host.
+"""Build Quill to run while developing, native packages to publish, or a small
+source ZIP for any build host.
+
+By default the app is built inside the build folder (target/release/Quill.app,
+or target/debug/Quill.app with --debug). --dist makes the packages in dist/.
 
 Python 3.11+, standard library only. Run --help for options.
 """
@@ -21,7 +25,7 @@ import tomllib
 import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE_DIRS = (".github", "assets", "crates", "data", "docs", "tests", "tools")
+SOURCE_DIRS = (".github", "assets", "crates", "data", "docs", "tests", "tools", "vendor")
 SOURCE_FILES = (
     "Cargo.toml", "Cargo.lock", ".gitignore", "README.md",
     "LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES.txt",
@@ -96,14 +100,17 @@ def native_target() -> tuple[str, str]:
     return system, target
 
 
-def build(check: bool) -> Path:
+def build(check: bool, debug: bool) -> Path:
     if check:
         run("cargo", "fmt", "--all", "--check")
         run("cargo", "clippy", "--workspace", "--all-targets",
             "--locked", "--", "-D", "warnings")
         run("cargo", "test", "--workspace", "--locked")
     # Cargo reports the actual executable path, respecting CARGO_TARGET_DIR.
-    messages = run("cargo", "build", "--release", "--locked",
+    # A debug build keeps its symbols and overflow checks, so a crash report
+    # names the functions involved; it runs more slowly.
+    profile = [] if debug else ["--release"]
+    messages = run("cargo", "build", *profile, "--locked",
                    "--package", "quill-app", "--bin", "quill",
                    "--message-format=json-render-diagnostics", capture=True)
     for line in reversed(messages.splitlines()):
@@ -126,8 +133,8 @@ def copy_common(destination: Path, mac: bool = False) -> None:
 
 
 def portable_package(executable: Path, output: Path, version: str,
-                     system: str, arch: str) -> Path:
-    name = f"quill-{version}-{system}-{arch}"
+                     system: str, arch: str, label: str = "") -> Path:
+    name = f"quill-{version}-{system}-{arch}{label}"
     suffix = ".zip" if system == "windows" else ".tar.gz"
     destination = output / (name + suffix)
     with tempfile.TemporaryDirectory(prefix=".qwp-package-", dir=output) as tmp:
@@ -151,30 +158,62 @@ def portable_package(executable: Path, output: Path, version: str,
     return destination
 
 
-def mac_package(executable: Path, output: Path, version: str, arch: str) -> Path:
+def mac_app(executable: Path, app: Path, version: str, identity: str | None) -> None:
+    contents = app / "Contents"
+    (contents / "MacOS").mkdir(parents=True)
+    resources = contents / "Resources"
+    resources.mkdir()
+    shutil.copy2(executable, contents / "MacOS/quill")
+    copy_common(resources, mac=True)
+    run("sips", "-s", "format", "icns", str(ROOT / "assets/quill.png"),
+        "--out", str(resources / "Quill.icns"))
+    info = plistlib.loads((ROOT / "tools/Info.plist").read_bytes())
+    info["CFBundleVersion"] = info["CFBundleShortVersionString"] = version
+    (contents / "Info.plist").write_bytes(plistlib.dumps(info))
+    if identity:
+        run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, str(app))
+    else:
+        run("codesign", "--force", "--sign", "-", str(app))
+    run("codesign", "--verify", "--deep", "--strict", str(app))
+
+
+def replace_app(staged: Path, app: Path) -> None:
+    if app.is_symlink():
+        raise ValueError(f"Refusing to replace symlink: {app}")
+    if app.exists():
+        shutil.rmtree(app)
+    shutil.move(str(staged), str(app))
+
+
+def dev_app(executable: Path, version: str, system: str) -> Path:
+    """Put a runnable app beside the build, in target/<profile>/."""
+    if system != "macos":
+        # Off the Mac the bare program finds its data in the source tree.
+        return executable
+    app = executable.parent / "Quill.app"
+    # Replacing the app under a running copy would pull it out from under
+    # him. lsof finds the program however it was started.
+    binary = app / "Contents/MacOS/quill"
+    if binary.exists():
+        running = subprocess.run(["lsof", "-t", str(binary)], capture_output=True, text=True)
+        if running.stdout.strip():
+            raise ValueError(f"Quit Quill first: it is running from {app}")
+    with tempfile.TemporaryDirectory(prefix=".qwp-app-", dir=executable.parent) as tmp:
+        staged = Path(tmp) / "Quill.app"
+        mac_app(executable, staged, version, os.environ.get("MACOS_SIGN_IDENTITY"))
+        replace_app(staged, app)
+    return app
+
+
+def mac_package(executable: Path, output: Path, version: str, arch: str, label: str = "") -> Path:
     identity = os.environ.get("MACOS_SIGN_IDENTITY")
     notary = os.environ.get("MACOS_NOTARY_PROFILE")
-    destination = output / f"Quill-{version}-macos-{arch}.dmg"
+    destination = output / f"Quill-{version}-macos-{arch}{label}.dmg"
     with tempfile.TemporaryDirectory(prefix=".qwp-package-", dir=output) as tmp:
         root = Path(tmp)
         image_root = root / "image"
         app = image_root / "Quill.app"
-        contents = app / "Contents"
-        (contents / "MacOS").mkdir(parents=True)
-        resources = contents / "Resources"
-        resources.mkdir()
-        shutil.copy2(executable, contents / "MacOS/quill")
-        copy_common(resources, mac=True)
-        run("sips", "-s", "format", "icns", str(ROOT / "assets/quill.png"),
-            "--out", str(resources / "Quill.icns"))
-        info = plistlib.loads((ROOT / "tools/Info.plist").read_bytes())
-        info["CFBundleVersion"] = info["CFBundleShortVersionString"] = version
-        (contents / "Info.plist").write_bytes(plistlib.dumps(info))
-        if identity:
-            run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, str(app))
-        else:
-            run("codesign", "--force", "--sign", "-", str(app))
-        run("codesign", "--verify", "--deep", "--strict", str(app))
+        mac_app(executable, app, version, identity)
         (image_root / "Applications").symlink_to("/Applications")
         image = root / destination.name
         run("hdiutil", "create", "-quiet", "-volname", "Quill", "-srcfolder", str(image_root),
@@ -187,12 +226,7 @@ def mac_package(executable: Path, output: Path, version: str, arch: str) -> Path
             run("xcrun", "stapler", "staple", str(image))
             run("xcrun", "stapler", "validate", str(image))
         # Publish only after staging/signing succeeds; preserve other packages.
-        app_output = output / "Quill.app"
-        if app_output.is_symlink():
-            raise ValueError(f"Refusing to replace symlink: {app_output}")
-        if app_output.exists():
-            shutil.rmtree(app_output)
-        shutil.move(str(app), str(app_output))
+        replace_app(app, output / "Quill.app")
         image.replace(destination)
     return destination
 
@@ -202,28 +236,41 @@ def main() -> int:
     parser.add_argument("--source", action="store_true", help="create only a source ZIP; no Rust toolchain needed")
     parser.add_argument("--with-source", action="store_true", help="also create a source ZIP alongside the native package")
     parser.add_argument("--check", action="store_true", help="run formatting, strict lint, and tests before building")
-    parser.add_argument("--output", type=Path, default=ROOT / "dist", help="output directory (default: dist)")
+    parser.add_argument("--debug", action="store_true", help="build the debug version (slower, but crash reports name the code)")
+    parser.add_argument("--dist", action="store_true", help="make the packages to publish (DMG, tar.gz, zip) in --output")
+    parser.add_argument("--output", type=Path, default=ROOT / "dist", help="where --dist and --source write (default: dist)")
     args = parser.parse_args()
-    if args.source and (args.with_source or args.check):
-        parser.error("--source cannot be combined with --with-source or --check")
+    if args.source and (args.with_source or args.check or args.debug or args.dist):
+        parser.error("--source cannot be combined with --with-source, --check, --debug or --dist")
+    if os.environ.get("MACOS_NOTARY_PROFILE") and not args.dist and not args.source:
+        parser.error("notarizing needs --dist")
+    if args.debug and os.environ.get("MACOS_NOTARY_PROFILE"):
+        parser.error("--debug builds are for testing here; do not notarize them")
     version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     output = args.output.resolve()
     if any(output.is_relative_to(ROOT / name) for name in SOURCE_DIRS):
         parser.error("Choose an output directory outside the source directories (for example dist).")
-    output.mkdir(parents=True, exist_ok=True)
+    if args.source or args.dist or args.with_source:
+        output.mkdir(parents=True, exist_ok=True)
     if args.source:
         source_package(ROOT, output, version)
         return 0
     if os.environ.get("MACOS_NOTARY_PROFILE") and not os.environ.get("MACOS_SIGN_IDENTITY"):
         raise ValueError("MACOS_NOTARY_PROFILE requires MACOS_SIGN_IDENTITY.")
     system, target = native_target()
-    executable = build(args.check)
+    executable = build(args.check, args.debug)
+    label = "-debug" if args.debug else ""
     run(sys.executable, str(ROOT / "tools/generate-notices.py"))
+    if not args.dist:
+        print(f"App: {dev_app(executable, version, system)}")
+        if args.with_source:
+            source_package(ROOT, output, version)
+        return 0
     arch = target.split("-")[0]
     if system == "macos":
-        package = mac_package(executable, output, version, arch)
+        package = mac_package(executable, output, version, arch, label)
     else:
-        package = portable_package(executable, output, version, system, arch)
+        package = portable_package(executable, output, version, system, arch, label)
     print(f"Package: {package} ({package.stat().st_size / 1024**2:.2f} MiB)")
     if args.with_source:
         source_package(ROOT, output, version)

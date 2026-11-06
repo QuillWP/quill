@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 mod cells;
 mod changes;
+mod comment_cards;
 pub use cells::CELL_ALIGNMENTS;
 mod clipboard;
 mod compose;
@@ -29,6 +30,7 @@ mod language;
 mod layout_engine;
 mod link;
 mod live_spelling;
+mod markdown;
 mod memory;
 pub use language::HyphenSpot;
 mod borders;
@@ -41,8 +43,10 @@ mod tools;
 
 pub use borders::BorderKind;
 pub use clipboard::{Clip, Clipboard};
+pub use comment_cards::{LINK, dotted_line};
 pub(crate) use drawing::{draw_border_box, paint_paragraph};
 pub use link::LinkTarget;
+pub use picture::Handle;
 
 const MAIN: StoryId = StoryId::Main;
 
@@ -83,12 +87,18 @@ pub enum Effect {
     SaveAs,
     Quit,
     About,
+    /// Help > Licenses…: every license Quill carries.
+    Licenses,
     OpenRecent(usize),
+    RemoveRecent(usize),
     ClearRecent,
     Dialog(DialogId),
     NativePreview,
     Print,
     SavePdf,
+    /// View > Markdown > Source and WYSIWYG.
+    MarkdownSource,
+    MarkdownWysiwyg,
     /// Search again for what Find last looked for.
     FindAgain,
     /// Split the window into two panes, or join them.
@@ -227,6 +237,9 @@ pub struct DocView {
     pub show_changes: bool,
     /// This is the annotations pane: marks show who wrote each one.
     pub captions: bool,
+    /// For the comments pane: how large its own text is drawn compared with
+    /// its nominal size, so the document's zoom does not enlarge comments.
+    pub comment_scale: f32,
     /// Format for text typed at the insertion point after a formatting
     /// command with nothing selected.
     typing_chp: Option<CharProps>,
@@ -300,6 +313,11 @@ pub struct DocView {
     laid_out_page: (i32, i32, i32, bool),
     /// Page Layout view: pages drawn as sheets, text placed on them.
     pub page_view: bool,
+    /// View > Markdown > Source: the formatted document the text stands for.
+    pub md_source: Option<Box<markdown::MarkdownSource>>,
+    /// What Markdown cannot carry that the person has already been warned of
+    /// on saving as Markdown, so Save does not ask again.
+    pub md_warned: Vec<&'static str>,
     /// Lay out headers and footers even outside Page Layout view (for
     /// Print Preview and printing).
     pub headers_wanted: bool,
@@ -360,6 +378,7 @@ impl DocView {
             show_marks: false,
             show_changes: true,
             captions: false,
+            comment_scale: 1.0,
             typing_chp: None,
             caret_formats: Vec::new(),
             goal_x: None,
@@ -398,6 +417,8 @@ impl DocView {
             hyph_job: None,
             laid_out_page: (0, 0, 0, false),
             page_view: false,
+            md_source: None,
+            md_warned: Vec::new(),
             headers_wanted: false,
             printing: false,
             hf: std::collections::HashMap::new(),
@@ -447,6 +468,47 @@ impl DocView {
         paginate::page_at(&self.pages, top)
     }
 
+    /// The pages (from 1) holding a table wider than its column in a
+    /// section of several columns, reaching past the space between columns
+    /// so it runs over the text beside it. Quill lays a table out at its own
+    /// width, so these pages may not look as the document's author meant.
+    /// Needs the layout.
+    pub fn wide_table_pages(&self) -> Vec<usize> {
+        let doc = &self.doc;
+        let text_width = doc.props.text_width();
+        let mut pages: Vec<usize> = Vec::new();
+        if self.pages.is_empty() || self.layouts.is_empty() {
+            return pages;
+        }
+        for (k, range) in doc.sections().into_iter().enumerate() {
+            let s = doc.nth_section(k);
+            if s.columns < 2 {
+                continue;
+            }
+            let n = i32::from(s.columns);
+            let column = (text_width - s.column_spacing * (n - 1)) / n;
+            for i in range {
+                let p = &doc.main.paras[i];
+                let Some(row) = &p.row else {
+                    continue;
+                };
+                if p.pap.nest != 0 {
+                    continue;
+                }
+                let right = row.indent + row.cells.iter().map(|c| c.width).sum::<i32>();
+                if right <= column + s.column_spacing {
+                    continue;
+                }
+                let (_, top, _) = self.caret_geometry(Position::new(i, 0), false);
+                let page = paginate::page_at(&self.pages, top) + 1;
+                if pages.last() != Some(&page) {
+                    pages.push(page);
+                }
+            }
+        }
+        pages
+    }
+
     /// Page at the top of the viewport, independent of the insertion point.
     pub fn visible_page(&self) -> usize {
         if self.page_view {
@@ -462,6 +524,7 @@ impl DocView {
     pub fn set_selection(&mut self, sel: Selection) {
         self.sel = sel;
         self.clamp_selection();
+        self.confine_to_comment();
         self.goal_x = None;
         self.typing_chp = None;
         self.reset_blink();
@@ -780,6 +843,11 @@ impl DocView {
     }
 
     pub fn mouse_down(&mut self, wx: f32, wy: f32, shift: bool, cmd: bool) {
+        self.mouse_down_inner(wx, wy, shift, cmd);
+        self.confine_to_comment();
+    }
+
+    fn mouse_down_inner(&mut self, wx: f32, wy: f32, shift: bool, cmd: bool) {
         self.status = None;
         let now = Instant::now();
         let count = match self.last_click {
@@ -813,7 +881,7 @@ impl DocView {
         self.typing_chp = None;
         self.doc.break_typing();
         let (pos, upstream) = self.hit(wx, wy);
-        let in_bar = wx < self.area.x + self.text_x() - 2.0;
+        let in_bar = !self.captions && wx < self.area.x + self.text_x() - 2.0;
         // A live table of contents is one object: a click selects it all.
         if count == 1
             && !shift
@@ -878,6 +946,11 @@ impl DocView {
     }
 
     pub fn mouse_drag(&mut self, wx: f32, wy: f32) {
+        self.mouse_drag_inner(wx, wy);
+        self.confine_to_comment();
+    }
+
+    fn mouse_drag_inner(&mut self, wx: f32, wy: f32) {
         if self.picture_drag(wx, wy)
             || self.table_mouse_drag(wx, wy)
             || self.border_mouse_drag(wx, wy)
@@ -910,6 +983,7 @@ impl DocView {
         self.picture_mouse_up();
         self.table_mouse_up();
         self.border_mouse_up();
+        self.confine_to_comment();
     }
 
     pub fn dragging(&self) -> bool {
@@ -952,6 +1026,31 @@ pub fn fields(page: u32) -> LayoutOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_tables_wider_than_their_column() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        // Two columns of about 2.9 in on a 6 in text width, as in the
+        // report: four 1.5 in cells run over the second column; two
+        // 1.25 in cells fit.
+        for (cols, width, expected) in [(4, 2160, vec![1]), (2, 1800, vec![])] {
+            let mut v = DocView::new(Document::new(), "t".into());
+            v.type_text("Before");
+            v.doc.section.columns = 2;
+            v.doc.section.column_spacing = 360;
+            v.doc
+                .insert_table(MAIN, Position::new(0, 0), 2, cols, width);
+            v.update_layout(&mut fonts);
+            assert_eq!(v.wide_table_pages(), expected, "{cols} cells of {width}");
+        }
+        // In a single column the same wide table is left alone.
+        let mut v = DocView::new(Document::new(), "t".into());
+        v.doc.insert_table(MAIN, Position::new(0, 0), 2, 4, 2160);
+        v.update_layout(&mut fonts);
+        assert!(v.wide_table_pages().is_empty());
+    }
 
     #[test]
     fn secondary_click_preserves_backward_selection_and_moves_only_when_outside() {
@@ -1040,6 +1139,7 @@ mod tests {
                 quill_formats::Format::Rtf,
                 quill_formats::Format::Odt,
                 quill_formats::Format::Html,
+                quill_formats::Format::Markdown,
                 quill_formats::Format::Text,
             ] {
                 let path = std::env::temp_dir().join(format!("quill-hostile-{case}.{format:?}"));

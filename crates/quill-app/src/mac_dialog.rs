@@ -12,7 +12,7 @@ use objc2::runtime::{AnyClass, AnyObject, Sel};
 use objc2::{class, msg_send, sel};
 use objc2_06::rc::Retained as Retained06;
 use objc2_app_kit_03::{NSFont, NSFontAttributeName, NSFontManager, NSFontTraitMask};
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSPoint, NSRange, NSRect, NSSize, NSString};
 use objc2_foundation_03::{
     MainThreadMarker as MainThreadMarker03, NSAttributedString, NSDictionary,
     NSString as NSString03,
@@ -22,6 +22,18 @@ use std::sync::{Mutex, OnceLock};
 use winit::event_loop::EventLoopProxy;
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
+
+// AppKit selections count UTF-16 units; dialog fields use UTF-8 byte offsets.
+fn byte_offset(text: &str, units: usize) -> usize {
+    let mut used = 0;
+    for (byte, ch) in text.char_indices() {
+        used += ch.len_utf16();
+        if used > units {
+            return byte;
+        }
+    }
+    text.len()
+}
 
 const SCALE: f64 = 1.25;
 
@@ -532,17 +544,6 @@ pub fn install(proxy: EventLoopProxy<UserEvent>) {
     }
 }
 
-/// Show macOS's standard About panel. AppKit reads the application name,
-/// version and icon from Quill's bundle, so the panel automatically matches
-/// the current system appearance without another Quill-owned dialog.
-pub fn show_about() {
-    unsafe {
-        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-        let _: () = msg_send![app, orderFrontStandardAboutPanel: std::ptr::null::<AnyObject>()];
-        let _: () = msg_send![app, activateIgnoringOtherApps: true];
-    }
-}
-
 /// Native conversion is deliberately conservative. A custom canvas item may
 /// be interactive or a live preview, so it remains in the old renderer.
 pub fn supported(dialog: &Dialog) -> bool {
@@ -620,6 +621,90 @@ pub struct NativeDialog {
 impl NativeDialog {
     pub fn panel_id(&self) -> usize {
         Retained::as_ptr(&self.panel) as usize
+    }
+
+    pub fn activate_find(&self) {
+        if self.title != "Find" {
+            return;
+        }
+        let panel = Retained::as_ptr(&self.panel) as *mut AnyObject;
+        unsafe {
+            let _: () = msg_send![panel, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+            if let Some(control) = self.controls.iter().find(|c| c.id == "find") {
+                let _: bool =
+                    msg_send![panel, makeFirstResponder: Retained::as_ptr(&control.object)];
+            }
+        }
+    }
+
+    /// Expand Find in the same native window, keeping its top-left corner.
+    pub fn resize_find(&mut self, depth: usize, dialog: &Dialog) -> bool {
+        if self.depth != depth
+            || !self.modeless
+            || self.title != "Find"
+            || dialog.title != "Find"
+            || !dialog.modeless
+            || !self.controls.iter().any(|c| c.id == "mode")
+            || !dialog.items.iter().any(|i| i.id == "mode")
+        {
+            return false;
+        }
+        let panel = Retained::as_ptr(&self.panel) as *mut AnyObject;
+        unsafe {
+            let old: NSRect = msg_send![panel, frame];
+            let content_rect = NSRect::new(
+                NSPoint::ZERO,
+                NSSize::new(dialog.width as f64 * SCALE, dialog.height as f64 * SCALE),
+            );
+            let mut frame: NSRect = msg_send![panel, frameRectForContentRect: content_rect];
+            frame.origin = NSPoint::new(
+                old.origin.x,
+                old.origin.y + old.size.height - frame.size.height,
+            );
+            let _: bool = msg_send![panel, makeFirstResponder: std::ptr::null::<AnyObject>()];
+            if let Ok(mut targets) = actions().lock() {
+                targets.retain(|a| a.panel != panel as usize);
+            }
+            for control in &self.controls {
+                let view = control._container.as_ref().unwrap_or(&control.object);
+                let _: () = msg_send![&**view, removeFromSuperview];
+            }
+            self.controls.clear();
+            let _: () = msg_send![panel, setFrame: frame display: true];
+            let content: *mut AnyObject = msg_send![panel, contentView];
+            let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            let delegate: *mut AnyObject = msg_send![app, delegate];
+            for item in &dialog.items {
+                let rect = native_rect(item.rect, dialog.height as f64 * SCALE);
+                let Some((object, container, kind)) =
+                    make_control(item, rect, panel, delegate, content)
+                else {
+                    return false;
+                };
+                self.controls.push(Control {
+                    object,
+                    _container: container,
+                    id: item.id,
+                    kind,
+                    options: match &item.kind {
+                        Kind::Popup { options, .. } => Some(options.clone()),
+                        _ => None,
+                    },
+                    swatch: std::cell::Cell::new(0),
+                });
+            }
+            let _: () = msg_send![panel, recalculateKeyViewLoop];
+            if let Some(control) = self
+                .controls
+                .iter()
+                .find(|c| Some(c.id) == dialog.focused_id())
+            {
+                let _: bool =
+                    msg_send![panel, makeFirstResponder: Retained::as_ptr(&control.object)];
+            }
+        }
+        self.sync_from_model(dialog);
+        true
     }
 
     pub fn matches(&self, depth: usize, dialog: &Dialog) -> bool {
@@ -748,7 +833,17 @@ impl NativeDialog {
                     makeFirstResponder: Retained::as_ptr(&control.object)
                 ];
             }
-            let _: () = msg_send![panel_ptr, center];
+            if dialog.title == "Find" && dialog.items.iter().any(|i| i.id == "mode") {
+                let parent_frame: NSRect = msg_send![parent, frame];
+                let frame: NSRect = msg_send![panel_ptr, frame];
+                let origin = NSPoint::new(
+                    parent_frame.origin.x + (parent_frame.size.width - frame.size.width) / 2.0,
+                    parent_frame.origin.y + (parent_frame.size.height - frame.size.height) / 2.0,
+                );
+                let _: () = msg_send![panel_ptr, setFrameOrigin: origin];
+            } else {
+                let _: () = msg_send![panel_ptr, center];
+            }
             if dialog.modeless {
                 let _: () =
                     msg_send![panel_ptr, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
@@ -757,7 +852,6 @@ impl NativeDialog {
                 // Keep a modal panel attached to its document while letting
                 // winit's event loop continue to drive both windows.
                 let _: () = msg_send![parent, addChildWindow: panel_ptr ordered: 1isize];
-                let _: () = msg_send![parent, setIgnoresMouseEvents: true];
                 let _: () =
                     msg_send![panel_ptr, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
                 let _: () = msg_send![panel_ptr, makeKeyWindow];
@@ -837,7 +931,6 @@ impl NativeDialog {
             let _: () = msg_send![panel_ptr, setDelegate: delegate];
             let _: () = msg_send![panel_ptr, setReleasedWhenClosed: false];
             let _: () = msg_send![parent, addChildWindow: panel_ptr ordered: 1isize];
-            let _: () = msg_send![parent, setIgnoresMouseEvents: true];
             let _: () = msg_send![panel_ptr, center];
             let _: () = msg_send![panel_ptr, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
         }
@@ -874,7 +967,25 @@ impl NativeDialog {
                 match control.kind {
                     ControlKind::Field => {
                         let s: *mut AnyObject = msg_send![ptr, stringValue];
-                        dialog.set_field(control.id, &rust_string(s));
+                        let value = rust_string(s);
+                        let editor: *mut AnyObject = msg_send![ptr, currentEditor];
+                        if let Some(item) = dialog.items.iter_mut().find(|i| i.id == control.id)
+                            && let Kind::Field { text, sel } = &mut item.kind
+                        {
+                            if !editor.is_null() {
+                                let range: NSRange = msg_send![editor, selectedRange];
+                                *sel = (
+                                    byte_offset(&value, range.location),
+                                    byte_offset(
+                                        &value,
+                                        range.location.saturating_add(range.length),
+                                    ),
+                                );
+                            } else if *text != value {
+                                *sel = (value.len(), value.len());
+                            }
+                            *text = value;
+                        }
                     }
                     ControlKind::Popup(menu_button) => {
                         let selected: isize = msg_send![ptr, indexOfSelectedItem];
@@ -910,6 +1021,19 @@ impl NativeDialog {
         }
     }
 
+    /// Keep the document available for application activation while the
+    /// app event handler blocks editing behind this modal panel.
+    pub fn raise_modal(&self) -> bool {
+        if self.modeless {
+            return false;
+        }
+        unsafe {
+            let _: () =
+                msg_send![&*self.panel, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+        }
+        true
+    }
+
     pub fn sync_from_model(&mut self, dialog: &Dialog) {
         if self.alert_message.is_some() {
             return;
@@ -921,11 +1045,18 @@ impl NativeDialog {
                     let _: () = msg_send![ptr, setEnabled: item.enabled];
                 }
                 match &item.kind {
-                    Kind::Field { text, .. } => {
+                    Kind::Field { text, sel } => {
                         let current: *mut AnyObject = msg_send![ptr, stringValue];
                         if rust_string(current) != *text {
                             let value = NSString::from_str(text);
                             let _: () = msg_send![ptr, setStringValue: &*value];
+                        }
+                        let editor: *mut AnyObject = msg_send![ptr, currentEditor];
+                        if !editor.is_null() {
+                            let a = text[..sel.0].encode_utf16().count();
+                            let b = text[..sel.1].encode_utf16().count();
+                            let range = NSRange::new(a.min(b), a.abs_diff(b));
+                            let _: () = msg_send![editor, setSelectedRange: range];
                         }
                     }
                     Kind::Check { on, mixed, .. } => {
@@ -1166,7 +1297,6 @@ impl Drop for NativeDialog {
                 let _: () = msg_send![panel, orderOut: std::ptr::null::<AnyObject>()];
             } else {
                 let _: () = msg_send![self.parent, removeChildWindow: panel];
-                let _: () = msg_send![self.parent, setIgnoresMouseEvents: false];
                 let _: () = msg_send![panel, orderOut: std::ptr::null::<AnyObject>()];
             }
             let _: () = msg_send![self.parent, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
@@ -1662,6 +1792,22 @@ unsafe fn rust_string(value: *mut AnyObject) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn special_codes_replace_only_the_native_field_selection() {
+        for (start, length, expected) in [(4, 0, "a\u{1f600}b^t"), (1, 2, "a^tb"), (0, 4, "^t")] {
+            let mut d = Dialog::new("Find", 300.0, 100.0);
+            d.field("find", "a\u{1f600}b", 0.0, 0.0, 100.0);
+            if let Kind::Field { sel, .. } = &mut d.items[0].kind {
+                *sel = (
+                    byte_offset("a\u{1f600}b", start),
+                    byte_offset("a\u{1f600}b", start + length),
+                );
+            }
+            d.insert_in_field("find", "^t");
+            assert_eq!(d.field_text("find"), expected);
+        }
+    }
 
     #[test]
     fn standard_dialogs_are_native_but_custom_surfaces_fall_back() {

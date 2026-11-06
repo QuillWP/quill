@@ -11,7 +11,7 @@
 use quill_core::CharProps;
 use quill_layout::{Fonts, Joins, LayoutOptions, ParaLayout, layout_paragraph_joined};
 
-use super::{DocView, TEXT_TOP};
+use super::{DocView, TEXT_TOP, comment_cards};
 
 /// Documents with fewer paragraphs keep every glyph: there is little to
 /// save and nothing to get wrong.
@@ -72,7 +72,18 @@ impl DocView {
             wrap: self.wraps.get(i).cloned().unwrap_or_default(),
             ..opts.clone()
         };
-        if self.outline && !self.show_formatting {
+        if self.captions {
+            // The comments pane sets every comment in one small size,
+            // whatever the document's own fonts are.
+            let mut p = paras[i].clone();
+            let len = p.len();
+            let size = (comment_cards::COMMENT_SIZE * 2.0 * self.comment_scale).round() as u16;
+            p.format_range(0, len, &mut |c| c.size = size);
+            p.mark_chp.size = size;
+            p.pap.before = 0;
+            p.pap.after = 0;
+            layout_paragraph_joined(&p, name, fonts, &o, j)
+        } else if self.outline && !self.show_formatting {
             // Outline view without formatting: everything in the Normal
             // style's font and size.
             let normal = self.doc.styles.get(0).chp;

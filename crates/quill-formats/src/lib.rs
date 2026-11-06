@@ -6,6 +6,7 @@ mod export;
 pub mod html;
 mod html_read;
 pub mod images;
+pub mod markdown;
 mod math;
 pub mod native;
 mod numfmt;
@@ -44,17 +45,21 @@ pub enum Format {
     Odt,
     /// A self-contained HTML document export.
     Html,
+    /// Markdown: headings, emphasis, lists, quotes, code, links, tables and
+    /// pictures.
+    Markdown,
     /// Text-only export.
     Text,
 }
 
 impl Format {
-    pub const ALL: [Format; 6] = [
+    pub const ALL: [Format; 7] = [
         Format::Quill,
         Format::Docx,
         Format::Rtf,
         Format::Odt,
         Format::Html,
+        Format::Markdown,
         Format::Text,
     ];
 
@@ -72,6 +77,7 @@ impl Format {
             Format::Rtf => "Interchange Format (RTF)",
             Format::Odt => "OpenDocument Text (Export)",
             Format::Html => "HTML Document (Export)",
+            Format::Markdown => "Markdown",
             Format::Text => "Text Only (Export)",
         }
     }
@@ -83,6 +89,7 @@ impl Format {
             Format::Rtf => &["rtf"],
             Format::Odt => &["odt"],
             Format::Html => &["html", "htm"],
+            Format::Markdown => &["md", "markdown"],
             Format::Text => &["txt", "text"],
         }
     }
@@ -98,8 +105,8 @@ impl Format {
 
 /// Every extension Open can read.
 pub const READABLE: &[&str] = &[
-    "qwp", "docx", "docm", "dotx", "dotm", "rtf", "odt", "ott", "odm", "fodt", "html", "htm",
-    "txt", "text",
+    "qwp", "docx", "docm", "dotx", "dotm", "rtf", "odt", "ott", "odm", "fodt", "html", "htm", "md",
+    "markdown", "txt", "text",
 ];
 
 /// Open a file, deciding the format from its contents first and its name
@@ -257,15 +264,15 @@ fn too_large(path: &Path, size: quill_core::limits::Size) -> Result<(), String> 
     }
 }
 
-/// A file read as plain text, checked for size before any paragraphs are
-/// made, since a huge file of short lines would otherwise fill memory.
-fn plain_text(path: &Path, bytes: Vec<u8>) -> Result<Document, String> {
+/// A file's text: UTF-16 or UTF-8 as it says, otherwise Windows' Western
+/// encoding.
+fn decode_text(bytes: Vec<u8>) -> String {
     // UTF-16 first: its zero bytes can pass for UTF-8.
     let text = match utf16(&bytes).or_else(|| unmarked_utf16(&bytes)) {
         Some(text) => Ok(text),
         None => String::from_utf8(bytes),
     };
-    let text = match text {
+    match text {
         Ok(s) => s,
         // Otherwise Windows' Western encoding (Windows-1252), which is
         // Latin-1 with curly quotes, dashes and the euro sign in 0x80-0x9F.
@@ -277,7 +284,13 @@ fn plain_text(path: &Path, bytes: Vec<u8>) -> Result<Document, String> {
                 b => b as char,
             })
             .collect(),
-    };
+    }
+}
+
+/// A file read as plain text, checked for size before any paragraphs are
+/// made, since a huge file of short lines would otherwise fill memory.
+fn plain_text(path: &Path, bytes: Vec<u8>) -> Result<Document, String> {
+    let text = decode_text(bytes);
     too_large(path, quill_core::limits::Size::of_text(&text))?;
     Ok(quill_core::text::from_plain_text(&text))
 }
@@ -340,6 +353,11 @@ fn read_any(path: &Path, interpret_rtf: bool) -> Result<(Document, report::Impor
     }
     if interpret_rtf && bytes.starts_with(b"{\\rtf") {
         return rtf::read::read_reported(&bytes).map_err(|e| document_error(path, "RTF", e));
+    }
+    if Format::from_path(path) == Some(Format::Markdown) && looks_like_text(&bytes) {
+        let text = decode_text(bytes);
+        too_large(path, quill_core::limits::Size::of_text(&text))?;
+        return Ok(markdown::read(&text, path.parent()));
     }
     if odt_read::is_flat(&bytes) {
         return odt_read::read_flat_reported(&bytes).map_err(|e| document_error(path, "ODT", e));
@@ -434,7 +452,11 @@ pub fn save(doc: &Document, path: &Path, format: Format) -> Result<(), String> {
     // The exports and plain text carry no tracked changes: they get the
     // text with every change accepted.
     let accepted;
-    let doc = if matches!(format, Format::Odt | Format::Html | Format::Text) && doc.has_changes() {
+    let doc = if matches!(
+        format,
+        Format::Odt | Format::Html | Format::Markdown | Format::Text
+    ) && doc.has_changes()
+    {
         accepted = {
             let mut d = doc.compact_for_save();
             d.resolve_all_changes(true);
@@ -444,12 +466,19 @@ pub fn save(doc: &Document, path: &Path, format: Format) -> Result<(), String> {
     } else {
         doc
     };
+    // Markdown keeps its pictures as files in a folder beside it.
+    let mut pictures: Vec<markdown::PictureFile> = Vec::new();
     let bytes = match format {
         Format::Quill => native::write(doc, now),
         Format::Docx => docx::write(doc, now),
         Format::Rtf => rtf::write(doc),
         Format::Odt => odt::write(doc, now),
         Format::Html => html::write(doc),
+        Format::Markdown => {
+            let (text, files) = markdown::write_with_pictures(doc, &markdown_pictures_folder(path));
+            pictures = files;
+            text.into_bytes()
+        }
         Format::Text => {
             let eol = if cfg!(windows) { "\r\n" } else { "\n" };
             quill_core::text::to_plain_text(doc, eol).into_bytes()
@@ -463,6 +492,16 @@ pub fn save(doc: &Document, path: &Path, format: Format) -> Result<(), String> {
         Format::Rtf => rtf::read(&bytes).map(drop),
         Format::Odt => odt_read::read(&bytes).map(drop),
         Format::Html => html_read::read_file(&bytes).map(drop),
+        // Markdown is read back from a file, so the result must still be
+        // within what Quill opens.
+        Format::Markdown => match markdown::read(&String::from_utf8_lossy(&bytes), None)
+            .0
+            .size()
+            .too_large()
+        {
+            Some(why) => Err(format!("the result is too large: {why}")),
+            None => Ok(()),
+        },
         Format::Text => Ok(()),
     };
     if let Err(e) = back {
@@ -476,7 +515,53 @@ pub fn save(doc: &Document, path: &Path, format: Format) -> Result<(), String> {
             }
         ));
     }
+    if !pictures.is_empty() {
+        // The pictures go in first, so the Markdown never names a file that
+        // is not there.
+        let folder = path.with_file_name(markdown_pictures_folder(path));
+        std::fs::create_dir_all(&folder).map_err(|e| file_error("create", &folder, e))?;
+        for picture in &pictures {
+            write_atomic(&folder.join(&picture.name), &picture.bytes)?;
+        }
+    }
     write_atomic(path, &bytes)
+}
+
+/// The folder a Markdown file's pictures are saved in, beside it: its name
+/// with "_images" added, and anything but letters, digits, "-" and "_" in
+/// the name made "_" so the file's links need no escaping.
+pub fn markdown_pictures_folder(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    let safe: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let safe = safe.trim_matches('_');
+    if safe.is_empty() {
+        "images".into()
+    } else {
+        format!("{safe}_images")
+    }
+}
+
+/// Save Markdown text exactly as it is: for a document being edited as
+/// Markdown source, where the text is the file.
+pub fn save_markdown_text(text: &str, path: &Path) -> Result<(), String> {
+    let file = path
+        .file_name()
+        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    if let Some(why) = quill_core::limits::Size::of_text(text).too_large() {
+        return Err(format!("Quill didn't save \u{201c}{file}\u{201d}: {why}."));
+    }
+    write_atomic(path, text.as_bytes())
 }
 
 /// Durably replace `path` with `bytes`. The temporary file is beside the

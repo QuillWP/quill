@@ -17,6 +17,9 @@ impl App {
             self.redraw_group(i);
         }
         let w = &mut self.windows[i].1;
+        if w.st.modal_dialog_open() {
+            return;
+        }
         if pane == 2 {
             let v = w.st.main_view_mut();
             v.scroll_x = native_scroll_value(
@@ -100,6 +103,7 @@ impl App {
             w.window.request_redraw();
             return;
         }
+        dialog.inactive = false;
         native.apply_to_model(dialog, id, choice);
         let outcome = crate::mac_dialog::NativeDialog::outcome(dialog, id);
         w.st.dialog_outcome(outcome, clip);

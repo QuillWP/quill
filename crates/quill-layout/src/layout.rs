@@ -43,12 +43,17 @@ pub struct LayoutOptions {
     /// and bottom from the top of the paragraph, left and right from the
     /// left margin, all in points.
     pub wrap: Vec<Clear>,
+    /// How large the comments pane's own text is drawn compared with its
+    /// nominal size, to hold it steady as the document's zoom changes.
+    pub comment_scale: f32,
 }
 
 /// An annotation mark's width and the size of the initials in it, in
 /// points, as the original draws them.
 pub const ANNOTATION_WIDTH: f32 = 23.0;
 pub const ANNOTATION_TEXT: f32 = 9.0;
+/// Size of the writer-and-date line above a comment in the comments pane.
+pub const COMMENT_CAPTION_TEXT: f32 = 9.0;
 
 /// A rectangle text keeps out of.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -75,6 +80,7 @@ impl Default for LayoutOptions {
             time: String::new(),
             objects: Default::default(),
             wrap: Vec::new(),
+            comment_scale: 1.0,
         }
     }
 }
@@ -260,6 +266,10 @@ pub struct ParaLayout {
     /// everything pagination needs are still here. Lay the paragraph out
     /// again before drawing it.
     pub stripped: bool,
+    /// The paragraph starts a comment in the comments pane: its mark is the
+    /// writer-and-date line, drawn at this size, and the pane draws the
+    /// comment's icon. Zero for any other paragraph.
+    pub card_text: f32,
 }
 
 /// Measured character before line breaking.
@@ -315,6 +325,16 @@ pub fn layout_paragraph_joined(
     };
     let mut out = ParaLayout {
         before: pt(pap.before) + above,
+        card_text: if para.text.starts_with(chars::ANNOTATION)
+            && opts
+                .annotation_labels
+                .get(&para.chp_of_char(0).object)
+                .is_some_and(|label| label.contains('\t'))
+        {
+            COMMENT_CAPTION_TEXT * opts.comment_scale
+        } else {
+            0.0
+        },
         ..Default::default()
     };
     let items = measure(
@@ -896,10 +916,20 @@ fn measure(
                     _ => opts.time.clone(),
                 };
                 // An annotation mark is the original's balloon with the initials
-                // inside, in a small size.
+                // inside, in a small size. In the comments pane (a tab in
+                // its label) the mark is only the line saying who wrote the
+                // comment and when: the pane draws the icon itself, outside
+                // the text, so it can never be selected or copied.
                 let balloon = c == chars::ANNOTATION;
-                let size = if balloon { ANNOTATION_TEXT } else { glyph_size };
-                let mut x = if balloon { 7.0 } else { 0.0 };
+                let card = balloon && value.contains('\t');
+                let size = if card {
+                    COMMENT_CAPTION_TEXT * opts.comment_scale
+                } else if balloon {
+                    ANNOTATION_TEXT
+                } else {
+                    glyph_size
+                };
+                let mut x = if balloon && !card { 7.0 } else { 0.0 };
                 let mut glyphs = Vec::new();
                 // In the annotations pane the initials are followed, after
                 // a tab, by who wrote it and when, beside the balloon.
@@ -912,10 +942,20 @@ fn measure(
                     glyphs.push(FieldGlyph { face: f, id: g, x });
                     x += fonts.advance(f, g, size) + if balloon { 0.0 } else { spacing };
                 }
-                let mut end = ANNOTATION_WIDTH;
-                if !caption.is_empty() {
-                    break_after = true;
-                    x = ANNOTATION_WIDTH + 3.0;
+                // The balloon widens to hold the initials and the number.
+                let mut end = if balloon && !card {
+                    ANNOTATION_WIDTH.max(x + 5.0)
+                } else {
+                    ANNOTATION_WIDTH
+                };
+                if card {
+                    end = 0.0;
+                }
+                if card || !caption.is_empty() {
+                    // A comment with nobody's name or date has no heading
+                    // line: its text starts at the top.
+                    break_after = !caption.is_empty() || !card;
+                    x = if card { 0.0 } else { end + 3.0 };
                     let (ef, eg) = fonts.glyph(face, '…');
                     let ellipsis_width = fonts.advance(ef, eg, size);
                     for vc in caption.chars() {
@@ -933,11 +973,15 @@ fn measure(
                         glyphs.push(FieldGlyph { face: f, id: g, x });
                         x += advance;
                     }
-                    end = x + 6.0;
+                    end = if card && caption.is_empty() {
+                        0.0
+                    } else {
+                        x + 6.0
+                    };
                 }
                 fields.push(glyphs);
                 advance = if balloon { end } else { x };
-                if balloon {
+                if balloon && !card {
                     ascent = ascent.max(20.0);
                 }
             }
@@ -954,6 +998,16 @@ fn measure(
                 ch: c,
                 break_after,
             });
+        }
+    }
+    // The space after a comment's heading (or after nothing, when it has no
+    // heading) starts the comment's text: it takes no room there.
+    for k in 1..items.len() {
+        if (items[k - 1].break_after || items[k - 1].advance == 0.0)
+            && items[k - 1].ch == chars::ANNOTATION
+            && items[k].kind == Kind::Space
+        {
+            items[k].advance = 0.0;
         }
     }
     items

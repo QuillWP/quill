@@ -421,8 +421,9 @@ fn cell_alignment(view: &DocView, ts: &TableSel) -> (usize, usize) {
     (v, h)
 }
 
-pub fn table_cells(view: &DocView) -> Option<Dialog> {
-    let ts = table_selection(view)?;
+/// The selected rows' layouts, and the column width if the selected cells
+/// share one.
+fn selected_rows(view: &DocView, ts: &TableSel) -> (Vec<RowProps>, Option<Twips>) {
     let paras = &view.doc.main.paras;
     let tw = view.doc.props.text_width();
     let props: Vec<RowProps> = ts
@@ -430,7 +431,6 @@ pub fn table_cells(view: &DocView) -> Option<Dialog> {
         .iter()
         .map(|r| table::row_props(paras, r, tw))
         .collect();
-    // The column width, if the selected cells share one.
     let widths: Vec<Twips> = props
         .iter()
         .flat_map(|p| {
@@ -439,14 +439,18 @@ pub fn table_cells(view: &DocView) -> Option<Dialog> {
                 .map(|c| c.width)
         })
         .collect();
-    let width = if widths.windows(2).all(|w| w[0] == w[1]) {
-        widths
-            .first()
-            .map(|w| units::length(*w))
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let width = widths
+        .windows(2)
+        .all(|w| w[0] == w[1])
+        .then(|| widths.first().copied())
+        .flatten();
+    (props, width)
+}
+
+pub fn table_cells(view: &DocView) -> Option<Dialog> {
+    let ts = table_selection(view)?;
+    let (props, width) = selected_rows(view, &ts);
+    let width = width.map(units::length).unwrap_or_default();
     let p = &props[0];
     let mut d = Dialog::new("Table Cells", 352.0, 262.0);
     d.text("Apply To:", 15.0, 9.0);
@@ -506,15 +510,26 @@ pub fn table_cells_apply(d: &Dialog, view: &mut DocView) -> bool {
     let Some(ts) = table_selection(view) else {
         return true;
     };
-    let len = |id| {
+    // Fields left as they were shown keep their exact values.
+    let (props, shown_width) = selected_rows(view, &ts);
+    let len = |id, old: Option<Twips>| {
         let t = d.field_text(id);
         if t.trim().is_empty() {
             Ok(None)
         } else {
-            units::parse_length(&t).map(Some).ok_or(())
+            match old {
+                Some(old) => units::parse_length_from(&t, old),
+                None => units::parse_length(&t),
+            }
+            .map(Some)
+            .ok_or(())
         }
     };
-    let (Ok(width), Ok(gap), Ok(indent)) = (len("width"), len("gap"), len("indent")) else {
+    let (Ok(width), Ok(gap), Ok(indent)) = (
+        len("width", shown_width),
+        len("gap", Some(props[0].gap)),
+        len("indent", Some(props[0].indent)),
+    ) else {
         return false;
     };
     let by = units::parse(&d.field_text("height_by"), "pt")

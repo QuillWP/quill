@@ -9,7 +9,7 @@ use crate::canvas::{Canvas, Label, Rect, color};
 use crate::chrome::{self, BAR, ScrollPart};
 use crate::commands::{self as command_map, Cmd, Mods};
 use crate::dialog::{DKey, Dialog, Outcome};
-use crate::docview::{BorderKind, Clipboard, DialogId, DocView, Effect, Port};
+use crate::docview::{BorderKind, Clipboard, DialogId, DocView, Effect, Handle, Port};
 use crate::format_dialogs::{self, Which};
 use crate::menu::{self, MENU_BAR_HEIGHT, Menu, OpenMenu};
 use crate::pane::{self, Pane, PaneHit};
@@ -35,6 +35,7 @@ use winit::window::{CursorIcon, ResizeDirection, Window, WindowId};
 mod commands;
 mod dialogs;
 mod files;
+mod markdown;
 mod panes;
 #[cfg(target_os = "macos")]
 mod platform;
@@ -163,6 +164,10 @@ pub struct WinState {
     review_width: Option<f32>,
     review_resize: Option<f32>,
     review_resize_text_width: Option<f32>,
+    /// Where the document was scrolled to when the comments last followed it,
+    /// and which comment the pane's insertion point was last in.
+    comment_sync: Option<f32>,
+    comment_here: Option<u32>,
     revision_hover: Option<usize>,
     revision_badges: Vec<revisions::Badge>,
     review_detail_scroll: f32,
@@ -333,6 +338,8 @@ impl WinState {
             review_width: None,
             review_resize: None,
             review_resize_text_width: None,
+            comment_sync: None,
+            comment_here: None,
             revision_hover: None,
             revision_badges: Vec::new(),
             review_detail_scroll: 0.0,
@@ -581,7 +588,9 @@ impl WinState {
         match action {
             Action::None | Action::Window(_) => {}
             Action::About => return Effect::About,
+            Action::Licenses => return Effect::Licenses,
             Action::Recent(index) => return Effect::OpenRecent(index),
+            Action::RemoveRecent(index) => return Effect::RemoveRecent(index),
             Action::ClearRecent => return Effect::ClearRecent,
             Action::Zoom(choice) => self.choose_zoom(choice),
             Action::Cmd(c) => return self.view.exec(c, false, clip),
@@ -672,7 +681,7 @@ impl WinState {
         if let Some((_, d)) = self.dialogs.last_mut() {
             // A click outside a modeless window goes to the document, which
             // takes the keyboard; the window stays open, inactive.
-            if d.modeless && !d.contains(cx, cy) && !d.popup_open() {
+            if d.modeless && (self.native_dialogs || (!d.contains(cx, cy) && !d.popup_open())) {
                 d.inactive = true;
             } else {
                 d.inactive = false;
@@ -1239,6 +1248,15 @@ impl WinState {
                 .last()
                 .is_none_or(|(_, d)| d.modeless && !d.contains(cx, cy))
             && self.view.area.contains(dx, dy);
+        if let Some(handle) = self.view.picture_cursor(dx, dy)
+            && (in_text || self.view.dragging())
+        {
+            return match handle {
+                Handle::Right => CursorIcon::EwResize,
+                Handle::Bottom => CursorIcon::NsResize,
+                Handle::Corner => CursorIcon::NwseResize,
+            };
+        }
         if in_text && let Some(kind) = self.view.border_cursor(dx, dy) {
             return match kind {
                 BorderKind::Column => CursorIcon::ColResize,
@@ -1479,6 +1497,11 @@ pub struct App {
     #[cfg(target_os = "macos")]
     context_actions: Vec<Action>,
     fonts_scan: Option<JoinHandle<Catalog>>,
+    /// The installed fonts alone, kept so the extra font folders can be
+    /// switched on and off without scanning the system again.
+    system_catalog: Option<Catalog>,
+    /// The font folders and search depth `font_catalog` was built with.
+    font_folders_loaded: FontFolders,
     /// Cheaply cloned paths and face metadata for independent worker fonts.
     font_catalog: Option<Catalog>,
     fonts: Option<Fonts>,
@@ -1492,11 +1515,36 @@ pub struct App {
     /// Files named on the command line, opened once the event loop runs.
     pending: Vec<PathBuf>,
     recent: Vec<PathBuf>,
-    next_recovery: Instant,
+    last_recovery: Instant,
     recovery_serial: u64,
     recovered: bool,
     /// Whether the last session's documents have been offered at startup.
     reopened: bool,
+}
+
+/// The extra font folders that are switched on, and how deep to search them.
+#[derive(Clone, Debug, PartialEq)]
+struct FontFolders {
+    paths: Vec<PathBuf>,
+    levels: u8,
+}
+
+impl FontFolders {
+    fn current() -> Self {
+        crate::settings::with(|s| FontFolders {
+            paths: s
+                .font_folders
+                .iter()
+                .filter(|f| f.enabled)
+                .map(|f| f.path.clone())
+                .collect(),
+            levels: s.font_folder_levels,
+        })
+    }
+
+    fn apply(&self, system: &Catalog) -> Catalog {
+        system.with_folders(&self.paths, self.levels)
+    }
 }
 
 impl App {
@@ -1520,6 +1568,8 @@ impl App {
             recent: crate::recent::load(),
             windows: Vec::new(),
             fonts_scan: Some(fonts_scan),
+            system_catalog: None,
+            font_folders_loaded: FontFolders::current(),
             font_catalog: None,
             fonts: None,
             font_names: Vec::new(),
@@ -1528,7 +1578,7 @@ impl App {
             clipboard: None,
             untitled: 0,
             groups: 0,
-            next_recovery: Instant::now() + Duration::from_secs(30),
+            last_recovery: Instant::now(),
             recovery_serial: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64),
@@ -1539,17 +1589,58 @@ impl App {
 
     fn ensure_fonts(&mut self) {
         if self.fonts.is_none() {
-            let catalog = self
+            let system = self
                 .fonts_scan
                 .take()
                 .and_then(|h| h.join().ok())
                 .unwrap_or_default();
+            let folders = FontFolders::current();
+            let catalog = folders.apply(&system);
+            self.system_catalog = Some(system);
+            self.font_folders_loaded = folders;
             self.font_catalog = Some(catalog.clone());
             let fonts = Fonts::new(catalog);
             self.font_names = fonts.family_names().iter().map(|s| s.to_string()).collect();
             self.font_families = fonts.family_info();
             self.fonts = Some(fonts);
         }
+    }
+
+    /// Preferences > Advanced switched a font folder on or off, or changed
+    /// how deep to search: rebuild the font list and lay every document out
+    /// again with it.
+    fn refresh_font_folders(&mut self) {
+        let folders = FontFolders::current();
+        if folders == self.font_folders_loaded {
+            return;
+        }
+        let Some(system) = &self.system_catalog else {
+            // Fonts aren't loaded yet; they will pick the folders up.
+            self.font_folders_loaded = folders;
+            return;
+        };
+        let catalog = folders.apply(system);
+        self.font_folders_loaded = folders;
+        let fonts = Fonts::new(catalog.clone());
+        self.font_names = fonts.family_names().iter().map(|s| s.to_string()).collect();
+        self.font_families = fonts.family_info();
+        self.font_catalog = Some(catalog);
+        self.fonts = Some(fonts);
+        self.cache = GlyphCache::new();
+        for (_, w) in &mut self.windows {
+            w.st.view.invalidate_layout();
+            if let Some(pane) = &mut w.st.pane {
+                pane.other.invalidate_layout();
+            }
+            w.window.request_redraw();
+        }
+    }
+
+    /// When the next recovery save is due. With autosave off it still looks
+    /// again every 30 seconds, to notice the setting being turned back on.
+    fn next_recovery(&self) -> Instant {
+        let secs = crate::settings::with(|s| s.autosave_secs);
+        self.last_recovery + Duration::from_secs(if secs == 0 { 30 } else { secs.into() })
     }
 
     fn index(&self, id: WindowId) -> Option<usize> {
@@ -1895,6 +1986,11 @@ impl App {
                 (Some(native), Some(dialog)) => native.matches(depth, dialog),
                 _ => false,
             };
+            let keep = keep
+                || match (&mut w.dialog, top) {
+                    (Some(native), Some(dialog)) => native.resize_find(depth, dialog),
+                    _ => false,
+                };
             if !keep {
                 w.dialog = None;
                 if let Some(dialog) = top {
@@ -2216,10 +2312,15 @@ impl App {
         match effect {
             Effect::None => {}
             Effect::About => about(),
+            Effect::Licenses => licenses(),
             Effect::OpenRecent(index) => {
                 if let Some(path) = self.recent.get(index).cloned() {
                     self.open_files(el, &[path]);
                 }
+            }
+            Effect::RemoveRecent(index) => {
+                crate::recent::remove(&mut self.recent, index);
+                self.sync_menus();
             }
             Effect::ClearRecent => {
                 crate::recent::clear(&mut self.recent);
@@ -2273,6 +2374,12 @@ impl App {
                     } else {
                         self.windows[i].1.st.open_dialog(d, &env);
                     }
+                    #[cfg(target_os = "macos")]
+                    if matches!(d, DialogId::Find | DialogId::Replace)
+                        && let Some(native) = &self.windows[i].1.dialog
+                    {
+                        native.activate_find();
+                    }
                     if d == DialogId::ShowClipboard {
                         let text = self
                             .clipboard
@@ -2299,6 +2406,8 @@ impl App {
                 }
             }
             Effect::Mirror => self.mirror(el, id),
+            Effect::MarkdownSource => self.markdown_view(id, true),
+            Effect::MarkdownWysiwyg => self.markdown_view(id, false),
             Effect::FullScreen => {
                 if let Some(i) = self.index(id) {
                     let w = &self.windows[i].1.window;
@@ -2792,7 +2901,30 @@ impl App {
 /// Quill's About box.
 #[cfg(target_os = "macos")]
 fn about() {
-    crate::mac_dialog::show_about();
+    crate::mac_licenses::show_about();
+}
+
+/// Help > Licenses…: the window listing every license Quill carries.
+#[cfg(target_os = "macos")]
+fn licenses() {
+    crate::mac_licenses::show();
+}
+
+/// A stand-in until these systems have a Licenses window: the licenses, as a
+/// text file opened in the system's own program for text.
+#[cfg(not(target_os = "macos"))]
+fn licenses() {
+    if !crate::licenses::open_text_file() {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Info)
+            .set_title("Licenses")
+            .set_description(
+                "Quill's licenses are in the files that come with it: LICENSE-MIT, \
+                 LICENSE-APACHE and THIRD-PARTY-NOTICES.txt.",
+            )
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    }
 }
 
 /// Other systems retain the portable About box until they receive their own
@@ -2803,8 +2935,9 @@ fn about() {
         .set_level(rfd::MessageLevel::Info)
         .set_title("About Quill")
         .set_description(format!(
-            "Quill {}\n\nA small word processor written in Rust, inspired by Lucas's favorite word processor from 1992.",
-            env!("CARGO_PKG_VERSION")
+            "Quill {}\n\nA small word processor written in Rust, inspired by Lucas's favorite word processor from 1992.\n\n{}\nSee Help > Licenses… for the full text.",
+            env!("CARGO_PKG_VERSION"),
+            crate::licenses::SUMMARY
         ))
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
@@ -2865,6 +2998,11 @@ fn reopen_last_session() -> Vec<PathBuf> {
     };
     if yes { paths } else { Vec::new() }
 }
+
+// These message boxes, and every rfd file dialog, run modally inside winit's
+// event handler. On the Mac that only works because of the patched winit in
+// vendor/winit: unpatched, a click while one is up crashes Quill. See
+// vendor/README.md before upgrading winit.
 
 /// Ask a question with `yes` and Cancel; true for `yes`.
 pub(crate) fn ask(message: &str, detail: &str, yes: &str) -> bool {
@@ -3155,13 +3293,15 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn new_events(&mut self, _el: &ActiveEventLoop, cause: StartCause) {
+        self.refresh_font_folders();
         if let StartCause::ResumeTimeReached { .. } = cause {
             let now = Instant::now();
-            if now >= self.next_recovery {
-                self.next_recovery = now + Duration::from_secs(30);
+            if now >= self.next_recovery() {
+                self.last_recovery = now;
+                let autosave = crate::settings::with(|s| s.autosave_secs) > 0;
                 let mut serial = self.recovery_serial;
                 for (_, w) in &mut self.windows {
-                    if (w.group == 0 || w.holds) && w.st.main_view().doc.is_modified() {
+                    if autosave && (w.group == 0 || w.holds) && w.st.main_view().doc.is_modified() {
                         serial = serial.wrapping_add(1);
                         match crate::recovery::save(
                             w.recovery.as_deref(),
@@ -3188,6 +3328,26 @@ impl ApplicationHandler<UserEvent> for App {
         let Some(i) = self.index(id) else {
             return;
         };
+        #[cfg(target_os = "macos")]
+        if self.windows[i].1.st.modal_dialog_open()
+            && let Some(dialog) = &self.windows[i].1.dialog
+        {
+            let input = matches!(
+                event,
+                WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::Ime(_)
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::Touch(_)
+                    | WindowEvent::DroppedFile(_)
+            );
+            if (input || matches!(event, WindowEvent::Focused(true)))
+                && dialog.raise_modal()
+                && input
+            {
+                return;
+            }
+        }
         // A window shares its document with others: it needs the document
         // to draw or to take input, and the others need redrawing after.
         let shared = self.windows[i].1.group != 0;
@@ -3230,6 +3390,13 @@ impl ApplicationHandler<UserEvent> for App {
                     self.sync_menus();
                 }
                 let w = &mut self.windows[i].1;
+                if f && w.st.native_dialogs
+                    && let Some((_, d)) = w.st.dialogs.last_mut()
+                    && d.modeless
+                {
+                    d.inactive = true;
+                    w.st.dialog_mouse = false;
+                }
                 w.focused = f;
                 if !f {
                     w.st.menu = None;
@@ -3373,7 +3540,7 @@ impl ApplicationHandler<UserEvent> for App {
             .filter(|(_, w)| w.focused && w.st.menu.is_none())
             .map(|(_, w)| w.st.view.next_blink())
             .min()
-            .map_or(self.next_recovery, |t| t.min(self.next_recovery));
+            .map_or(self.next_recovery(), |t| t.min(self.next_recovery()));
         // Wake when a tooltip is due to show.
         let tip = self
             .windows
@@ -4197,7 +4364,102 @@ mod tests {
         let clip = &mut Clipboard::new();
         assert_eq!(state.act(Action::About, clip), Effect::About);
         assert_eq!(state.act(Action::Recent(2), clip), Effect::OpenRecent(2));
+        assert_eq!(
+            state.act(Action::RemoveRecent(1), clip),
+            Effect::RemoveRecent(1)
+        );
         assert_eq!(state.act(Action::ClearRecent, clip), Effect::ClearRecent);
+    }
+
+    #[test]
+    fn collapsed_replace_cannot_change_document_from_stale_actions() {
+        let mut state = WinState::new(DocView::new(Document::new(), "Find".into()));
+        state.view.insert_text("cat dog cat");
+        let (mut d, mut st) = crate::find_dialog::dialog(&state.view, false);
+        d.set_field("find", "cat");
+        crate::find_dialog::switch_mode(&mut st, &mut d, &state.view, true);
+        d.set_field("with", "bird");
+        crate::find_dialog::switch_mode(&mut st, &mut d, &state.view, false);
+        assert!(!d.items.iter().any(|i| matches!(
+            i.id,
+            "with" | "replace" | "replaceall" | "fmt_rep" | "spc_rep"
+        )));
+        state.dialogs.push((Which::Find(st), d));
+        state
+            .view
+            .set_selection(quill_core::Selection::caret(Position::new(0, 0)));
+        let mut clip = Clipboard::without_system();
+        for outcome in [
+            Outcome::Button("replace"),
+            Outcome::Button("replaceall"),
+            Outcome::Ok,
+        ] {
+            state.tool_outcome(&outcome, &mut clip);
+            assert_eq!(state.view.doc.main.paras[0].text, "cat dog cat");
+            assert_eq!(state.dialogs.len(), 1);
+        }
+        let (Which::Find(st), _) = &mut state.dialogs[0] else {
+            panic!("expected Find")
+        };
+        assert_eq!(
+            crate::find_dialog::replace(st, &mut state.view, &mut clip),
+            crate::find_dialog::Hit::NotFound
+        );
+        assert_eq!(
+            crate::find_dialog::replace_all(st, &mut state.view, &mut clip),
+            (0, false)
+        );
+        assert_eq!(state.view.doc.main.paras[0].text, "cat dog cat");
+        state.tool_outcome(&Outcome::Button("mode"), &mut clip);
+        assert_eq!(state.dialogs[0].1.field_text("with"), "bird");
+        state.tool_outcome(&Outcome::Button("replace"), &mut clip);
+        assert_eq!(state.view.doc.main.paras[0].text, "bird dog cat");
+    }
+
+    #[test]
+    fn native_find_releases_document_input_after_a_search() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut state = WinState::new(DocView::new(Document::new(), "Find".into()));
+        state.view.insert_text("cat dog");
+        let (mut d, mut st) = crate::find_dialog::dialog(&state.view, false);
+        d.set_field("find", "cat");
+        crate::find_dialog::update(&mut st, &mut d, &state.view);
+        let search = st.search.clone();
+        state.dialogs.push((Which::Find(st), d));
+        state
+            .view
+            .set_selection(quill_core::Selection::caret(Position::new(0, 0)));
+        let hit = crate::find_dialog::find_next(&mut state.view, &search);
+        state.after_search(hit, &search);
+        assert_eq!(hit, crate::find_dialog::Hit::Match);
+        state.native_dialogs = true;
+        let env = Env {
+            font_names: &[],
+            font_families: &[],
+            recent: &[],
+            windows: &[],
+        };
+        let mut cache = GlyphCache::new();
+        let mut label = Label {
+            fonts: &mut fonts,
+            cache: &mut cache,
+        };
+        let mut clip = Clipboard::without_system();
+        // This point lies inside the old canvas panel rectangle, but the
+        // event came from the document, not the separate native panel.
+        assert!(state.dialogs[0].1.contains(200.0, 120.0));
+        state.mouse_down(
+            200.0 * state.ui,
+            120.0 * state.ui,
+            Mods::default(),
+            &mut label,
+            &env,
+            &mut clip,
+        );
+        assert!(!state.dialog_has_keys());
+        assert!(state.dialogs[0].1.modeless);
     }
 
     #[test]

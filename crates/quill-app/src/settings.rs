@@ -95,18 +95,20 @@ pub enum Unit {
     #[default]
     Inch,
     Cm,
+    Mm,
     Point,
     Pica,
 }
 
 impl Unit {
-    pub const ALL: [Unit; 4] = [Unit::Inch, Unit::Cm, Unit::Point, Unit::Pica];
+    pub const ALL: [Unit; 5] = [Unit::Inch, Unit::Cm, Unit::Mm, Unit::Point, Unit::Pica];
 
     /// The name Preferences shows.
     pub fn label(self) -> &'static str {
         match self {
             Unit::Inch => "Inch",
             Unit::Cm => "Cm",
+            Unit::Mm => "Mm",
             Unit::Point => "Points",
             Unit::Pica => "Picas",
         }
@@ -117,10 +119,26 @@ impl Unit {
         match self {
             Unit::Inch => "in",
             Unit::Cm => "cm",
+            Unit::Mm => "mm",
             Unit::Point => "pt",
             Unit::Pica => "pi",
         }
     }
+}
+
+/// Quill remembers this many recent documents; the menu shows `recent_count`.
+pub const MAX_RECENT_DOCUMENTS: usize = 100;
+/// Slots for extra font folders in Preferences > Advanced.
+pub const MAX_FONT_FOLDERS: usize = 10;
+pub const DEFAULT_FONT_LEVELS: u8 = 4;
+pub const MAX_FONT_LEVELS: u8 = 7;
+pub const DEFAULT_AUTOSAVE_SECS: u32 = 30;
+
+/// One extra font folder, which can be switched on and off.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FontFolder {
+    pub path: PathBuf,
+    pub enabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -158,6 +176,13 @@ pub struct Settings {
     pub recent_count: usize,
     /// Persistent recent documents; macOS also updates NSDocumentController.
     pub recent_documents: Vec<PathBuf>,
+    // Advanced
+    /// Extra places to load fonts from without installing them.
+    pub font_folders: Vec<FontFolder>,
+    /// How many folder levels below each font folder Quill searches.
+    pub font_folder_levels: u8,
+    /// Seconds between recovery saves; 0 turns them off.
+    pub autosave_secs: u32,
     // Open and Save
     pub interpret_rtf: bool,
     pub make_backup: bool,
@@ -336,6 +361,9 @@ impl Default for Settings {
             recent_files: true,
             recent_count: 10,
             recent_documents: Vec::new(),
+            font_folders: Vec::new(),
+            font_folder_levels: DEFAULT_FONT_LEVELS,
+            autosave_secs: DEFAULT_AUTOSAVE_SECS,
             interpret_rtf: true,
             make_backup: false,
             foreign_as_quill: true,
@@ -414,6 +442,21 @@ impl Settings {
         );
         put(&mut out, "recent_files", b(self.recent_files));
         put(&mut out, "recent_count", self.recent_count.to_string());
+
+        section(&mut out, "Advanced", Some("Preferences > Advanced"));
+        put(&mut out, "autosave_secs", self.autosave_secs.to_string());
+        put(
+            &mut out,
+            "font_folder_levels",
+            self.font_folder_levels.to_string(),
+        );
+        for folder in &self.font_folders {
+            put(
+                &mut out,
+                "font_folder",
+                format!("{}|{}", b(folder.enabled), escape_path(&folder.path)),
+            );
+        }
 
         section(
             &mut out,
@@ -819,13 +862,33 @@ impl Settings {
                 }
                 "recent_files" => s.recent_files = flag,
                 "recent_count" => s.recent_count = v.parse().unwrap_or(10usize).clamp(1, 50),
+                "autosave_secs" => {
+                    s.autosave_secs = v.parse().unwrap_or(DEFAULT_AUTOSAVE_SECS).min(3600)
+                }
+                "font_folder_levels" => {
+                    s.font_folder_levels = v
+                        .parse()
+                        .unwrap_or(DEFAULT_FONT_LEVELS)
+                        .min(MAX_FONT_LEVELS)
+                }
+                "font_folder" => {
+                    if let Some((on, path)) = v.split_once('|')
+                        && !path.is_empty()
+                        && s.font_folders.len() < MAX_FONT_FOLDERS
+                    {
+                        s.font_folders.push(FontFolder {
+                            path: unescape_path(path),
+                            enabled: on == "1",
+                        });
+                    }
+                }
                 "foreign_as_quill" => s.foreign_as_quill = flag,
                 "words_to_system" => s.words_to_system = flag,
                 "custom_dictionary" if !v.is_empty() => {
                     s.custom_dictionary = Some(unescape_path(v))
                 }
                 "recent_document" => {
-                    if !v.is_empty() && s.recent_documents.len() < 50 {
+                    if !v.is_empty() && s.recent_documents.len() < MAX_RECENT_DOCUMENTS {
                         s.recent_documents.push(unescape_path(v));
                     }
                 }
@@ -931,7 +994,7 @@ impl Settings {
         ] {
             entries.retain(|(_, cmd)| !retired_command(cmd));
         }
-        s.recent_documents.truncate(s.recent_count);
+        s.recent_documents.truncate(MAX_RECENT_DOCUMENTS);
         s
     }
 }

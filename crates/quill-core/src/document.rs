@@ -67,7 +67,7 @@ impl StoryId {
         StoryId::HEADERS.iter().position(|&s| s == self)
     }
 
-    fn header_index(self) -> usize {
+    pub fn header_index(self) -> usize {
         StoryId::HEADERS
             .iter()
             .position(|&s| s == self)
@@ -621,14 +621,17 @@ impl Document {
 
     /// Section `k`'s settings.
     pub fn nth_section(&self, k: usize) -> &SectionProps {
-        let ranges = self.sections();
-        match ranges.get(k) {
-            Some(r) if k + 1 < ranges.len() => self.main.paras[*r.end()]
-                .section
-                .as_deref()
-                .unwrap_or(&self.section),
-            _ => &self.section,
+        let paras = &self.main.paras;
+        let mut s = 0;
+        for (i, p) in paras.iter().enumerate() {
+            if p.mark == Mark::SectionBreak && i + 1 < paras.len() {
+                if s == k {
+                    return p.section.as_deref().unwrap_or(&self.section);
+                }
+                s += 1;
+            }
         }
+        &self.section
     }
 
     /// Section `k`'s settings to change in place, outside undo: for header
@@ -650,12 +653,48 @@ impl Document {
     /// The section whose headers and footers section `k` shows: itself if
     /// it has its own, otherwise the nearest one before that has.
     pub fn header_source(&self, k: usize) -> usize {
-        let n = self.sections().len();
-        let mut k = k.min(n - 1);
-        while k > 0 && self.nth_section(k).headers.is_none() {
-            k -= 1;
+        let paras = &self.main.paras;
+        let mut source = 0;
+        let mut s = 0;
+        for (i, p) in paras.iter().enumerate() {
+            if s > k {
+                return source;
+            }
+            if p.mark == Mark::SectionBreak && i + 1 < paras.len() {
+                let props = p.section.as_deref().unwrap_or(&self.section);
+                if s > 0 && props.headers.is_some() {
+                    source = s;
+                }
+                s += 1;
+            }
         }
-        k
+        if s > 0 && s <= k && self.section.headers.is_some() {
+            source = s;
+        }
+        source
+    }
+
+    /// For each section, the section whose headers and footers it shows and
+    /// those headers and footers: `header_source` and `headers_of` for every
+    /// section in one pass over the text, for loops that ask about each page.
+    pub fn header_sets(&self) -> Vec<(usize, &[Story])> {
+        let paras = &self.main.paras;
+        let breaks = paras
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| p.mark == Mark::SectionBreak && i + 1 < paras.len())
+            .map(|(_, p)| p.section.as_deref().unwrap_or(&self.section));
+        let mut current: (usize, &[Story]) = (0, &self.headers);
+        let mut out = Vec::new();
+        for (s, props) in breaks.chain(std::iter::once(&self.section)).enumerate() {
+            if s > 0
+                && let Some(own) = props.headers.as_deref()
+            {
+                current = (s, own.as_slice());
+            }
+            out.push(current);
+        }
+        out
     }
 
     /// The headers and footers section `k` shows.
@@ -717,17 +756,28 @@ impl Document {
                 if let Some(name) = fonts.get(c.font as usize) {
                     c.font = intern(&mut self.fonts, name);
                 }
-                // A picture's number is its place in the other document's
-                // list; give it one here (the same if it is already here).
-                if c.object != 0
-                    && let Some(o) = objects.get(c.object as usize - 1)
-                {
-                    c.object = self.add_object(o.clone());
-                }
             };
             let len = p.len();
             p.format_range(0, len, &mut map);
             map(&mut p.mark_chp);
+            // A picture's number is its place in the other document's
+            // list; give it one here (the same if it is already here). Only
+            // pictures have one: on a footnote or comment mark the same
+            // field is the note's id, and stays as it is.
+            let pictures: Vec<(usize, usize)> = p
+                .run_bounds()
+                .filter(|&(a, b, _)| p.text[a..b].contains(crate::para::chars::OBJECT))
+                .map(|(a, b, _)| (a, b))
+                .collect();
+            for (a, b) in pictures {
+                p.format_range(a, b, &mut |c: &mut CharProps| {
+                    if c.object != 0
+                        && let Some(o) = objects.get(c.object as usize - 1)
+                    {
+                        c.object = self.add_object(o.clone());
+                    }
+                });
+            }
         }
         self.set_story(id, story);
     }
@@ -2944,6 +2994,92 @@ mod tests {
             d.header_story(1, StoryId::Header).paras[0].text,
             "Second First"
         );
+    }
+
+    #[test]
+    fn importing_a_story_keeps_the_ids_on_comment_marks() {
+        let mut other = Document::new();
+        let mut doc = Document::new();
+        let id = other.insert_annotation(
+            Position::new(0, 0),
+            other.main.paras[0].mark_chp,
+            crate::notes::AnnotationInfo::default(),
+        );
+        // A picture list the id could be mistaken for a place in: the
+        // other document's first picture is this one's second.
+        let png = |w: u8| {
+            let mut v = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0".to_vec();
+            v.extend_from_slice(&[w, 0, 0, 0, 1, 8, 2, 0, 0, 0]);
+            crate::Picture::from_bytes(v).unwrap()
+        };
+        other.add_object(Object::Picture(png(3)));
+        doc.add_object(Object::Picture(png(2)));
+        doc.add_object(Object::Picture(png(3)));
+        let mark_story = Story {
+            paras: vec![other.main.paras[0].clone()],
+        };
+        doc.import_story(
+            StoryId::Annotations,
+            &mark_story,
+            &other.fonts,
+            &other.objects,
+        );
+        let p = &doc.annotations.paras[0];
+        assert!(p.text.starts_with(chars::ANNOTATION));
+        assert_eq!(p.chp_of_char(0).object, id);
+    }
+
+    #[test]
+    fn header_lookups_agree_for_every_section() {
+        let mut d = crate::text::from_plain_text("A\nB\nC\nD\nE");
+        let chp = d.main.paras[0].mark_chp;
+        d.insert_text(StoryId::Header, Position::new(0, 0), "Zero", chp);
+        d.forget_history();
+        for para in [3, 2, 1] {
+            d.begin("Break", Selection::default());
+            d.insert_section_break(Position::new(para, 0));
+            d.commit(Selection::default());
+        }
+        // Sections 1 and 3 get headers of their own; 2 shares the one before's.
+        for (k, text) in [(1, "One "), (3, "Three ")] {
+            d.header_section = k;
+            d.begin("Typing", Selection::default());
+            d.insert_text(StoryId::Header, Position::new(0, 0), text, chp);
+            d.commit(Selection::default());
+        }
+        let ranges = d.sections();
+        assert_eq!(ranges.len(), 4);
+        let sets = d.header_sets();
+        assert_eq!(sets.len(), ranges.len());
+        for k in 0..ranges.len() + 2 {
+            // The slow way: walk down from section k.
+            let mut want = k.min(ranges.len() - 1);
+            while want > 0 && d.nth_section(want).headers.is_none() {
+                want -= 1;
+            }
+            assert_eq!(d.header_source(k), want, "source of {k}");
+            if let Some((source, set)) = sets.get(k) {
+                assert_eq!(*source, want, "set source of {k}");
+                assert_eq!(set[0].paras[0].text, d.headers_of(k)[0].paras[0].text);
+            }
+        }
+        assert_eq!(d.header_story(2, StoryId::Header).paras[0].text, "One Zero");
+        assert_eq!(
+            d.header_story(3, StoryId::Header).paras[0].text,
+            "Three One Zero"
+        );
+        for (k, r) in ranges.iter().enumerate() {
+            let last = k + 1 == ranges.len();
+            let want = if last {
+                &d.section
+            } else {
+                d.main.paras[*r.end()]
+                    .section
+                    .as_deref()
+                    .unwrap_or(&d.section)
+            };
+            assert!(std::ptr::eq(d.nth_section(k), want), "section {k}");
+        }
     }
 
     #[test]

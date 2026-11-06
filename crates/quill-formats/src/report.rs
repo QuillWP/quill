@@ -71,6 +71,12 @@ pub const STYLE_SHEETS: &str =
     "Style sheets the page links to were not read, so some of its formatting may be missing.";
 pub const LINKED_PICTURES: &str =
     "Pictures the page links to were left out; Quill never fetches them.";
+pub const MARKDOWN_LINKED_PICTURES: &str =
+    "Pictures the Markdown links to on the web were kept as links; Quill never fetches them.";
+pub const MARKDOWN_HTML: &str = "HTML written in the Markdown was kept as text, apart from underline, superscript, subscript and line breaks.";
+pub const MARKDOWN_NOTES: &str = "Footnotes written as [^1] were kept as ordinary text.";
+pub const MARKDOWN_PICTURES: &str =
+    "Pictures the file names were left out where Quill could not find them beside the file.";
 pub const ENCODING: &str =
     "The page uses a character set Quill does not read, so some characters may be wrong.";
 

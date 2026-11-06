@@ -3,7 +3,7 @@
 use super::*;
 
 /// Render a window offscreen to a PNG, optionally after a script of steps
-/// separated by `|`: `type:some text` types, `cmd:Bold` runs a command
+/// separated by `|`: `type:some text` types, `scroll:300` scrolls to that many points down, `cmd:Bold` runs a command
 /// (names as in `Cmd`), `shift:Left` runs a movement command extending the
 /// selection, `click:x,y`, `down:x,y`, `move:x,y` and `up:x,y` work the
 /// mouse. For tests and for checking the look without a screen.
@@ -225,6 +225,17 @@ pub fn snapshot(
                     Some(pic) => st.view.insert_picture(pic),
                     None => eprintln!("quill: cannot read picture {arg}"),
                 }
+            }
+            // Scroll the window's text to a distance down: scroll:2000.
+            "scroll" => st.view.scroll_y = arg.parse().unwrap_or(0.0),
+            // Put the insertion point at a paragraph and offset and show it:
+            // goto:92,771.
+            "goto" => {
+                st.view
+                    .set_selection(quill_core::Selection::caret(quill_core::Position::new(
+                        x as usize, y as usize,
+                    )));
+                st.view.scroll_to_caret();
             }
             "pane" => {
                 // Open a header or footer pane: pane:header, pane:footer, or

@@ -231,6 +231,115 @@ impl WinState {
         Some(Effect::None)
     }
 
+    /// Keep the comments beside the text they are about. When the document
+    /// scrolls, the comments scroll to put the first comment whose text is in
+    /// view next to it. Scrolling the comments leaves the document alone, but
+    /// moving the insertion point into another comment shows its text.
+    /// `scale` holds the comments' type steady as the document zooms.
+    pub(super) fn sync_comments(&mut self, fonts: &mut Fonts, scale: f32) {
+        let WinState {
+            view,
+            pane,
+            comment_sync,
+            comment_here,
+            ..
+        } = self;
+        let Some(p) = pane else {
+            return;
+        };
+        if p.story != StoryId::Annotations {
+            return;
+        }
+        let focused = p.focused;
+        let (comments, main) = if focused {
+            (view, &mut p.other)
+        } else {
+            (&mut p.other, view)
+        };
+        if !comments.captions {
+            return;
+        }
+        comments.set_comment_scale(scale);
+        main.update_layout(fonts);
+        comments.update_layout(fonts);
+        let here = comments.annotation_here().filter(|_| focused);
+        let moved_here = here.is_some() && here != *comment_here;
+        let main_moved = !(main.scroll_y - comment_sync.unwrap_or(f32::NAN))
+            .abs()
+            .le(&0.5);
+        *comment_here = here;
+        if !main_moved && !moved_here {
+            return;
+        }
+        let marks = main.comment_marks();
+        let tops = comments.comment_tops();
+        if moved_here {
+            // Show the text the comment is about, beside it.
+            if let Some(id) = here
+                && let Some(&(_, top)) = tops.iter().find(|(c, _)| *c == id)
+                && let Some(&(_, at)) = marks.iter().find(|(m, _)| *m == id)
+                && let Some((y, (wx, wy))) = main.mark_point(at)
+                && !main.shows((wx, wy))
+            {
+                main.scroll_to_align(y, comments.window_y(top));
+            }
+        } else {
+            // The first comment whose text is at or below the top of the
+            // view goes beside it, or as near as the pane allows.
+            let pick = marks.iter().find_map(|&(id, at)| {
+                let (y, (_, wy)) = main.mark_point(at)?;
+                (wy >= main.area.y).then_some((id, y, wy))
+            });
+            if let Some((id, _, wy)) = pick
+                && let Some(&(_, card)) = tops.iter().find(|(c, _)| *c == id)
+            {
+                let near = comments.area.y + 4.0 * comments.comment_scale;
+                comments.scroll_to_align(card, wy.max(near));
+            }
+        }
+        *comment_sync = Some(main.scroll_y);
+    }
+
+    /// Dotted lines from each comment's icon to the text it is about, across
+    /// the document and the comments pane. The views are laid out at the
+    /// document's zoom; `f` turns their points into the window's.
+    pub(super) fn draw_comment_links(&self, c: &mut Canvas, f: f32) {
+        let Some(pane) = &self.pane else {
+            return;
+        };
+        let (comments, main) = if self.view.captions {
+            (&self.view, &pane.other)
+        } else if pane.other.captions {
+            (&pane.other, &self.view)
+        } else {
+            return;
+        };
+        let bounds = Rect::new(
+            main.area.x * f,
+            main.area.y.min(comments.area.y) * f,
+            (comments.area.right() - main.area.x) * f,
+            main.area.h.max(comments.area.h) * f,
+        );
+        let clip = c.set_clip(bounds);
+        let marks = main.comment_marks();
+        let s = comments.comment_scale;
+        for card in comments.comment_cards() {
+            let (x, y) = (card.rect.x - 5.0 * s, card.rect.y + 3.0 * s);
+            if y < comments.area.y || y > comments.area.bottom() {
+                continue;
+            }
+            let Some(&(_, at)) = marks.iter().find(|(id, _)| *id == card.id) else {
+                continue;
+            };
+            if let Some((_, (ax, ay))) = main.mark_point(at)
+                && main.shows((ax, ay))
+            {
+                crate::docview::dotted_line(c, ax * f, ay * f, x * f, y * f, crate::docview::LINK);
+            }
+        }
+        c.restore_clip(clip);
+    }
+
     pub(super) fn draw_revisions(&mut self, c: &mut Canvas, label: &mut Label) {
         let Some(r) = self.revisions_bounds() else {
             return;

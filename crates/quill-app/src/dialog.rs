@@ -739,6 +739,9 @@ impl Dialog {
         if y < min_y && min_y + h <= window_h {
             y = min_y;
         }
+        if self.title == "Find" && self.items.iter().any(|i| i.id == "mode") {
+            y = ((window_h - h) / 2.0).max(0.0);
+        }
         self.origin = (((window_w - w) / 2.0).max(0.0).round(), y.round());
     }
 
@@ -1728,7 +1731,7 @@ pub mod units {
             "pt" | "pts" | "point" | "points" => 20.0,
             "cm" => 1440.0 / 2.54,
             "mm" => 1440.0 / 25.4,
-            "pi" | "p" | "picas" => 240.0,
+            "pi" | "p" | "pica" | "picas" => 240.0,
             "li" | "line" | "lines" => 240.0,
             _ => return None,
         };
@@ -1748,9 +1751,22 @@ pub mod units {
         parse(s, crate::settings::with(|s| s.unit).abbrev())
     }
 
+    /// Read a length field that was filled in from `old`. While it still
+    /// says what `length(old)` showed, `old` itself comes back: the shown
+    /// text is rounded, and re-reading it would change a measurement
+    /// nobody edited (12 pt shows as 0.17 in, which reads back as 12.25 pt).
+    pub fn parse_length_from(s: &str, old: Twips) -> Option<Twips> {
+        if s.trim() == length(old) {
+            Some(old)
+        } else {
+            parse_length(s)
+        }
+    }
+
     fn per_unit(unit: &str) -> f64 {
         match unit {
             "cm" => 1440.0 / 2.54,
+            "mm" => 1440.0 / 25.4,
             "pt" => 20.0,
             "pi" => 240.0,
             _ => 1440.0,
@@ -1777,6 +1793,16 @@ pub mod units {
             assert_eq!(parse("1.25 in", "in"), Some(1800));
             assert_eq!(parse("1.25\"", "in"), Some(1800));
             assert_eq!(parse("12 pt", "in"), Some(240));
+            assert_eq!(parse("25.4 mm", "in"), Some(1440));
+            // Unedited text gives back the exact value it was shown from.
+            assert_eq!(length(240), "0.17 in");
+            assert_eq!(parse_length_from("0.17 in", 240), Some(240));
+            assert_eq!(parse_length_from(" 0.17 in ", 240), Some(240));
+            assert_eq!(parse_length_from("0.17", 240), Some(245));
+            assert_eq!(parse_length_from("0.25 in", 240), Some(360));
+            assert_eq!(parse("1.5 pica", "in"), Some(360));
+            assert_eq!(parse("1.5 picas", "in"), Some(360));
+            assert_eq!(parse("25.4", "mm"), Some(1440));
             assert_eq!(parse("12", "pt"), Some(240));
             assert_eq!(parse("2.54cm", "in"), Some(1440));
             assert_eq!(parse("-0.5 in", "in"), Some(-720));

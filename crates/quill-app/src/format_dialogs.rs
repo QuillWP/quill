@@ -222,10 +222,10 @@ pub fn tabs(view: &DocView, selected: Option<Twips>) -> (Dialog, Which) {
     )
 }
 
-/// The tab the dialog's Type, Leader and Position describe.
-fn tab_from(d: &Dialog) -> Option<TabStop> {
-    let pos = units::parse_length(&d.field_text("pos"))
-        .filter(|_| !d.field_text("pos").trim().is_empty())?;
+/// The tab the dialog's Type, Leader and Position describe. `selected` is
+/// the chosen tab's position, kept exactly while its field is unedited.
+fn tab_from(d: &Dialog, selected: Option<Twips>) -> Option<TabStop> {
+    let pos = tab_pos(d, selected).filter(|_| !d.field_text("pos").trim().is_empty())?;
     let align = TAB_TYPES
         .iter()
         .find(|(id, _, _)| d.is_on(id))
@@ -248,6 +248,16 @@ pub fn choose_tab(d: &mut Dialog, t: &TabStop) {
     d.set_field("pos", &units::length(t.pos));
 }
 
+/// The Position field, as the chosen tab's exact position while it is
+/// unedited.
+fn tab_pos(d: &Dialog, selected: Option<Twips>) -> Option<Twips> {
+    let text = d.field_text("pos");
+    match selected {
+        Some(old) => units::parse_length_from(&text, old),
+        None => units::parse_length(&text),
+    }
+}
+
 /// Set, Clear and Clear All in the Tabs dialog.
 pub fn tabs_button(which: &mut Which, d: &mut Dialog, id: &str) {
     let Which::Tabs { tabs, selected, .. } = which else {
@@ -255,7 +265,7 @@ pub fn tabs_button(which: &mut Which, d: &mut Dialog, id: &str) {
     };
     match id {
         "set" => {
-            if let Some(t) = tab_from(d) {
+            if let Some(t) = tab_from(d, *selected) {
                 // Setting with the chosen tab moved replaces it.
                 if let Some(old) = *selected
                     && old != t.pos
@@ -269,7 +279,7 @@ pub fn tabs_button(which: &mut Which, d: &mut Dialog, id: &str) {
             }
         }
         "clear" => {
-            let pos = units::parse_length(&d.field_text("pos")).or(*selected);
+            let pos = tab_pos(d, *selected).or(*selected);
             if let Some(p) = pos {
                 tabs.retain(|x| x.pos != p);
             }
@@ -593,9 +603,9 @@ pub fn paragraph(view: &DocView) -> (Dialog, Which) {
     let mut d = Dialog::new("Paragraph", 438.0, 200.0);
     d.group("Spacing", 10.0, 4.0, 334.0, 70.0);
     d.text("Before:", 18.0, 24.0);
-    d.field("before", &units::points(p.before), 84.0, 22.0, 66.0);
+    d.field("before", &units::length(p.before), 84.0, 22.0, 66.0);
     d.text("After:", 18.0, 48.0);
-    d.field("after", &units::points(p.after), 84.0, 46.0, 66.0);
+    d.field("after", &units::length(p.after), 84.0, 46.0, 66.0);
     d.text("Line:", 164.0, 24.0);
     let (rule, value) = match p.line {
         LineSpacing::Auto => (0, String::new()),
@@ -651,12 +661,13 @@ pub fn paragraph(view: &DocView) -> (Dialog, Which) {
 
 fn read_paragraph(d: &Dialog, base: &ParaProps) -> Option<ParaProps> {
     let mut p = base.clone();
-    p.before = units::parse(&d.field_text("before"), "pt")?.max(0);
-    p.after = units::parse(&d.field_text("after"), "pt")?.max(0);
+    let len = |id, old| units::parse_length_from(&d.field_text(id), old);
+    p.before = len("before", base.before)?.max(0);
+    p.after = len("after", base.after)?.max(0);
     p.line = read_line_rule(d, d.selected("line"))?.unwrap_or_default();
-    p.left = units::parse_length(&d.field_text("left"))?;
-    p.right = units::parse_length(&d.field_text("right"))?;
-    p.first = units::parse_length(&d.field_text("first"))?;
+    p.left = len("left", base.left)?;
+    p.right = len("right", base.right)?;
+    p.first = len("first", base.first)?;
     p.page_break_before = d.is_on("pagebreak");
     p.keep_with_next = d.is_on("keepnext");
     p.keep_together = d.is_on("keeplines");
@@ -732,7 +743,7 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
         } => {
             // OK sets what the dialog shows, as if Set had been pressed.
             let mut tabs = tabs.clone();
-            if let Some(t) = tab_from(d) {
+            if let Some(t) = tab_from(d, *selected) {
                 if let Some(old) = *selected {
                     tabs.retain(|x| x.pos != old);
                 }
@@ -824,6 +835,26 @@ mod tests {
             Position::new(0, text.len()),
         ));
         v
+    }
+
+    #[test]
+    fn ok_without_changes_keeps_spacing_and_indents_exact() {
+        // None of these shows exactly in inches: 12 pt is "0.17 in", which
+        // would read back as 12.25 pt, and 0.5 cm is "0.2 in".
+        let mut v = view("Some text");
+        let pap = &mut v.doc.main.paras[0].pap;
+        (pap.before, pap.after, pap.left, pap.right, pap.first) = (240, 120, 284, 567, -170);
+        let before = v.doc.main.paras[0].pap.clone();
+        let (mut d, mut which) = paragraph(&v);
+        assert_eq!(d.field_text("before"), "0.17 in");
+        assert!(apply(&mut which, &mut d, &mut v));
+        assert_eq!(v.doc.main.paras[0].pap, before);
+        // A field that is edited is read as typed.
+        let (mut d, mut which) = paragraph(&v);
+        d.set_field("before", "0.25 in");
+        assert!(apply(&mut which, &mut d, &mut v));
+        assert_eq!(v.doc.main.paras[0].pap.before, 360);
+        assert_eq!(v.doc.main.paras[0].pap.after, 120);
     }
 
     #[test]

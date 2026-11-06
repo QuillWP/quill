@@ -92,15 +92,28 @@ pub fn changed(d: &mut Dialog, id: &str) {
 }
 
 /// The frame the dialog describes, or None if a field is not valid.
-pub fn read(d: &Dialog) -> Option<Frame> {
-    let name_or = |text: String, names: &[&str]| -> Option<Result<usize, i32>> {
+pub fn read(d: &Dialog, base: &Frame) -> Option<Frame> {
+    // A length left as it was shown keeps its exact value.
+    let length = |text: &str, old: Option<i32>| match old {
+        Some(old) => units::parse_length_from(text, old),
+        None => units::parse_length(text),
+    };
+    let name_or = |text: String, names: &[&str], old| -> Option<Result<usize, i32>> {
         let t = text.trim().to_string();
         if let Some(k) = names.iter().position(|n| n.eq_ignore_ascii_case(&t)) {
             return Some(Ok(k));
         }
-        units::parse_length(&t).map(Err)
+        length(&t, old).map(Err)
     };
-    let h = match name_or(d.field_text("h"), &H_NAMES)? {
+    let old_h = match base.h {
+        FrameH::At(t) => Some(t),
+        _ => None,
+    };
+    let old_v = match base.v {
+        FrameV::At(t) => Some(t),
+        _ => None,
+    };
+    let h = match name_or(d.field_text("h"), &H_NAMES, old_h)? {
         Ok(0) => FrameH::Left,
         Ok(1) => FrameH::Center,
         Ok(2) => FrameH::Right,
@@ -108,7 +121,7 @@ pub fn read(d: &Dialog) -> Option<Frame> {
         Ok(_) => FrameH::Outside,
         Err(t) => FrameH::At(t),
     };
-    let v = match name_or(d.field_text("v"), &V_NAMES)? {
+    let v = match name_or(d.field_text("v"), &V_NAMES, old_v)? {
         Ok(0) => FrameV::InLine,
         Ok(1) => FrameV::Top,
         Ok(2) => FrameV::Center,
@@ -117,9 +130,9 @@ pub fn read(d: &Dialog) -> Option<Frame> {
     };
     let width = match d.field_text("width").trim() {
         w if w.eq_ignore_ascii_case("auto") || w.is_empty() => None,
-        w => Some(units::parse_length(w)?.max(144)),
+        w => Some(length(w, base.width)?.max(144)),
     };
-    let from_text = units::parse_length(&d.field_text("from"))?.max(0);
+    let from_text = length(&d.field_text("from"), Some(base.from_text))?.max(0);
     Some(Frame {
         h,
         h_rel: match d.selected("h_rel") {

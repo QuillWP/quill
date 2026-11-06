@@ -38,6 +38,37 @@ extern "C" fn format_changed(panel: *mut AnyObject, _: Sel, popup: *mut AnyObjec
     }
 }
 
+/// The height the Save panel is given when macOS opens it shorter: 760
+/// points, or less on a small screen. A taller panel is left as it is.
+fn panel_height(current: f64, screen: f64) -> f64 {
+    current.max(760f64.min(screen * 0.8))
+}
+
+// macOS opens the panel at the size it last remembered for Quill, which can
+// leave little room for the file list once the Format popup is added.
+// Called just after the panel appears; a size set before it opens is
+// replaced by the remembered one.
+extern "C" fn grow_panel(panel: *mut AnyObject, _: Sel, _: *mut AnyObject) {
+    // SAFETY: AppKit invokes this on the save panel from its run loop.
+    unsafe {
+        let mut frame: NSRect = msg_send![panel, frame];
+        let screen: *mut AnyObject = msg_send![panel, screen];
+        let room = if screen.is_null() {
+            950.0
+        } else {
+            let visible: NSRect = msg_send![screen, visibleFrame];
+            visible.size.height
+        };
+        let height = panel_height(frame.size.height, room);
+        if height > frame.size.height {
+            // Grow downward, keeping the title bar where it is.
+            frame.origin.y -= height - frame.size.height;
+            frame.size.height = height;
+            let _: () = msg_send![panel, setFrame: frame display: true];
+        }
+    }
+}
+
 pub fn save_file(name: &str, directory: Option<&Path>) -> Option<PathBuf> {
     autoreleasepool(|_| {
         // SAFETY: called on the app thread. Every alloc/init result below is
@@ -50,6 +81,14 @@ pub fn save_file(name: &str, directory: Option<&Path>) -> Option<PathBuf> {
                 objc2::ffi::class_addMethod(
                     class!(NSSavePanel) as *const _ as *mut _,
                     sel!(quillSaveFormatChanged:).as_ptr(),
+                    Some(imp),
+                    c"v@:@".as_ptr(),
+                );
+                let grow: extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) = grow_panel;
+                let imp: unsafe extern "C" fn() = std::mem::transmute(grow);
+                objc2::ffi::class_addMethod(
+                    class!(NSSavePanel) as *const _ as *mut _,
+                    sel!(quillSaveGrow:).as_ptr(),
                     Some(imp),
                     c"v@:@".as_ptr(),
                 );
@@ -94,7 +133,19 @@ pub fn save_file(name: &str, directory: Option<&Path>) -> Option<PathBuf> {
                 let _: () = msg_send![panel, setDirectoryURL: url];
             }
             format_changed(panel, sel!(quillSaveFormatChanged:), popup);
+            // Make room once the panel is up, in the modal run loop.
+            let mode = NSString::from_str("kCFRunLoopCommonModes");
+            let modes: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: &*mode];
+            let _: () = msg_send![panel,
+                performSelector: sel!(quillSaveGrow:)
+                withObject: std::ptr::null::<AnyObject>()
+                afterDelay: 0.0f64
+                inModes: modes];
+            // Runs inside winit's event handler. Clicks and drags while the
+            // panel is up only wait, instead of crashing, because of the
+            // patched winit in vendor/winit (see vendor/README.md).
             let response: isize = msg_send![panel, runModal];
+            let _: () = msg_send![class!(NSObject), cancelPreviousPerformRequestsWithTarget: panel];
             if response != 1 {
                 return None;
             }
@@ -117,6 +168,14 @@ pub fn save_file(name: &str, directory: Option<&Path>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_short_save_panel_grows_and_a_tall_one_is_left_alone() {
+        assert_eq!(panel_height(600.0, 1350.0), 760.0);
+        assert_eq!(panel_height(900.0, 1350.0), 900.0);
+        // A small screen gets most of its height, not 760.
+        assert_eq!(panel_height(500.0, 700.0), 560.0);
+    }
 
     #[test]
     fn changing_format_replaces_extension_without_losing_stem() {

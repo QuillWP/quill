@@ -54,6 +54,8 @@ commands! {
     NormalView,
     PageLayoutView,
     OutlineView,
+    MarkdownSource,
+    MarkdownWysiwyg,
     PromoteHeading,
     DemoteHeading,
     MakeBodyText,
@@ -314,6 +316,8 @@ impl Cmd {
             NormalView => "Normal",
             PageLayoutView => "Page Layout",
             OutlineView => "Outline",
+            MarkdownSource => "Source",
+            MarkdownWysiwyg => "WYSIWYG",
             PromoteHeading => "Promote Heading",
             DemoteHeading => "Demote Heading",
             MakeBodyText => "Make Body Text",
@@ -657,7 +661,7 @@ fn default_lookup(key: &Key, physical_char: Option<char>, mods: Mods) -> Option<
         (K::Ch('v'), true, true, false) => PasteText,
         (K::Ch('a'), true, false, false) => SelectAll,
         (K::Ch('f'), true, false, false) => Find,
-        (K::Ch('h'), true, false, false) => Replace,
+        (K::Ch('h'), true, false, false) | (K::Ch('f'), true, true, false) => Replace,
         (K::Ch('g'), true, false, false) => GoTo,
         (K::Ch('k'), true, false, false) => Glossary,
         (K::Ch('e'), true, false, false) => InsertFootnote,
@@ -711,7 +715,6 @@ fn default_lookup(key: &Key, physical_char: Option<char>, mods: Mods) -> Option<
         (K::Ch('y'), true, true, false) => DoubleSpace,
         (K::Ch('o'), true, true, false) => SpaceBefore12,
         (K::Ch('p'), true, true, false) => NormalParagraph,
-        (K::Ch('f'), true, true, false) => FirstLineIndent,
         (K::Ch('t'), true, true, false) => HangingIndent,
         (K::Ch('n'), true, true, false) => Nest,
         (K::Ch('m'), true, true, false) => Unnest,
@@ -813,7 +816,7 @@ pub fn shortcut_label(cmd: Cmd) -> &'static str {
         PasteText => "⌘⇧V",
         SelectAll => "⌘A",
         Find => "⌘F",
-        Replace => "⌘H",
+        Replace => "⌘⇧F",
         GoTo => "⌘G",
         Glossary => "⌘K",
         Hyperlink => "⌘⌥K",
@@ -888,6 +891,8 @@ mod tests {
 
     #[test]
     fn default_shortcuts() {
+        assert_eq!(lookup(&ch("f"), None, cmd()), Some(Cmd::Find));
+        assert_eq!(lookup(&ch("F"), Some('f'), cmd_shift()), Some(Cmd::Replace));
         assert_eq!(lookup(&ch("b"), None, cmd()), Some(Cmd::Bold));
         assert_eq!(
             lookup(&ch("Z"), Some('z'), cmd_shift()),

@@ -380,6 +380,7 @@ impl WinState {
             self.view.restore_all(fonts);
             crate::lang_dialogs::hyphenation_refresh(st, d, &mut self.view);
         }
+        self.sync_comments(fonts, k / z);
         let resize_text_width = self.review_resize.and(self.review_resize_text_width);
         let mut views: Vec<(&mut DocView, bool)> = Vec::new();
         match &mut self.pane {
@@ -399,6 +400,9 @@ impl WinState {
                 && let Some(frozen) = resize_text_width
             {
                 v.area.w = frozen;
+            }
+            if v.captions {
+                v.set_comment_scale(k / z);
             }
             v.update_layout(fonts);
             v.scroll_y = v.scroll_y.clamp(0.0, v.max_scroll());
@@ -516,6 +520,7 @@ impl WinState {
         }
         self.draw_revisions(c, &mut label);
         self.draw_revision_badges(c, &mut label);
+        self.draw_comment_links(c, z / k);
         let hbar = chrome::draw_status(c, &mut label, status, &page, &style);
         if !self.native_scrollbars {
             let v = self.main_view();

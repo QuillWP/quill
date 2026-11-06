@@ -14,6 +14,10 @@ quill-core = { path = "../crates/quill-core" }
 quill-formats = { path = "../crates/quill-formats" }
 quill-app = { path = "../crates/quill-app", features = ["fuzzing"] }
 
+# The same patched winit as the main workspace (see ../vendor/README.md).
+[patch.crates-io]
+winit = { path = "../vendor/winit" }
+
 [[bin]]
 name = "zip"
 path = "fuzz_targets/zip.rs"

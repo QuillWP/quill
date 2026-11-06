@@ -2,7 +2,7 @@
 //! modeless windows, as in the original; what they last looked for is kept
 //! for Find Again (⌘⌥A) and the next time they open.
 
-use crate::dialog::{Dialog, units};
+use crate::dialog::{Dialog, Kind, units};
 use crate::docview::{Clipboard, DocView};
 use quill_core::find::{
     self, CharSpec, Direction, FIND_SPECIALS, ParaSpec, Pattern, REPLACE_SPECIALS, Replacement,
@@ -88,15 +88,12 @@ pub fn dialog(view: &DocView, replace: bool) -> (Dialog, FindState) {
     } else if search.dir == SELECTION {
         search.dir = DOWN;
     }
-    let (title, h) = if replace {
-        ("Replace", 184.0)
-    } else {
-        ("Find", 104.0)
-    };
+    let title = "Find";
+    let h = if replace { 238.0 } else { 142.0 };
     let mut d = Dialog::new(title, 465.0, h);
     d.modeless = true;
     d.close_box = true;
-    let lx = if replace { 10.0 } else { 8.0 };
+    let lx = 8.0;
     d.text("Find What:", lx, 7.0);
     d.field("find", &search.find, 102.0, 5.0, 250.0);
     d.menu_button("fmt_find", "Format", &FORMATS, 23.0, 27.0, 75.0);
@@ -104,20 +101,20 @@ pub fn dialog(view: &DocView, replace: bool) -> (Dialog, FindState) {
     d.menu_button("spc_find", "Special", &specials, 23.0, 49.0, 75.0);
     d.note("desc_find", "", 104.0, 31.0, 250.0);
     let (checks_y, search_y) = if replace {
-        d.text("Replace With:", 10.0, 86.0);
-        d.field("with", &search.replace, 102.0, 84.0, 250.0);
-        d.menu_button("fmt_rep", "Format", &FORMATS, 23.0, 106.0, 75.0);
+        d.text("Replace With:", 8.0, 150.0);
+        d.field("with", &search.replace, 102.0, 148.0, 250.0);
+        d.menu_button("fmt_rep", "Format", &FORMATS, 23.0, 170.0, 75.0);
         let specials: Vec<&str> = REPLACE_SPECIALS.iter().map(|(n, _)| *n).collect();
-        d.menu_button("spc_rep", "Special", &specials, 23.0, 128.0, 75.0);
-        d.note("desc_rep", "", 104.0, 110.0, 250.0);
+        d.menu_button("spc_rep", "Special", &specials, 23.0, 192.0, 75.0);
+        d.note("desc_rep", "", 104.0, 174.0, 250.0);
         d.button("findnext", "Find Next", 369.0, 9.0, 88.0, true);
-        d.button("replace", "Replace", 369.0, 35.0, 88.0, false);
-        d.button("replaceall", "Replace All", 369.0, 58.0, 88.0, false);
-        d.button("cancel", "Cancel", 369.0, 81.0, 88.0, false);
-        (165.0, 150.0)
+        d.button("replace", "Replace", 369.0, 152.0, 88.0, false);
+        d.button("replaceall", "Replace All", 369.0, 178.0, 88.0, false);
+        d.button("cancel", "Cancel", 369.0, 36.0, 88.0, false);
+        (84.0, 66.0)
     } else {
         d.button("findnext", "Find Next", 369.0, 9.0, 88.0, true);
-        d.button("cancel", "Cancel", 368.0, 36.0, 89.0, false);
+        d.button("cancel", "Cancel", 369.0, 36.0, 88.0, false);
         (84.0, 66.0)
     };
     d.check(
@@ -141,6 +138,18 @@ pub fn dialog(view: &DocView, replace: bool) -> (Dialog, FindState) {
         search_y + 15.0,
         89.0,
     );
+    d.button(
+        "mode",
+        if replace {
+            "Hide Replace"
+        } else {
+            "Replace…"
+        },
+        8.0,
+        110.0,
+        110.0,
+        false,
+    );
     d.focus("find");
     let mut st = FindState {
         replace,
@@ -149,6 +158,27 @@ pub fn dialog(view: &DocView, replace: bool) -> (Dialog, FindState) {
     };
     update(&mut st, &mut d, view);
     (d, st)
+}
+
+/// Change modes without losing the search, replacement or current match.
+pub fn switch_mode(st: &mut FindState, d: &mut Dialog, view: &DocView, replace: bool) {
+    update(st, d, view);
+    let found = st.found;
+    let (mut next, mut state) = dialog(view, replace);
+    next.origin = d.origin;
+    if let Some(old) = d.items.iter().find(|i| i.id == "find")
+        && let Kind::Field { sel, .. } = &old.kind
+        && let Some(new) = next.items.iter_mut().find(|i| i.id == "find")
+        && let Kind::Field { sel: next_sel, .. } = &mut new.kind
+    {
+        *next_sel = *sel;
+    }
+    state.search = st.search.clone();
+    next.set_selected("dir", st.search.dir);
+    state.found = found;
+    *d = next;
+    *st = state;
+    update(st, d, view);
 }
 
 /// Read the window into the search and set what can be pressed.
@@ -176,9 +206,9 @@ pub fn update(st: &mut FindState, d: &mut Dialog, view: &DocView) {
     d.set_label("desc_rep", &describe(&s.rep_chp, &s.rep_pap));
     let can_find = !s.pattern().is_empty();
     d.enable("findnext", can_find);
-    d.enable("replaceall", can_find);
+    d.enable("replaceall", st.replace && can_find);
     let on_match = st.found.is_some_and(|(a, b)| view.sel.range() == (a, b));
-    d.enable("replace", can_find && on_match);
+    d.enable("replace", st.replace && can_find && on_match);
     d.enable("whole", !find::has_specials(&s.find));
     remember(s);
 }
@@ -197,6 +227,9 @@ pub enum Ask {
 
 /// A control in the Find window changed.
 pub fn changed(st: &mut FindState, d: &mut Dialog, view: &DocView, id: &str) -> Ask {
+    if !st.replace && matches!(id, "fmt_rep" | "spc_rep" | "with") {
+        return Ask::Nothing;
+    }
     let mut ask = Ask::Nothing;
     match id {
         "fmt_find" | "fmt_rep" => {
@@ -301,6 +334,9 @@ pub fn find_wrapped(view: &mut DocView, s: &Search) -> bool {
 
 /// Replace: replace the match that is selected, then find the next one.
 pub fn replace(st: &mut FindState, view: &mut DocView, clip: &mut Clipboard) -> Hit {
+    if !st.replace {
+        return Hit::NotFound;
+    }
     let s = st.search.clone();
     if let Some((a, b)) = st.found
         && view.sel.range() == (a, b)
@@ -324,6 +360,9 @@ pub fn replace(st: &mut FindState, view: &mut DocView, clip: &mut Clipboard) -> 
 /// Replace All. Returns how many were replaced and whether it worked on
 /// the selection only.
 pub fn replace_all(st: &mut FindState, view: &mut DocView, clip: &mut Clipboard) -> (usize, bool) {
+    if !st.replace {
+        return (0, false);
+    }
     let s = st.search.clone();
     let story = &view.doc.main;
     let (from, to) = match s.dir {
@@ -590,6 +629,33 @@ mod tests {
             find: find.into(),
             dir,
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn switching_modes_keeps_search_replacement_and_match() {
+        let v = view("cat dog");
+        let (mut d, mut st) = dialog(&v, true);
+        d.set_field("find", "cat");
+        d.set_field("with", "bird");
+        st.found = Some(v.sel.range());
+        let found = st.found;
+        d.origin = (230.0, 170.0);
+        d.set_selected("dir", ALL);
+        switch_mode(&mut st, &mut d, &v, false);
+        assert!(!st.replace);
+        assert_eq!(d.origin, (230.0, 170.0));
+        assert_eq!(st.search.dir, ALL);
+        assert_eq!(d.field_text("find"), "cat");
+        switch_mode(&mut st, &mut d, &v, true);
+        assert!(st.replace);
+        assert_eq!(d.field_text("with"), "bird");
+        assert_eq!(st.found, found);
+        for replace in [false, true] {
+            let (d, _) = dialog(&v, replace);
+            for item in &d.items {
+                assert!(item.rect.bottom() <= d.height - 8.0, "{}", item.id);
+            }
         }
     }
 

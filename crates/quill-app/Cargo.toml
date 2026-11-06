@@ -1,6 +1,6 @@
 [package]
 name = "quill-app"
-description = "Quill, a small word processor inspired by Lucas's favorite word processor from 1992"
+description = "Quill, a small word processor inspired by a favorite of 1992"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

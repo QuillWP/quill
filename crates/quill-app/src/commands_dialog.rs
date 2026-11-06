@@ -92,6 +92,12 @@ pub fn describe(cmd: Cmd) -> String {
             "Shows the system's definitions and thesaurus for the word at the insertion point."
         }
         ShowChanges => "Shows tracked changes marked up, or the text with them accepted (toggle).",
+        MarkdownSource => {
+            "Shows the document as Markdown text to read and edit. Switching back without editing the text gives the document back exactly."
+        }
+        MarkdownWysiwyg => {
+            "Shows the document formatted, as it will look; the Markdown text is read back into it."
+        }
         _ => "",
     };
     if !fixed.is_empty() {

@@ -4,10 +4,15 @@ members = ["crates/*"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 homepage = "https://quillwp.com"
+
+# winit is built from a patched copy in vendor/winit. See vendor/README.md
+# before upgrading or removing it.
+[patch.crates-io]
+winit = { path = "vendor/winit" }
 
 [workspace.dependencies]
 quill-core = { path = "crates/quill-core" }

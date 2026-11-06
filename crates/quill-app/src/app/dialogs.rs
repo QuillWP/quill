@@ -86,6 +86,10 @@ impl WinState {
         }
         let (d, which) = match id {
             DialogId::Find | DialogId::Replace => {
+                if let Some((Which::Find(st), d)) = self.dialogs.last_mut() {
+                    crate::find_dialog::switch_mode(st, d, &self.view, id == DialogId::Replace);
+                    return;
+                }
                 let (d, st) = crate::find_dialog::dialog(&self.view, id == DialogId::Replace);
                 (d, Which::Find(st))
             }
@@ -369,6 +373,10 @@ impl WinState {
         };
         match which {
             Which::Find(st) => match o {
+                Outcome::Button("mode") => {
+                    let replace = !st.replace;
+                    fd::switch_mode(st, d, &self.view, replace);
+                }
                 Outcome::Cancel => {
                     self.dialogs.pop();
                 }
@@ -394,13 +402,13 @@ impl WinState {
                     let r = fd::find_next(&mut self.view, &s);
                     self.after_search(r, &s);
                 }
-                Outcome::Button("replace") => {
+                Outcome::Button("replace") if st.replace => {
                     fd::update(st, d, &self.view);
                     let s = st.search.clone();
                     let r = fd::replace(st, &mut self.view, clip);
                     self.after_search(r, &s);
                 }
-                Outcome::Button("replaceall") => {
+                Outcome::Button("replaceall") if st.replace => {
                     fd::update(st, d, &self.view);
                     let (_, in_selection) = fd::replace_all(st, &mut self.view, clip);
                     fd::update(st, d, &self.view);
@@ -778,7 +786,8 @@ impl WinState {
             Which::Frame => match o {
                 Outcome::Changed(id) => crate::frame_dialog::changed(d, id),
                 Outcome::Ok | Outcome::Button("position") => {
-                    let Some(f) = crate::frame_dialog::read(d) else {
+                    let base = self.view.current_pap().frame.unwrap_or_default();
+                    let Some(f) = crate::frame_dialog::read(d, &base) else {
                         return true;
                     };
                     let position = *o == Outcome::Button("position");
@@ -975,6 +984,14 @@ impl WinState {
                 Which::Preferences { .. } if id == "customize" => {
                     let (d, st) = crate::customize::dialog();
                     self.dialogs.push((Which::Customize(st), d));
+                }
+                Which::Preferences { panel, fonts }
+                    if crate::prefs_dialog::is_folder_button(id) =>
+                {
+                    crate::prefs_dialog::folder_button(id);
+                    let origin = d.origin;
+                    *d = crate::prefs_dialog::preferences(*panel, fonts);
+                    d.origin = origin;
                 }
                 Which::Preferences { panel, fonts }
                     if matches!(id, "dictionary_new" | "dictionary_choose") =>
