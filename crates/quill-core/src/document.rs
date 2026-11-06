@@ -454,6 +454,13 @@ fn step_owned_bytes(step: &Step) -> usize {
                     + record.old.iter().map(paragraph_owned_bytes).sum::<usize>()
                     + record.sheet.as_ref().map_or(0, |sheet| {
                         std::mem::size_of::<StyleSheet>()
+                            + sheet.characters.capacity()
+                                * std::mem::size_of::<crate::character_styles::CharacterStyle>()
+                            + sheet
+                                .characters
+                                .iter()
+                                .map(|s| s.name.capacity())
+                                .sum::<usize>()
                             + sheet.styles.capacity() * std::mem::size_of::<crate::styles::Style>()
                             + sheet
                                 .styles
@@ -812,9 +819,34 @@ impl Document {
         fonts: &[String],
         styles: &[String],
     ) -> Fragment {
+        self.import_fragment_styled(frag, fonts, styles, &[])
+    }
+
+    pub fn import_fragment_styled(
+        &mut self,
+        frag: &Fragment,
+        fonts: &[String],
+        styles: &[String],
+        characters: &[crate::character_styles::CharacterStyle],
+    ) -> Fragment {
+        let mut character_map = vec![0];
+        for s in characters {
+            character_map.push(self.import_character_style(s, fonts, true));
+        }
         let mut out = frag.clone();
-        for p in &mut out.paras {
+        for p in out
+            .paras
+            .iter_mut()
+            .chain(out.notes.iter_mut().flat_map(|note| &mut note.paras))
+        {
             let mut map = |c: &mut CharProps| {
+                c.character_style = character_map
+                    .get(c.character_style as usize)
+                    .copied()
+                    .unwrap_or(0);
+                if c.character_style == 0 {
+                    c.direct_format = 0;
+                }
                 if let Some(name) = fonts.get(c.font as usize) {
                     c.font = intern(&mut self.fonts, name);
                 }
@@ -1209,6 +1241,9 @@ impl Document {
 
     pub fn mark_saved(&mut self) {
         self.commit_open();
+        // Further typing must have its own state, rather than reuse the
+        // saved typing step's identity and appear unchanged.
+        self.break_typing();
         self.saved_state = self.state_id();
     }
 
@@ -1234,12 +1269,13 @@ impl Document {
         story: StoryId,
         first: usize,
         remove: usize,
-        new: Vec<Paragraph>,
+        mut new: Vec<Paragraph>,
     ) {
         assert!(
             !new.is_empty() || remove < self.story(story).paras.len(),
             "a story needs a paragraph"
         );
+        new.iter_mut().for_each(|p| self.styles.keep_overrides(p));
         let inserted = new.len();
         let changed_kinds: Vec<crate::notes::NoteKind> = if story == StoryId::Main {
             crate::notes::NoteKind::ALL
@@ -1827,6 +1863,19 @@ impl Document {
         story: StoryId,
         start: Position,
         end: Position,
+        f: impl FnMut(&mut CharProps),
+    ) {
+        self.change_chars(story, start, end, true, f);
+    }
+
+    /// `format_chars`, where `direct` says the change is formatting by hand
+    /// that a named character style must not overwrite.
+    fn change_chars(
+        &mut self,
+        story: StoryId,
+        start: Position,
+        end: Position,
+        direct: bool,
         mut f: impl FnMut(&mut CharProps),
     ) {
         let (start, end) = (start.min(end), start.max(end));
@@ -1837,6 +1886,9 @@ impl Document {
         let mut f = |c: &mut CharProps| {
             let before = *c;
             f(c);
+            if direct && c.character_style != 0 && before.character_style == c.character_style {
+                c.direct_format |= crate::character_styles::CharacterFormat::difference(before, *c);
+            }
             if let Some(by) = &by {
                 Document::track_format(before, c, by);
             }
@@ -1876,6 +1928,21 @@ impl Document {
         if start == end {
             return;
         }
+        let hyperlink = if link != 0 {
+            self.styles.find_character("Hyperlink").or_else(|| {
+                let props = CharProps {
+                    color,
+                    underline: crate::props::Underline::Single,
+                    ..Default::default()
+                };
+                self.add_character_style(
+                    "Hyperlink",
+                    crate::character_styles::CharacterFormat::new(props, (1 << 4) | (1 << 11)),
+                )
+            })
+        } else {
+            self.styles.find_character("Hyperlink")
+        };
         let paras = &self.story(story).paras;
         let mut new = Vec::with_capacity(end.para - start.para + 1);
         for (i, p) in paras.iter().enumerate().take(end.para + 1).skip(start.para) {
@@ -1884,14 +1951,30 @@ impl Document {
             let e = if i == end.para { end.offset } else { p.len() };
             let mark = p.mark_chp;
             p.format_range(s, e, &mut |c| {
-                c.link = link;
                 if link == 0 {
+                    if hyperlink == Some(c.character_style) {
+                        c.character_style = 0;
+                        c.direct_format = 0;
+                    }
                     c.color = mark.color;
                     c.underline = mark.underline;
+                } else if let Some(id) = hyperlink {
+                    // Keep the previous layer's visible formatting as direct
+                    // formatting when the link takes over its named slot.
+                    if c.character_style != id {
+                        c.character_style = 0;
+                        c.direct_format = 0;
+                    }
+                    *c = self.styles.with_character_style(*c, mark, id);
+                    if c.color != color {
+                        c.color = color;
+                        c.direct_format |= 1 << 11;
+                    }
                 } else {
                     c.color = color;
                     c.underline = crate::props::Underline::Single;
                 }
+                c.link = link;
             });
             new.push(p);
         }
@@ -1947,8 +2030,11 @@ impl Document {
                 let old_style = self.styles.get(p.pap.style);
                 let mut p = p.clone();
                 p.pap = new_style.pap.clone();
-                let mut restyle =
-                    |c: &mut CharProps| *c = restyle_chp(*c, &old_style.chp, &new_style.chp);
+                let mut restyle = |c: &mut CharProps| {
+                    let before = *c;
+                    *c = restyle_chp(*c, &old_style.chp, &new_style.chp);
+                    self.styles.keep_character_format(before, c, new_style.chp);
+                };
                 let len = p.len();
                 p.format_range(0, len, &mut restyle);
                 restyle(&mut p.mark_chp);
@@ -2210,10 +2296,17 @@ impl Document {
         };
         self.record_sheet();
         self.styles.styles.iter_mut().for_each(|s| fix(&mut s.chp));
+        for s in &mut self.styles.characters {
+            if s.format.mask & 1 != 0 {
+                fix(&mut s.format.props);
+            }
+        }
         for story in [StoryId::Main, StoryId::Notes, StoryId::Annotations] {
             let last = self.story(story).paras.len() - 1;
             let end = Position::new(last, self.story(story).paras[last].len());
-            self.format_chars(story, Position::new(0, 0), end, fix);
+            // The definitions changed above, so a styled run still follows
+            // its style: this is not formatting by hand.
+            self.change_chars(story, Position::new(0, 0), end, false, fix);
         }
         for story in &mut self.headers {
             for p in &mut story.paras {
@@ -2226,16 +2319,23 @@ impl Document {
     // ----- the style sheet -----
 
     /// Save the style sheet in the open undo step, before changing it.
-    fn record_sheet(&mut self) {
+    pub(crate) fn record_sheet(&mut self) {
         if self.history.open.is_none() {
             self.begin("Style", Selection::default());
         }
-        let sheet = Box::new(self.styles.clone());
-        let step = self.history.open.as_mut().unwrap();
-        // One copy per step is enough: undo restores the earliest.
-        if step.records.iter().any(|r| r.sheet.is_some()) {
+        if self
+            .history
+            .open
+            .as_ref()
+            .unwrap()
+            .records
+            .iter()
+            .any(|r| r.sheet.is_some())
+        {
             return;
         }
+        let sheet = Box::new(self.styles.clone());
+        let step = self.history.open.as_mut().unwrap();
         step.records.push(Record {
             story: StoryId::Main,
             first: 0,
@@ -2315,8 +2415,15 @@ impl Document {
             let mut p = p.clone();
             p.pap = restyle_pap(&p.pap, &old.pap, &pap);
             let len = p.len();
-            p.format_range(0, len, &mut |c| *c = restyle_chp(*c, &old.chp, &chp));
+            p.format_range(0, len, &mut |c| {
+                let before = *c;
+                *c = restyle_chp(*c, &old.chp, &chp);
+                self.styles.keep_character_format(before, c, chp);
+            });
+            let before = p.mark_chp;
             p.mark_chp = restyle_chp(p.mark_chp, &old.chp, &chp);
+            self.styles
+                .keep_character_format(before, &mut p.mark_chp, chp);
             if p != self.story(story).paras[i] {
                 self.splice(story, i, 1, vec![p]);
             }
@@ -2740,6 +2847,23 @@ mod tests {
         assert!(d.is_modified());
         d.redo();
         assert!(!d.is_modified());
+    }
+
+    #[test]
+    fn typing_after_saving_is_modified_and_undo_returns_to_the_saved_text() {
+        let mut d = Document::new();
+        let at = type_text(&mut d, p(0, 0), "Saved");
+        d.mark_saved();
+        let at = type_text(&mut d, at, " and edited");
+        type_text(&mut d, at, " again");
+        assert!(d.is_modified());
+        assert_eq!(texts(&d), ["Saved and edited again"]);
+        d.undo();
+        assert_eq!(texts(&d), ["Saved"]);
+        assert!(!d.is_modified());
+        d.redo();
+        assert_eq!(texts(&d), ["Saved and edited again"]);
+        assert!(d.is_modified());
     }
 
     #[test]

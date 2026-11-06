@@ -250,26 +250,112 @@ fn on_off(out: &mut String, tag: &str, value: bool, base: bool) {
 
 /// Character properties that differ from `base`, as the inside of rPr.
 fn rpr(doc: &Document, c: &CharProps, base: &CharProps) -> String {
+    let Some(style) = doc.styles.character(c.character_style) else {
+        return rpr_values(doc, c, base, 0);
+    };
+    let effective = style.format.resolved(*base);
+    // Paragraph IDs contain only letters and digits, so this prefix cannot collide.
+    let mut out = format!(
+        r#"<w:rStyle w:val="Quill_Character_{}"/>"#,
+        c.character_style
+    );
+    out.push_str(&rpr_values(doc, c, &effective, c.direct_format));
+    out
+}
+
+fn rpr_values(doc: &Document, c: &CharProps, base: &CharProps, force: u16) -> String {
     let mut o = String::new();
-    if c.font != base.font {
+    if c.font != base.font || force & (1 << 0) != 0 {
         let f = esc(doc.font_name(c.font));
         let _ = write!(o, r#"<w:rFonts w:ascii="{f}" w:hAnsi="{f}" w:cs="{f}"/>"#);
     }
-    on_off(&mut o, "b", c.bold, base.bold);
-    on_off(&mut o, "i", c.italic, base.italic);
-    on_off(&mut o, "caps", c.all_caps, base.all_caps);
-    on_off(&mut o, "smallCaps", c.small_caps, base.small_caps);
-    on_off(&mut o, "strike", c.strike, base.strike);
-    on_off(&mut o, "outline", c.outline, base.outline);
-    on_off(&mut o, "shadow", c.shadow, base.shadow);
-    on_off(&mut o, "vanish", c.hidden, base.hidden);
-    if c.color != base.color {
+    on_off(
+        &mut o,
+        "b",
+        c.bold,
+        if force & (1 << 2) != 0 {
+            !c.bold
+        } else {
+            base.bold
+        },
+    );
+    on_off(
+        &mut o,
+        "i",
+        c.italic,
+        if force & (1 << 3) != 0 {
+            !c.italic
+        } else {
+            base.italic
+        },
+    );
+    on_off(
+        &mut o,
+        "caps",
+        c.all_caps,
+        if force & (1 << 9) != 0 {
+            !c.all_caps
+        } else {
+            base.all_caps
+        },
+    );
+    on_off(
+        &mut o,
+        "smallCaps",
+        c.small_caps,
+        if force & (1 << 8) != 0 {
+            !c.small_caps
+        } else {
+            base.small_caps
+        },
+    );
+    on_off(
+        &mut o,
+        "strike",
+        c.strike,
+        if force & (1 << 5) != 0 {
+            !c.strike
+        } else {
+            base.strike
+        },
+    );
+    on_off(
+        &mut o,
+        "outline",
+        c.outline,
+        if force & (1 << 6) != 0 {
+            !c.outline
+        } else {
+            base.outline
+        },
+    );
+    on_off(
+        &mut o,
+        "shadow",
+        c.shadow,
+        if force & (1 << 7) != 0 {
+            !c.shadow
+        } else {
+            base.shadow
+        },
+    );
+    on_off(
+        &mut o,
+        "vanish",
+        c.hidden,
+        if force & (1 << 10) != 0 {
+            !c.hidden
+        } else {
+            base.hidden
+        },
+    );
+    if c.color != base.color || force & (1 << 11) != 0 {
         let _ = write!(o, r#"<w:color w:val="{:06X}"/>"#, c.color.0);
     }
-    if c.spacing != base.spacing {
+    if c.spacing != base.spacing || force & (1 << 13) != 0 {
         let _ = write!(o, r#"<w:spacing w:val="{}"/>"#, c.spacing);
     }
-    if c.position != base.position {
+    if c.position != base.position || force & (1 << 12) != 0 {
         // .docx measures the baseline shift in half-points.
         let _ = write!(
             o,
@@ -277,10 +363,10 @@ fn rpr(doc: &Document, c: &CharProps, base: &CharProps) -> String {
             crate::half_points(c.position)
         );
     }
-    if c.size != base.size {
+    if c.size != base.size || force & (1 << 1) != 0 {
         let _ = write!(o, r#"<w:sz w:val="{0}"/><w:szCs w:val="{0}"/>"#, c.size);
     }
-    if c.underline != base.underline {
+    if c.underline != base.underline || force & (1 << 4) != 0 {
         let u = match c.underline {
             Underline::None => "none",
             Underline::Single => "single",
@@ -1402,6 +1488,20 @@ fn styles_xml(doc: &Document, ids: &[String]) -> String {
             let _ = write!(out, "<w:rPr>{r}</w:rPr>");
         }
         out.push_str("</w:style>");
+    }
+    for (i, style) in doc.styles.characters.iter().enumerate() {
+        let props = rpr_values(
+            doc,
+            &style.format.props,
+            &CharProps::default(),
+            style.format.mask,
+        );
+        let _ = write!(
+            out,
+            r#"<w:style w:type="character" w:styleId="Quill_Character_{}"><w:name w:val="{}"/><w:rPr>{props}</w:rPr></w:style>"#,
+            i + 1,
+            esc(&style.name)
+        );
     }
     out.push_str("</w:styles>");
     out

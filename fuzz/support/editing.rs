@@ -1,6 +1,8 @@
 use quill_core::notes::AnnotationInfo;
 use quill_core::{CharProps, Document, Position, Selection, StoryId};
 
+#[path = "character_styles.rs"]
+pub mod character_styles;
 #[path = "round_trip.rs"]
 pub(crate) mod round_trip;
 const MAIN: StoryId = StoryId::Main;
@@ -16,7 +18,7 @@ fn position(doc: &Document, a: u8, b: u8) -> Position {
     Position::new(para, offsets[usize::from(b) % offsets.len()])
 }
 
-fn valid(doc: &Document) {
+pub fn valid(doc: &Document) {
     for story in [&doc.main, &doc.notes, &doc.annotations]
         .into_iter()
         .chain(doc.headers.iter())

@@ -1,6 +1,7 @@
 //! Quill's document model and editing engine. No UI, no files: just the
 //! text, its formatting, and every edit the original can make to them.
 
+pub mod character_styles;
 pub mod contents;
 pub mod document;
 pub mod find;

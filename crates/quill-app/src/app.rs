@@ -40,6 +40,8 @@ mod panes;
 #[cfg(target_os = "macos")]
 mod platform;
 #[cfg(target_os = "macos")]
+mod preferences;
+#[cfg(target_os = "macos")]
 mod printing;
 mod revisions;
 mod snapshot;
@@ -463,12 +465,13 @@ impl WinState {
     /// The scroll wheel: lists in a window under the pointer scroll by
     /// rows, otherwise the text scrolls.
     fn horizontal_bar(&self) -> Rect {
-        Rect::new(
-            210.0,
-            self.height - BAR,
-            (self.width - self.right_gutter() - 210.0).max(0.0),
-            BAR,
-        )
+        let end = self.width - self.right_gutter();
+        let start = if self.view.status.is_some() {
+            end
+        } else {
+            210.0
+        };
+        Rect::new(start, self.height - BAR, (end - start).max(0.0), BAR)
     }
 
     fn horizontal_step(&mut self, part: ScrollPart) {
@@ -605,6 +608,7 @@ impl WinState {
                     self.view.align_cells(v, h);
                 }
             }
+            Action::CharacterStyle(id) => self.view.set_character_style(id),
             Action::Style(id) => {
                 // Choosing a paragraph's own style when it has been
                 // reformatted asks whether to redefine the style or put the
@@ -1480,6 +1484,8 @@ pub enum UserEvent {
 }
 
 pub struct App {
+    #[cfg(target_os = "macos")]
+    preferences: Option<preferences::ApplicationPreferences>,
     /// AppKit permits one active print operation per thread. Also reserve
     /// this while its PDF is prepared, so repeated commands cannot queue sheets.
     #[cfg(target_os = "macos")]
@@ -1557,6 +1563,8 @@ impl App {
         proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
         App {
+            #[cfg(target_os = "macos")]
+            preferences: None,
             #[cfg(target_os = "macos")]
             native_print_window: None,
             front: None,
@@ -3470,6 +3478,26 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         };
         #[cfg(target_os = "macos")]
+        if let Some(preferences) = &self.preferences
+            && preferences.is_modal()
+        {
+            let input = matches!(
+                event,
+                WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::Ime(_)
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::Touch(_)
+                    | WindowEvent::DroppedFile(_)
+            );
+            if input || matches!(event, WindowEvent::Focused(true)) {
+                preferences.activate();
+            }
+            if input {
+                return;
+            }
+        }
+        #[cfg(target_os = "macos")]
         if self.windows[i].1.st.modal_dialog_open()
             && let Some(dialog) = &self.windows[i].1.dialog
         {
@@ -3744,6 +3772,82 @@ fn window_icon() -> Option<winit::window::Icon> {
 mod tests {
     use super::*;
     use quill_core::{Position, Selection};
+
+    #[test]
+    fn global_character_style_changes_refresh_inactive_headers_without_copying_old_text_back() {
+        use quill_core::character_styles::CharacterFormat;
+        let mut doc = Document::new();
+        doc.headers[0] = quill_core::text::from_plain_text("Header").main;
+        let format = CharacterFormat::new(
+            quill_core::CharProps {
+                italic: true,
+                ..Default::default()
+            },
+            1 << 3,
+        );
+        let id = doc.add_character_style("Emphasis", format).unwrap();
+        doc.apply_character_style(
+            quill_core::StoryId::Header,
+            Position::new(0, 0),
+            Position::new(0, 6),
+            id,
+        );
+        let mut state = WinState::new(DocView::new(doc, "Test".into()));
+        state.open_pane(quill_core::StoryId::Header);
+        state.focus_main();
+        let format = CharacterFormat::new(
+            quill_core::CharProps {
+                italic: true,
+                color: quill_core::Rgb(0xCC2200),
+                ..Default::default()
+            },
+            (1 << 3) | (1 << 11),
+        );
+        state.view.doc.redefine_character_style(id, format);
+        state.sync_pane();
+        state.focus_pane();
+        assert_eq!(
+            state.view.doc.main.paras[0].chp_of_char(0).color,
+            quill_core::Rgb(0xCC2200)
+        );
+    }
+
+    #[test]
+    fn pasted_character_styles_in_a_header_are_imported_with_their_definitions() {
+        use quill_core::character_styles::CharacterFormat;
+        let mut doc = Document::new();
+        doc.headers[0] = quill_core::text::from_plain_text("Header").main;
+        let mut state = WinState::new(DocView::new(doc, "Test".into()));
+        state.open_pane(quill_core::StoryId::Header);
+        let id = state
+            .view
+            .doc
+            .add_character_style(
+                "Pasted",
+                CharacterFormat::new(
+                    quill_core::CharProps {
+                        italic: true,
+                        ..Default::default()
+                    },
+                    1 << 3,
+                ),
+            )
+            .unwrap();
+        state.view.doc.apply_character_style(
+            quill_core::StoryId::Main,
+            Position::new(0, 0),
+            Position::new(0, 6),
+            id,
+        );
+        state.sync_pane();
+        let main = state.main_view();
+        let id = main.doc.styles.find_character("Pasted").unwrap();
+        assert_eq!(
+            main.doc.headers[0].paras[0].chp_of_char(0).character_style,
+            id
+        );
+        assert!(main.doc.headers[0].paras[0].chp_of_char(0).italic);
+    }
 
     #[test]
     fn a_recovered_window_is_saved_under_its_own_name() {

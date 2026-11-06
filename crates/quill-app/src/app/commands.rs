@@ -54,6 +54,12 @@ impl App {
         #[cfg(target_os = "macos")]
         {
             self.ensure_fonts();
+            if let Some(preferences) = &mut self.preferences {
+                preferences.sync();
+                if preferences.is_closed() {
+                    self.preferences = None;
+                }
+            }
             let (menus, actions) = self.current_menus();
             match &mut self.native {
                 Some(n) => n.sync(&menus, actions),
@@ -107,7 +113,26 @@ impl App {
         {
             return;
         }
+        if self.preferences.as_ref().is_some_and(|p| p.is_modal()) {
+            if let Some(preferences) = &self.preferences {
+                preferences.activate();
+            }
+            return;
+        }
         match (action, front) {
+            (Action::Cmd(Cmd::Preferences), front)
+                if front.is_none() || self.preferences.is_some() =>
+            {
+                if let Some(preferences) = &self.preferences {
+                    preferences.activate();
+                } else {
+                    self.ensure_fonts();
+                    self.preferences = Some(preferences::ApplicationPreferences::new(
+                        &self.font_names,
+                        &self.font_families,
+                    ));
+                }
+            }
             (Action::About, _) => about(),
             (Action::Licenses, _) => licenses(),
             (Action::Recent(index), _) => {

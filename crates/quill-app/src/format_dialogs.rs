@@ -43,6 +43,7 @@ pub enum Which {
     Document,
     Section,
     Style(crate::style_dialog::StyleState),
+    CharacterStyles,
     /// Redefine or reapply a style chosen for a reformatted paragraph.
     Reapply(quill_core::props::StyleId),
     /// The panel showing, and the fonts for the Default Font panel.
@@ -151,6 +152,7 @@ fn draw_note_icon(r: Rect, c: &mut Canvas) {
 /// A checkbox, radio button, popup or field changed.
 pub fn changed(which: &mut Which, d: &mut Dialog, view: &DocView, id: &str) {
     match which {
+        Which::CharacterStyles if id == "list" => crate::character_style_dialog::changed(d, view),
         Which::Style(st) => crate::style_dialog::changed(st, d, view, id),
         Which::Character(_) => character_changed(d, id),
         Which::Border(st) if id == "applyto" => border_dialog::target_changed(st, d, view),
@@ -708,6 +710,7 @@ pub fn summary_info(view: &DocView) -> (Dialog, Which) {
 /// so the dialog can stay open, as the original's does.
 pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
     match which {
+        Which::CharacterStyles => true,
         Which::Style(st) => crate::style_dialog::apply(st, d, view),
         Which::Reapply(id) => crate::style_dialog::reapply_ok(*id, d, view),
         Which::ReplaceFonts(st) => crate::replace_fonts::apply(st, d, view),

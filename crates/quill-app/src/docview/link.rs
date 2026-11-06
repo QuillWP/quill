@@ -52,7 +52,16 @@ impl DocView {
             None
         };
         let color = match (link, within) {
-            (0, None) => quill_core::link::BROWSER_BLUE,
+            (0, None) => self
+                .doc
+                .styles
+                .find_character("Hyperlink")
+                .and_then(|id| self.doc.styles.character(id))
+                .map_or(quill_core::link::BROWSER_BLUE, |s| {
+                    s.format
+                        .resolved(self.doc.styles.get(self.current_pap().style).chp)
+                        .color
+                }),
             (0, Some((_, color))) => color,
             _ => {
                 self.doc.main.paras[start.para]

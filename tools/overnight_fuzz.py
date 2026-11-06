@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Run the overnight fuzzing campaign; retain logs and a live report."""
+import argparse
 import concurrent.futures
 import datetime as dt
 import hashlib
@@ -15,8 +16,20 @@ import time
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = ['docx', 'rtf', 'zip', 'odt', 'html', 'xml', 'images', 'settings', 'glossary', 'merge_data', 'editing']
+TARGETS = ['character_styles', 'native', 'clipboard', 'docx', 'rtf', 'html', 'odt', 'zip', 'xml', 'images', 'settings', 'glossary', 'merge_data', 'editing']
+# Share of the time for the targets that read whole documents; the rest split a quarter.
+DOCUMENT_TARGETS = TARGETS[:7]
 LIMIT = 262144
+
+def budgets(hours):
+    """Seconds per target. Three run at a time, so the campaign has hours * 3 to share."""
+    if hours is None:
+        return {target: 10800 for target in TARGETS}
+    total = hours * 3 * 3600
+    light = [t for t in TARGETS if t not in DOCUMENT_TARGETS]
+    out = {t: int(total * 0.75 / len(DOCUMENT_TARGETS)) for t in DOCUMENT_TARGETS}
+    out.update({t: int(total * 0.25 / len(light)) for t in light})
+    return out
 
 def now():
     return dt.datetime.now().astimezone().isoformat(timespec='seconds')
@@ -41,11 +54,13 @@ def seed():
             try:
                 if path.stat().st_size > LIMIT:
                     continue
-                target = {'.odt':'odt', '.fodt':'odt', '.html':'html', '.htm':'html', '.png':'images', '.jpg':'images', '.jpeg':'images', '.bmp':'images', '.tif':'images', '.tiff':'images'}.get(ext)
+                target = {'.odt':'odt', '.fodt':'odt', '.html':'html', '.htm':'html', '.png':'images', '.jpg':'images', '.jpeg':'images', '.bmp':'images', '.tif':'images', '.tiff':'images', '.qwp':'native'}.get(ext)
                 if target:
                     add(target, path.read_bytes())
                 if ext == '.odt':
                     add('zip', path.read_bytes())
+                if ext in ('.rtf', '.htm', '.html') and 'Clipboard' in str(path):
+                    add('clipboard', bytes([0 if ext == '.rtf' else 1]) + path.read_bytes())
                 if ext == '.docx':
                     with zipfile.ZipFile(path) as archive:
                         for item in archive.infolist():
@@ -59,6 +74,12 @@ def seed():
     # before mutation starts, including Undo/Redo and explicit save checks.
     for action in range(13):
         add('editing', bytes([action, 0, 0, 0, 3, 0]) * 4)
+    # Style programs start by defining a style, so the rest have one to act on.
+    define = bytes([0, 0, 0, 31, 5, 0])
+    for action in range(16):
+        add('character_styles', define + bytes([1, 0, 0, 0, 9, 0]) + bytes([action, 0, 0, 3, 7, 1]) * 3)
+    add('character_styles', define + b''.join(bytes([action, 0, 1, 1, 9, 0])
+                                              for action in [1, 6, 10, 3, 13, 14, 9, 12, 5, 15]))
     add('editing', b''.join(bytes([action, 0, 0, 0, 3, 0])
                              for action in [0, 10, 11, 10, 1, 11, 4, 5, 3, 6, 7, 8, 9, 12]))
     # Valid tiny BMP and uncompressed grayscale TIFF, absent from the source collection.
@@ -68,6 +89,9 @@ def seed():
     return {target: sum(p.is_file() for p in (base / target).iterdir()) for target in TARGETS}
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--hours', type=float, help='share this many hours between the targets; the default is three hours each')
+    seconds = budgets(parser.parse_args().hours)
     run = ROOT / 'fuzz/runs' / dt.datetime.now().strftime('%Y%m%d-%H%M%S')
     run.mkdir(parents=True)
     (ROOT / 'fuzz/runs/latest.txt').write_text(str(run) + '\n')
@@ -76,7 +100,7 @@ def main():
     def report():
         with lock:
             (run / 'status.json').write_text(json.dumps(state, indent=2) + '\n')
-            lines = ['# Quill overnight fuzz report', '', f"Started: {state['started']}", f"Phase: {state['phase']}", '', 'Three hours per target; three concurrent targets, three workers each. AddressSanitizer, debug assertions and overflow checks enabled. Limits: 256 KiB input, 10 seconds per input, 1536 MiB per worker. Failures are retained while testing continues.', '', 'Source snapshot: source.diff and untracked-sources/ (captured before build). Original test documents are read only.', '', '| Target | State | Seconds | New failure files | Latest progress |', '|---|---|---:|---:|---|']
+            lines = ['# Quill overnight fuzz report', '', f"Started: {state['started']}", f"Phase: {state['phase']}", '', f'{round(sum(seconds.values()) / 3 / 3600, 1)} hours in all; three concurrent targets, three workers each. AddressSanitizer, debug assertions and overflow checks enabled. Limits: 256 KiB input, 10 seconds per input, 1536 MiB per worker. Failures are retained while testing continues.', '', 'Source snapshot: source.diff and untracked-sources/ (captured before build). Original test documents are read only.', '', '| Target | State | Seconds | New failure files | Latest progress |', '|---|---|---:|---:|---|']
             for target, info in state['targets'].items():
                 folder = run / target
                 artifacts = sorted((folder / 'artifacts').glob('*')) if folder.exists() else []
@@ -127,7 +151,7 @@ def main():
             artifacts = folder / 'artifacts'
             artifacts.mkdir(parents=True)
             binary = build_dir / 'aarch64-apple-darwin/release' / target
-            args = [str(binary), str(ROOT / 'fuzz/corpus' / target), '-max_total_time=10800', '-fork=3', '-rss_limit_mb=1536', '-timeout=10', '-max_len=262144', '-ignore_crashes=1', '-ignore_timeouts=1', '-ignore_ooms=1', f'-artifact_prefix={artifacts}/']
+            args = [str(binary), str(ROOT / 'fuzz/corpus' / target), f'-max_total_time={seconds[target]}', '-fork=3', '-rss_limit_mb=1536', '-timeout=10', '-max_len=262144', '-ignore_crashes=1', '-ignore_timeouts=1', '-ignore_ooms=1', f'-artifact_prefix={artifacts}/']
             (folder / 'command.json').write_text(json.dumps(args, indent=2))
             info = state['targets'][target]
             info.update(status='running', started=now(), epoch=time.time())
@@ -136,7 +160,7 @@ def main():
                 with (folder / 'fuzzer.log').open('w') as output:
                     process = subprocess.Popen(args, cwd=folder, stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
                     info['pid'] = process.pid
-                    code = process.wait(timeout=11100)
+                    code = process.wait(timeout=seconds[target] + 300)
                 info.update(status='completed' if code == 0 else f'failed (exit {code})', exit_code=code)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)

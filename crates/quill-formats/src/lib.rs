@@ -1,5 +1,6 @@
 //! Reading and writing Quill documents.
 
+mod character_styles;
 mod comments;
 pub mod docx;
 mod export;
@@ -41,14 +42,14 @@ pub enum Format {
     Docx,
     /// Interchange Format (RTF).
     Rtf,
-    /// OpenDocument Text export.
+    /// OpenDocument Text.
     Odt,
-    /// A self-contained HTML document export.
+    /// A self-contained HTML document.
     Html,
     /// Markdown: headings, emphasis, lists, quotes, code, links, tables and
     /// pictures.
     Markdown,
-    /// Text-only export.
+    /// Plain text.
     Text,
 }
 
@@ -63,22 +64,16 @@ impl Format {
         Format::Text,
     ];
 
-    /// Saving in these formats exports a copy and leaves the document as it
-    /// was: plain text, ODT and HTML keep less than a .qwp file does.
-    pub fn export_only(self) -> bool {
-        matches!(self, Format::Odt | Format::Html | Format::Text)
-    }
-
     /// The name the Save As dialog shows.
     pub fn name(self) -> &'static str {
         match self {
             Format::Quill => "Quill Document",
             Format::Docx => "Word Document",
             Format::Rtf => "Interchange Format (RTF)",
-            Format::Odt => "OpenDocument Text (Export)",
-            Format::Html => "HTML Document (Export)",
+            Format::Odt => "OpenDocument Text",
+            Format::Html => "HTML Document",
             Format::Markdown => "Markdown",
-            Format::Text => "Text Only (Export)",
+            Format::Text => "Text Only",
         }
     }
 

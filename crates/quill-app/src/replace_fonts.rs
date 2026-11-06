@@ -5,6 +5,37 @@ use crate::dialog::Dialog;
 use crate::docview::DocView;
 use quill_layout::FontFamilyInfo;
 
+/// Keep the missing names, replace them with the insertion font, or cancel.
+/// The clipboard selection has not changed the document when this is shown.
+pub fn confirm_paste(missing: &[String], replacement: &str) -> Option<bool> {
+    let mut names = missing
+        .iter()
+        .take(10)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if missing.len() > 10 {
+        names.push_str(&format!("\n{} more missing fonts.", missing.len() - 10));
+    }
+    let answer = crate::app::message_box(
+        rfd::MessageLevel::Warning,
+        "Quill",
+        format!(
+            "Some fonts in the pasted text are unavailable.\n\n{names}\n\nKeep Fonts preserves their names and displays substitute fonts. Replace uses {replacement} instead, keeping the other formatting."
+        ),
+        rfd::MessageButtons::YesNoCancelCustom(
+            "Replace".into(),
+            "Keep Fonts".into(),
+            "Cancel".into(),
+        ),
+    );
+    match answer {
+        rfd::MessageDialogResult::Custom(label) if label == "Replace" => Some(true),
+        rfd::MessageDialogResult::Custom(label) if label == "Keep Fonts" => Some(false),
+        _ => None,
+    }
+}
+
 const ROW_IDS: [&str; 10] = [
     "font0", "font1", "font2", "font3", "font4", "font5", "font6", "font7", "font8", "font9",
 ];

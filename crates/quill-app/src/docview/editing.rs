@@ -66,12 +66,22 @@ impl DocView {
         let id = quill_core::link::intern(quill_core::Link::new(&url));
         let sel = self.sel;
         self.doc.begin("Link", sel);
+        let color = self
+            .doc
+            .styles
+            .find_character("Hyperlink")
+            .and_then(|id| self.doc.styles.character(id))
+            .map_or(quill_core::link::BROWSER_BLUE, |s| {
+                s.format
+                    .resolved(self.doc.styles.get(self.current_pap().style).chp)
+                    .color
+            });
         self.doc.set_link(
             MAIN,
             Position::new(end.para, s),
             Position::new(end.para, e),
             id,
-            quill_core::link::BROWSER_BLUE,
+            color,
         );
         self.typing_chp = None;
         self.finish_edit(sel);
@@ -460,6 +470,7 @@ impl DocView {
             UpdateToc => self.update_toc(),
             MakeTocEditable => self.make_toc_editable(),
             StyleDialog => return Effect::Dialog(DialogId::Style),
+            CharacterStylesDialog => return Effect::Dialog(DialogId::CharacterStyles),
             Preferences => return Effect::Dialog(DialogId::Preferences),
             DefaultFont => return Effect::Dialog(DialogId::DefaultFont),
             ToolbarMenu => return Effect::Dialog(DialogId::ToolbarPreferences),
@@ -753,7 +764,14 @@ impl DocView {
                 };
                 let dropped = match &mut content {
                     Clip::Rich(rich) => {
-                        rich.drop_missing_fonts(&font_here, crate::font_names::is_installed)
+                        let Some(dropped) = rich.resolve_missing_fonts(
+                            &font_here,
+                            crate::font_names::is_installed,
+                            crate::replace_fonts::confirm_paste,
+                        ) else {
+                            return Effect::None;
+                        };
+                        dropped
                     }
                     _ => Vec::new(),
                 };
@@ -1002,7 +1020,12 @@ impl DocView {
     pub fn format_chars(&mut self, label: &'static str, f: impl Fn(&mut CharProps)) {
         if self.sel.is_empty() {
             let mut c = self.current_chp();
+            let before = c;
             f(&mut c);
+            if c.character_style != 0 {
+                c.direct_format |=
+                    quill_core::character_styles::CharacterFormat::difference(before, c);
+            }
             self.caret_formats.push(self.typing_chp);
             self.typing_chp = Some(c);
             return;
@@ -1142,6 +1165,44 @@ impl DocView {
             _ => return false,
         }
         true
+    }
+
+    pub fn finish_character_style_edit(&mut self, caret: Option<CharProps>) {
+        self.typing_chp = caret;
+        self.caret_formats.clear();
+        self.finish_edit(self.sel);
+    }
+
+    pub fn set_character_style(&mut self, id: u16) {
+        if id != 0 && self.doc.styles.character(id).is_none() {
+            return;
+        }
+        if self.sel.is_empty() {
+            let base = self.doc.styles.get(self.current_pap().style).chp;
+            let c = self
+                .doc
+                .styles
+                .with_character_style(self.current_chp(), base, id);
+            self.caret_formats.push(self.typing_chp);
+            self.typing_chp = Some(c);
+            return;
+        }
+        self.doc.begin("Character Style", self.sel);
+        match self.cell_block() {
+            Some(block) => {
+                for (a, b) in block.cells() {
+                    let end = Position::new(b, self.doc.main.paras[b].len());
+                    self.doc
+                        .apply_character_style(MAIN, Position::new(a, 0), end, id);
+                }
+            }
+            None => {
+                let (a, b) = self.sel.range();
+                self.doc.apply_character_style(MAIN, a, b, id);
+            }
+        }
+        self.typing_chp = None;
+        self.finish_edit(self.sel);
     }
 
     pub fn set_size(&mut self, half_points: u16) {

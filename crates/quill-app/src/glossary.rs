@@ -139,7 +139,10 @@ fn content(name: &str, view: &mut DocView) -> Option<Fragment> {
             .cloned()
     });
     if let Some(e) = user {
-        return Some(view.doc.import_fragment(&e.frag, &e.fonts, &e.styles));
+        return Some(
+            view.doc
+                .import_fragment_styled(&e.frag, &e.fonts, &e.styles, &e.characters),
+        );
     }
     let std = STANDARD.iter().find(|s| s.eq_ignore_ascii_case(name))?;
     let text = standard_text(std, view);
@@ -340,6 +343,7 @@ pub fn button(st: &mut GlossaryState, d: &mut Dialog, view: &mut DocView, id: &s
             let frag = view.doc.copy(quill_core::StoryId::Main, s, e);
             let entry = Entry {
                 name: name.clone(),
+                characters: view.doc.styles.characters.clone(),
                 frag,
                 fonts: view.doc.fonts.clone(),
                 styles: view
@@ -412,6 +416,7 @@ fn entry(name: &str, text: &str) -> Entry {
         },
         fonts: vec!["Geneva".into()],
         styles: vec!["Normal".into()],
+        characters: Vec::new(),
     }
 }
 
@@ -419,6 +424,60 @@ fn entry(name: &str, text: &str) -> Entry {
 mod tests {
     use super::*;
     use quill_core::Document;
+
+    #[test]
+    fn glossary_serialization_keeps_character_definitions_and_maps_conflicting_names() {
+        use quill_core::character_styles::CharacterFormat;
+        use quill_core::{Position, Selection, StoryId};
+        let mut doc = quill_core::text::from_plain_text("Styled");
+        let id = doc
+            .add_character_style(
+                "Emphasis",
+                CharacterFormat::new(
+                    quill_core::CharProps {
+                        italic: true,
+                        ..Default::default()
+                    },
+                    1 << 3,
+                ),
+            )
+            .unwrap();
+        doc.apply_character_style(StoryId::Main, Position::new(0, 0), Position::new(0, 6), id);
+        let entry = Entry {
+            name: "Example".into(),
+            frag: doc.copy(StoryId::Main, Position::new(0, 0), Position::new(0, 6)),
+            fonts: doc.fonts.clone(),
+            styles: doc.styles.styles.iter().map(|s| s.name.clone()).collect(),
+            characters: doc.styles.characters.clone(),
+        };
+        let back = parse(&serialize(&[entry]));
+        assert_eq!(back[0].characters[0].name, "Emphasis");
+        let mut target = Document::new();
+        target.add_character_style(
+            "Emphasis",
+            CharacterFormat::new(
+                quill_core::CharProps {
+                    bold: true,
+                    ..Default::default()
+                },
+                1 << 2,
+            ),
+        );
+        target.commit(Selection::default());
+        let e = &back[0];
+        let fragment = target.import_fragment_styled(&e.frag, &e.fonts, &e.styles, &e.characters);
+        let c = fragment.paras[0].chp_of_char(0);
+        assert!(c.italic);
+        assert_eq!(
+            target
+                .styles
+                .character(c.character_style)
+                .unwrap()
+                .format
+                .mask,
+            1 << 3
+        );
+    }
 
     #[test]
     fn entries_survive_the_file() {

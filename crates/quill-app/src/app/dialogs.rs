@@ -41,6 +41,10 @@ impl WinState {
         if matches!(id, DialogId::ReviewChanges) {
             self.focus_main();
         }
+        if id == DialogId::CharacterStyles && self.pane.as_ref().is_some_and(|p| p.focused) {
+            self.alert("Define and change character styles in the main document. Existing styles can be applied in this pane.", format_dialogs::Alert::Info);
+            return;
+        }
         self.menu = None;
         self.font_names = env.font_names.to_vec();
         self.font_families = env.font_families.to_vec();
@@ -193,6 +197,10 @@ impl WinState {
                     panel: crate::prefs_dialog::TOOLBAR_PANEL,
                     fonts: env.font_names.to_vec(),
                 },
+            ),
+            DialogId::CharacterStyles => (
+                crate::character_style_dialog::dialog(&self.view),
+                Which::CharacterStyles,
             ),
             DialogId::Style => {
                 let (d, st) = crate::style_dialog::style(&self.view);
@@ -970,6 +978,9 @@ impl WinState {
                     );
                 }
             }
+            Outcome::Apply if matches!(which, Which::CharacterStyles) => {
+                crate::character_style_dialog::button(d, &mut self.view, "apply");
+            }
             Outcome::Apply => {
                 if format_dialogs::apply(which, d, &mut self.view) {
                     // Later changes compare against what is now applied.
@@ -1034,6 +1045,9 @@ impl WinState {
                     let origin = d.origin;
                     *d = crate::prefs_dialog::preferences(*panel, fonts);
                     d.origin = origin;
+                }
+                Which::CharacterStyles => {
+                    crate::character_style_dialog::button(d, &mut self.view, id)
                 }
                 Which::Style(st) if id == "define" => {
                     crate::style_dialog::define(st, d, &mut self.view);

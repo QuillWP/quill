@@ -121,6 +121,8 @@ impl Paragraph {
                 && self.chp_of_char(offset - 1).link == chp.link;
             if !inside {
                 chp.link = 0;
+                chp.character_style = 0;
+                chp.direct_format = 0;
                 chp.color = self.mark_chp.color;
                 chp.underline = self.mark_chp.underline;
             }

@@ -15,9 +15,16 @@ and save for exchanging documents with other programs. Word templates and
 macro files (.dotx, .docm, .dotm, without their macros) and OpenDocument Text
 (.odt, .ott and flat .fodt, as LibreOffice writes them) and HTML pages open.
 
-Save As also offers **OpenDocument Text (.odt)** and **HTML (.html/.htm)** exports.
-These write a copy and keep the editable original open, including its unsaved
-changes. Both open again, but keep a `.qwp` original for editing.
+Every format in **Save As**, including **Text Only (.txt)**, **OpenDocument Text
+(.odt)** and **HTML (.html/.htm)**, becomes the active document after saving.
+The title changes to the new filename, and subsequent Save commands write to that
+file. The previous file keeps its last saved contents. Closing without further
+edits does not ask to save the previous file.
+
+Text Only, ODT and HTML show a warning before Save As: they cannot keep every
+feature of a `.qwp` document. You can cancel before the file is written. Richer
+features remain on screen for the current session, but reopening restores only
+what the chosen format saved. Save a `.qwp` copy first when those features matter.
 HTML is one self-contained UTF-8 file with embedded images and CSS: named document
 styles become numbered CSS classes (with their original names recorded on paragraphs),
 and direct font, size, color, bold, italic, underline, and other character formatting
@@ -66,7 +73,7 @@ styles, tables, pictures and frames, sections and columns, footnotes,
 headers and footers, Outline view, tables of contents and indexes,
 spelling, hyphenation and the thesaurus, Find and Replace, Print Merge,
 annotations, tracked changes, the Commands dialog and a customizable toolbar,
-saving .qwp, .docx, RTF, text and PDF, opening ODT and HTML, plus ODT and HTML exports.
+saving .qwp, .docx, RTF, text and PDF, opening and saving ODT and HTML.
 
 ## Tracked changes
 
@@ -202,6 +209,33 @@ A new table has real borders that print, thin and black unless `table_border_col
 the table keeps its borders, and Format > Border changes them. Gridlines are a separate screen
 guide for cells with no border, as in tables from other programs, and have their own
 `table_gridline_color` and `table_gridline_dotted`.
+
+Character styles are available through a temporary **Character Styles** menu. To make
+one, format and select some text, choose **Manage Character Styles...**, enter a name
+and press **Define New**. Select other text and choose that style from the menu, or
+choose it at the caret before typing. The style stores differences from the paragraph's
+character defaults, so an emphasis style can inherit the paragraph's font and size.
+Bold, italic and similar flags follow DOCX character-style toggle rules.
+
+To change a style, format an example, select it, choose the style in the manager and
+press **Redefine**. Direct overrides on other text stay in place. **Rename** changes
+only its name. **None** or **Remove** takes off the named layer; **Delete Style** removes
+the definition and leaves its text looking as it does now. These changes support Undo.
+Manage definitions in the main document; existing styles can be applied in editing panes.
+Redefinition updates notes, comments and section headers as well as the main text.
+
+The first link creates a **Hyperlink** style for its normal color and underline.
+Later links default to that style; choosing a different color in the link dialog makes
+an explicit override for that link. Hover and visited colors remain properties of each
+link. Native files preserve the full named-style model in format 1.7. DOCX and RTF use
+named character styles; HTML and ODT exports also carry Quill metadata for editable
+round trips. Other programs may discard that metadata. Existing foreign ODT character
+styles still import as direct formatting with a warning; imported style inheritance is
+resolved when read rather than kept as a live parent relationship. Older app versions
+can open the native files as direct formatting but lose named-style identity when
+saving them. Final integration
+with the paragraph-style interface is deferred while this menu is evaluated.
+
 
 Format > Border also offers solid shading colors for paragraphs and, with Apply To:
 Cells, table cells. Imported solid RGB fills appear by name or as `#RRGGBB` and stay

@@ -147,6 +147,10 @@ impl SectionProps {
 
 impl CharProps {
     pub fn keep_in_bounds(&mut self) {
+        self.direct_format &= crate::character_styles::CharacterFormat::ALL;
+        if self.character_style == 0 {
+            self.direct_format = 0;
+        }
         self.size = self.size.clamp(MIN_SIZE, MAX_SIZE);
         self.position = length(self.position);
         self.spacing = length(self.spacing);
@@ -296,6 +300,10 @@ impl Document {
         self.props.keep_in_bounds();
         self.section.keep_in_bounds();
         self.fonts.iter_mut().for_each(clip_name);
+        for s in &mut self.styles.characters {
+            clip_name(&mut s.name);
+            s.format = crate::character_styles::CharacterFormat::new(s.format.props, s.format.mask);
+        }
         for s in &mut self.styles.styles {
             clip_name(&mut s.name);
             s.pap.keep_in_bounds();

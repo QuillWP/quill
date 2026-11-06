@@ -204,7 +204,7 @@ impl WinState {
         // settings meanwhile; bring the pane's copy up to date.
         self.view.doc.header_section = p.section;
         let main = &self.view.doc;
-        if p.other.doc.fonts != main.fonts {
+        if p.other.doc.fonts != main.fonts || p.other.doc.styles != main.styles {
             let pd = &mut p.other.doc;
             pd.fonts = main.fonts.clone();
             pd.main = main.story(p.story).clone();
@@ -242,17 +242,20 @@ impl WinState {
         let story = p.story;
         let section = p.section;
         let focused = p.focused;
-        // While the main text has the keyboard, notes it adds or removes
-        // show up in the footnote pane.
-        if !focused
-            && matches!(
-                story,
-                quill_core::StoryId::Notes | quill_core::StoryId::Annotations
-            )
-        {
-            let notes = view.doc.story(story);
-            if p.other.doc.main != *notes {
-                p.other.doc.main = notes.clone();
+        // An inactive pane follows the main document, including global style
+        // changes to header text. It must not copy an older version back.
+        if !focused {
+            view.doc.header_section = section;
+            let story = view.doc.story(story);
+            if p.other.doc.main != *story
+                || p.other.doc.styles != view.doc.styles
+                || p.other.doc.fonts != view.doc.fonts
+                || p.other.doc.objects != view.doc.objects
+            {
+                p.other.doc.main = story.clone();
+                p.other.doc.fonts = view.doc.fonts.clone();
+                p.other.doc.styles = view.doc.styles.clone();
+                p.other.doc.objects = view.doc.objects.clone();
                 p.other.doc.note_marks = view.doc.note_marks.clone();
                 p.other.doc.annotation_info = view.doc.annotation_info.clone();
                 p.other.doc.forget_history();
@@ -271,9 +274,10 @@ impl WinState {
             && main_v.doc.objects == pane_v.doc.objects
             && main_v.doc.story(story) == &pane_v.doc.main;
         if !identical {
-            main_v.doc.import_story(
+            main_v.doc.import_styled_story(
                 story,
                 &pane_v.doc.main,
+                &pane_v.doc.styles,
                 &pane_v.doc.fonts,
                 &pane_v.doc.objects,
             );

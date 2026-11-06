@@ -56,6 +56,8 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
         stamps: HashSet::new(),
         styles: HashMap::new(),
         char_styles: HashMap::new(),
+        character_ids: HashMap::new(),
+        rpr_depth: 0,
         theme: Theme::default(),
         numbering: Numbering::default(),
         counters: HashMap::new(),
@@ -648,6 +650,8 @@ struct Reader {
     styles: HashMap<String, StyleId>,
     /// Character styles: id -> their rPr, resolved through basedOn.
     char_styles: HashMap<String, Vec<Element>>,
+    character_ids: HashMap<String, u16>,
+    rpr_depth: u8,
     theme: Theme,
     numbering: Numbering,
     /// Running list counters per (list, level); see `Numbering::counters`.
@@ -958,6 +962,11 @@ impl Reader {
     }
 
     fn apply_rpr(&mut self, e: &Element, c: &mut CharProps) {
+        if self.rpr_depth >= 20 {
+            self.report.note(notes::CHARACTER_STYLES);
+            return;
+        }
+        self.rpr_depth += 1;
         if let Some(st) = e.child("rStyle").and_then(|s| s.attr("val"))
             && let Some(layers) = self.char_styles.get(st).cloned()
         {
@@ -988,6 +997,11 @@ impl Reader {
             styled.shadow ^= under.shadow;
             styled.hidden ^= under.hidden;
             *c = styled;
+            c.character_style = self.character_ids.get(st).copied().unwrap_or(0);
+            c.direct_format = 0;
+        }
+        if c.character_style != 0 {
+            c.direct_format |= character_mask(e);
         }
         let mut superscript = None;
         for p in e.elements() {
@@ -1046,6 +1060,7 @@ impl Reader {
             Some("baseline") => c.position = 0,
             _ => {}
         }
+        self.rpr_depth -= 1;
     }
 
     /// Apply a pPr element on top of `p` (pStyle is handled by the caller).
@@ -1232,6 +1247,25 @@ impl Reader {
                 depth += 1;
             }
             self.char_styles.insert(id.clone(), layers);
+        }
+        let mut character_names: Vec<_> = char_raw.keys().cloned().collect();
+        character_names.sort();
+        // Keep a real definition as well as the XML layers used to resolve runs.
+        for xml_id in character_names {
+            let layers = self.char_styles[&xml_id].clone();
+            let mut props = CharProps::default();
+            let mut mask = 0;
+            for layer in &layers {
+                self.apply_rpr(layer, &mut props);
+                mask |= character_mask(layer);
+            }
+            let format = quill_core::character_styles::CharacterFormat::new(props, mask);
+            let name = &char_raw[&xml_id].name;
+            if let Some(id) = self.doc.styles.add_character(name, format) {
+                self.character_ids.insert(xml_id, id);
+            } else {
+                self.report.note(notes::CHARACTER_STYLES);
+            }
         }
         // Resolve each paragraph style through its basedOn chain.
         let mut resolved: HashMap<String, (ParaProps, CharProps)> = HashMap::new();
@@ -3146,6 +3180,35 @@ fn read_borders(e: &Element, was: &Borders) -> Borders {
     }
 }
 
+fn character_mask(e: &Element) -> u16 {
+    e.elements().fold(0, |mask, p| {
+        mask | match p.name.as_str() {
+            "rFonts"
+                if ["ascii", "hAnsi", "asciiTheme", "hAnsiTheme"]
+                    .iter()
+                    .any(|a| p.attr(a).is_some()) =>
+            {
+                1
+            }
+            "sz" => 1 << 1,
+            "b" => 1 << 2,
+            "i" => 1 << 3,
+            "u" => 1 << 4,
+            "strike" | "dstrike" => 1 << 5,
+            "outline" => 1 << 6,
+            "shadow" => 1 << 7,
+            "smallCaps" => 1 << 8,
+            "caps" => 1 << 9,
+            "vanish" => 1 << 10,
+            "color" => 1 << 11,
+            "position" => 1 << 12,
+            "spacing" => 1 << 13,
+            "vertAlign" => (1 << 1) | (1 << 12),
+            _ => 0,
+        }
+    })
+}
+
 /// Solid backgrounds stay RGB; patterns use a legacy gray approximation.
 fn read_shading(e: &Element, report: &mut ImportReport) -> (u16, Option<Rgb>) {
     let val = e.attr("val").unwrap_or("clear");
@@ -3278,6 +3341,45 @@ mod tests {
         let mut zip = crate::zip::Writer::new(0);
         zip.add("word/document.xml", xml.as_bytes());
         zip.finish()
+    }
+
+    #[test]
+    fn other_script_hints_in_character_styles_do_not_freeze_latin_font_and_size() {
+        let mut zip = crate::zip::Writer::new(0);
+        zip.add("word/document.xml", br#"<w:document xmlns:w="w"><w:body><w:p><w:r><w:rPr><w:rStyle w:val="OtherScript"/></w:rPr><w:t>Latin</w:t></w:r></w:p></w:body></w:document>"#);
+        zip.add("word/styles.xml", br#"<w:styles xmlns:w="w"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:rFonts w:ascii="Georgia"/><w:sz w:val="42"/></w:rPr></w:style><w:style w:type="character" w:styleId="OtherScript"><w:name w:val="Other Script"/><w:rPr><w:rFonts w:eastAsia="MS Mincho" w:cs="Arial"/><w:szCs w:val="40"/></w:rPr></w:style></w:styles>"#);
+        let mut doc = read(&zip.finish()).unwrap();
+        let id = doc.styles.find_character("Other Script").unwrap();
+        assert_eq!(doc.styles.character(id).unwrap().format.mask & 3, 0);
+        let normal = doc.styles.get(0).clone();
+        let font = doc.font_id("Helvetica");
+        doc.redefine_style(
+            StoryId::Main,
+            0,
+            normal.pap,
+            CharProps {
+                font,
+                size: 36,
+                ..normal.chp
+            },
+        );
+        assert_eq!(
+            (
+                doc.main.paras[0].chp_of_char(0).font,
+                doc.main.paras[0].chp_of_char(0).size
+            ),
+            (font, 36)
+        );
+    }
+
+    #[test]
+    fn recursive_character_style_properties_are_bounded() {
+        let mut zip = crate::zip::Writer::new(0);
+        zip.add("word/document.xml", br#"<w:document xmlns:w="w"><w:body><w:p><w:r><w:rPr><w:rStyle w:val="Loop"/></w:rPr><w:t>kept</w:t></w:r></w:p></w:body></w:document>"#);
+        zip.add("word/styles.xml", br#"<w:styles xmlns:w="w"><w:style w:type="character" w:styleId="Loop"><w:name w:val="Loop"/><w:rPr><w:rStyle w:val="Loop"/><w:b/></w:rPr></w:style></w:styles>"#);
+        let (doc, report) = read_reported(&zip.finish()).unwrap();
+        assert_eq!(doc.main.paras[0].text, "kept");
+        assert!(report.notes().contains(&notes::CHARACTER_STYLES));
     }
 
     #[test]

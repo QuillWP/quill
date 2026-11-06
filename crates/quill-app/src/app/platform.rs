@@ -63,6 +63,13 @@ impl App {
         id: &'static str,
         choice: Option<(usize, bool, bool)>,
     ) {
+        if let Some(preferences) = &mut self.preferences
+            && preferences.owns(panel)
+        {
+            let clip = self.clipboard.get_or_insert_with(Clipboard::new);
+            preferences.action(id, choice, clip);
+            return;
+        }
         let Some(i) = self.windows.iter().position(|(_, w)| {
             w.dialog
                 .as_ref()

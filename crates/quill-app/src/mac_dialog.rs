@@ -623,6 +623,13 @@ impl NativeDialog {
         Retained::as_ptr(&self.panel) as usize
     }
 
+    pub fn activate(&self) {
+        let panel = Retained::as_ptr(&self.panel) as *mut AnyObject;
+        unsafe {
+            let _: () = msg_send![panel, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+        }
+    }
+
     pub fn activate_find(&self) {
         if self.title != "Find" {
             return;
@@ -736,9 +743,6 @@ impl NativeDialog {
     }
 
     pub fn show(window: &Window, depth: usize, dialog: &Dialog) -> Option<Self> {
-        if !supported(dialog) {
-            return None;
-        }
         let handle = window.window_handle().ok()?.as_raw();
         let RawWindowHandle::AppKit(handle) = handle else {
             return None;
@@ -746,6 +750,18 @@ impl NativeDialog {
         let view = handle.ns_view.as_ptr().cast::<AnyObject>();
         let parent: *mut AnyObject = unsafe { msg_send![view, window] };
         if parent.is_null() {
+            return None;
+        }
+        Self::show_with_parent(parent, depth, dialog)
+    }
+
+    /// Application settings do not need a document window as their parent.
+    pub fn show_standalone(depth: usize, dialog: &Dialog) -> Option<Self> {
+        Self::show_with_parent(std::ptr::null_mut(), depth, dialog)
+    }
+
+    fn show_with_parent(parent: *mut AnyObject, depth: usize, dialog: &Dialog) -> Option<Self> {
+        if !supported(dialog) {
             return None;
         }
 
@@ -833,7 +849,10 @@ impl NativeDialog {
                     makeFirstResponder: Retained::as_ptr(&control.object)
                 ];
             }
-            if dialog.title == "Find" && dialog.items.iter().any(|i| i.id == "mode") {
+            if !parent.is_null()
+                && dialog.title == "Find"
+                && dialog.items.iter().any(|i| i.id == "mode")
+            {
                 let parent_frame: NSRect = msg_send![parent, frame];
                 let frame: NSRect = msg_send![panel_ptr, frame];
                 let origin = NSPoint::new(
@@ -851,7 +870,9 @@ impl NativeDialog {
             } else {
                 // Keep a modal panel attached to its document while letting
                 // winit's event loop continue to drive both windows.
-                let _: () = msg_send![parent, addChildWindow: panel_ptr ordered: 1isize];
+                if !parent.is_null() {
+                    let _: () = msg_send![parent, addChildWindow: panel_ptr ordered: 1isize];
+                }
                 let _: () =
                     msg_send![panel_ptr, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
                 let _: () = msg_send![panel_ptr, makeKeyWindow];
@@ -930,7 +951,9 @@ impl NativeDialog {
             let _: () = msg_send![alert_ptr, layout];
             let _: () = msg_send![panel_ptr, setDelegate: delegate];
             let _: () = msg_send![panel_ptr, setReleasedWhenClosed: false];
-            let _: () = msg_send![parent, addChildWindow: panel_ptr ordered: 1isize];
+            if !parent.is_null() {
+                let _: () = msg_send![parent, addChildWindow: panel_ptr ordered: 1isize];
+            }
             let _: () = msg_send![panel_ptr, center];
             let _: () = msg_send![panel_ptr, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
         }
@@ -1301,10 +1324,15 @@ impl Drop for NativeDialog {
             if self.modeless {
                 let _: () = msg_send![panel, orderOut: std::ptr::null::<AnyObject>()];
             } else {
-                let _: () = msg_send![self.parent, removeChildWindow: panel];
+                if !self.parent.is_null() {
+                    let _: () = msg_send![self.parent, removeChildWindow: panel];
+                }
                 let _: () = msg_send![panel, orderOut: std::ptr::null::<AnyObject>()];
             }
-            let _: () = msg_send![self.parent, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+            if !self.parent.is_null() {
+                let _: () =
+                    msg_send![self.parent, makeKeyAndOrderFront: std::ptr::null::<AnyObject>()];
+            }
         }
     }
 }

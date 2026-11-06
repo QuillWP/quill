@@ -70,6 +70,9 @@ pub fn draw_scroll(
     enabled: bool,
     pressed: Option<ScrollPart>,
 ) {
+    if r.w <= 0.0 || r.h <= 0.0 {
+        return;
+    }
     c.fill(r, TRACK);
     let (a, b) = if vertical {
         (
@@ -129,7 +132,7 @@ pub const EDGE: u32 = 0xD0D0D0;
 
 /// The bar under the text: page number box, style name box, then the
 /// horizontal scroll bar, and the grow box in the corner. A `message` takes
-/// the place of both boxes, which are too narrow for one.
+/// the place of the boxes and scroll bar, so its explanation stays visible.
 pub fn draw_status(
     c: &mut Canvas,
     label: &mut Label,
@@ -172,7 +175,11 @@ pub fn draw_status(
             EDGE,
         );
     }
-    Rect::new(r.x + page_w + style_w, r.y, r.w - page_w - style_w, BAR)
+    if message.is_some() {
+        Rect::new(r.right(), r.y, 0.0, BAR)
+    } else {
+        Rect::new(r.x + page_w + style_w, r.y, r.w - page_w - style_w, BAR)
+    }
 }
 
 /// A tooltip with `text`, below and right of the pointer at (`x`, `y`),

@@ -154,6 +154,10 @@ struct Reader {
     color: (u8, u8, u8),
     /// Style being defined in the style sheet.
     style_num: i32,
+    style_character: bool,
+    character_mask: u16,
+    character_ids: HashMap<i32, u16>,
+    character_raw: HashMap<i32, (Option<i32>, quill_core::character_styles::CharacterFormat)>,
     style_based: Option<i32>,
     style_next: Option<i32>,
     style_name: String,
@@ -328,6 +332,10 @@ fn read_into(data: &[u8], report: &mut ImportReport) -> Result<Document, String>
         colors: Vec::new(),
         color: (0, 0, 0),
         style_num: 0,
+        style_character: false,
+        character_mask: 0,
+        character_ids: HashMap::new(),
+        character_raw: HashMap::new(),
         style_based: None,
         style_next: None,
         style_name: String::new(),
@@ -966,6 +974,18 @@ impl Reader {
                 }
                 let name = self.style_name.trim().to_string();
                 self.style_name.clear();
+                if self.style_character {
+                    let format = quill_core::character_styles::CharacterFormat::new(
+                        self.st.chp,
+                        self.character_mask,
+                    );
+                    if let Some(id) = self.doc.styles.add_character(&name, format) {
+                        self.character_ids.insert(self.style_num, id);
+                        self.character_raw
+                            .insert(self.style_num, (self.style_based, format));
+                    }
+                    return;
+                }
                 let mut pap = self.style_pap.clone();
                 let chp = self.st.chp;
                 let id = match self.doc.styles.find(&name) {
@@ -1077,6 +1097,8 @@ impl Reader {
 
     fn begin_style(&mut self) {
         self.style_num = 0;
+        self.style_character = false;
+        self.character_mask = 0;
         self.style_based = None;
         self.style_next = None;
         self.style_name.clear();
@@ -1210,6 +1232,12 @@ impl Reader {
             };
             self.math.push((self.stack.len(), root));
             return;
+        }
+        let character_mask = rtf_character_mask(w);
+        if self.st.dest == Dest::StyleSheet {
+            self.character_mask |= character_mask;
+        } else if self.st.chp.character_style != 0 {
+            self.st.chp.direct_format |= character_mask;
         }
         // Destinations first.
         match w {
@@ -1775,15 +1803,49 @@ impl Reader {
             "expnd" => self.st.chp.spacing = v * 5,
             // Paragraph formatting.
             "pard" => {
-                self.pap = ParaProps::default();
+                // Word omits properties inherited from Normal, including
+                // the space after a paragraph in a table cell.
+                let normal = self.styles.get(&0).copied();
+                *self.pap_mut() = normal
+                    .map_or_else(ParaProps::default, |id| self.doc.styles.get(id).pap.clone());
                 self.st.tab_align = TabAlign::Left;
                 self.st.tab_leader = TabLeader::None;
+            }
+            "quillchardirect" => {
+                self.st.chp.direct_format =
+                    (v as u16) & quill_core::character_styles::CharacterFormat::ALL
+            }
+            "cs" if self.st.dest == Dest::StyleSheet => {
+                self.style_character = true;
+                self.style_num = v;
+            }
+            "cs" => {
+                if let Some(id) = self.character_ids.get(&v).copied() {
+                    let format = self.resolve_character(v);
+                    self.doc.styles.characters[id as usize - 1].format = format;
+                    let base = self.doc.styles.get(self.pap.style).chp;
+                    // The named style is a fresh layer over this paragraph.
+                    let metadata = self.st.chp;
+                    self.st.chp = format.resolved(base);
+                    self.st.chp.object = metadata.object;
+                    self.st.chp.link = metadata.link;
+                    self.st.chp.comment = metadata.comment;
+                    self.st.chp.rev = metadata.rev;
+                    self.st.chp.character_style = id;
+                } else {
+                    self.st.chp.character_style = 0;
+                    self.st.chp.direct_format = 0;
+                }
             }
             "s" => {
                 if self.st.dest == Dest::StyleSheet {
                     self.style_num = v;
                 } else {
-                    self.pap.style = self.styles.get(&v).copied().unwrap_or(0);
+                    let level = self.pap.level();
+                    let id = self.styles.get(&v).copied().unwrap_or(0);
+                    self.pap = self.doc.styles.get(id).pap.clone();
+                    self.pap.style = id;
+                    self.pap.set_level(level);
                 }
             }
             "sbasedon" => self.style_based = Some(v),
@@ -1912,6 +1974,28 @@ impl Reader {
         }
     }
 
+    fn resolve_character(&self, number: i32) -> quill_core::character_styles::CharacterFormat {
+        use quill_core::character_styles::CharacterFormat;
+        let mut layers = Vec::new();
+        let mut next = Some(number);
+        while let Some(n) = next {
+            if layers.len() >= 20 {
+                break;
+            }
+            let Some((base, format)) = self.character_raw.get(&n) else {
+                break;
+            };
+            layers.push(*format);
+            next = *base;
+        }
+        let mut out = CharacterFormat::default();
+        for layer in layers.into_iter().rev() {
+            CharacterFormat::copy_fields(&mut out.props, layer.props, layer.mask);
+            out.mask |= layer.mask;
+        }
+        CharacterFormat::new(out.props, out.mask)
+    }
+
     fn finish(mut self) -> Result<Document, String> {
         if let Some(error) = self.error {
             return Err(error.into());
@@ -1930,6 +2014,9 @@ impl Reader {
             self.doc.headers = (*headers).clone();
         }
         self.doc.section = self.sec.clone();
+        for (&number, &id) in &self.character_ids {
+            self.doc.styles.characters[id as usize - 1].format = self.resolve_character(number);
+        }
         for (id, based, next) in std::mem::take(&mut self.pending_style) {
             let based = based.and_then(|b| self.styles.get(&b).copied());
             let next = next.and_then(|n| self.styles.get(&n).copied());
@@ -2007,10 +2094,30 @@ fn undttm(v: i32) -> String {
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:00Z")
 }
 
+fn rtf_character_mask(word: &str) -> u16 {
+    match word {
+        "f" => 1,
+        "fs" => 2,
+        "b" => 1 << 2,
+        "i" => 1 << 3,
+        "ul" | "ulnone" | "ulw" | "uldb" | "uld" => 1 << 4,
+        "strike" | "striked" => 1 << 5,
+        "outl" => 1 << 6,
+        "shad" => 1 << 7,
+        "scaps" => 1 << 8,
+        "caps" => 1 << 9,
+        "v" => 1 << 10,
+        "cf" => 1 << 11,
+        "up" | "dn" | "super" | "sub" | "nosupersub" => 1 << 12,
+        "expnd" | "expndtw" => 1 << 13,
+        _ => 0,
+    }
+}
+
 fn known_destination(word: &str) -> bool {
     matches!(
         word,
-        "atrfstart"
+        "cs" | "atrfstart"
             | "atrfend"
             | "atnref"
             | "quillatnparent"
@@ -2050,11 +2157,28 @@ fn parse_border_style(n: i32) -> Option<BorderStyle> {
     })
 }
 
+#[derive(Default)]
+struct Padding {
+    sides: [Option<i32>; 2],
+    units: [i32; 2],
+}
+
+impl Padding {
+    fn side(&self, side: usize) -> Option<i32> {
+        (self.units[side] == 3)
+            .then_some(self.sides[side])
+            .flatten()
+    }
+}
+
 /// A row as the standard RTF words define it: settings for the row, then
 /// each cell's settings followed by its right edge in `\cellx`.
 #[derive(Default)]
 struct StdRow {
     gap: i32,
+    padding: Padding,
+    cell_padding: Padding,
+    widest_padding: Option<i32>,
     left: i32,
     height: RowHeight,
     align: Align,
@@ -2095,7 +2219,16 @@ impl StdRow {
             return true;
         }
         match w {
-            "trgaph" => self.gap = v.clamp(0, 2000),
+            // RTF stores the half-gap; the model stores both sides.
+            "trgaph" => self.gap = v.clamp(0, 1000) * 2,
+            "trpaddl" => self.padding.sides[0] = Some(v.clamp(0, 1000)),
+            "trpaddr" => self.padding.sides[1] = Some(v.clamp(0, 1000)),
+            "trpaddfl" => self.padding.units[0] = v,
+            "trpaddfr" => self.padding.units[1] = v,
+            "clpadl" => self.cell_padding.sides[0] = Some(v.clamp(0, 1000)),
+            "clpadr" => self.cell_padding.sides[1] = Some(v.clamp(0, 1000)),
+            "clpadfl" => self.cell_padding.units[0] = v,
+            "clpadfr" => self.cell_padding.units[1] = v,
             "trleft" => {
                 self.left = v;
                 self.edge = v;
@@ -2121,12 +2254,25 @@ impl StdRow {
             "clshdng" => self.cell.shading = (v / 10).clamp(0, 1000) as u16,
             "cellx" => {
                 if self.cells.len() < MAX_TABLE_ENTRIES {
+                    // The model has one symmetric inset for the whole row.
+                    // Keep enough room for either side of every cell.
+                    let inset = (0..2)
+                        .map(|side| {
+                            self.cell_padding
+                                .side(side)
+                                .or_else(|| self.padding.side(side))
+                                .unwrap_or(self.gap / 2)
+                        })
+                        .max()
+                        .unwrap_or(0);
+                    self.widest_padding = Some(self.widest_padding.unwrap_or(0).max(inset));
                     let mut cell = std::mem::take(&mut self.cell);
                     cell.width = (v - self.edge).max(144);
                     self.cells.push(cell);
                 }
                 self.edge = v;
                 self.border = None;
+                self.cell_padding = Padding::default();
             }
             _ => return false,
         }
@@ -2151,10 +2297,11 @@ impl StdRow {
         if done.cells.is_empty() {
             return None;
         }
+        let gap = done.widest_padding.map_or(done.gap, |inset| inset * 2);
         Some(RowProps {
             cells: done.cells,
-            gap: done.gap,
-            indent: done.left + done.gap / 2,
+            gap,
+            indent: done.left + gap / 2,
             height: done.height,
             align: done.align,
         })
@@ -2357,8 +2504,8 @@ mod tests {
         let p = quill_core::table::row_props(&doc.main.paras, &row, 9000);
         assert_eq!(p.cells.len(), 2);
         assert_eq!((p.cells[0].width, p.cells[1].width), (3108, 4000));
-        assert_eq!(p.gap, 108);
-        assert_eq!(p.indent, -54);
+        assert_eq!(p.gap, 216);
+        assert_eq!(p.indent, 0);
         assert_eq!(p.cells[0].valign, VAlign::Center);
         assert_eq!(p.cells[1].valign, VAlign::Bottom);
         assert_eq!(p.cells[0].borders.top.style, BorderStyle::Single);

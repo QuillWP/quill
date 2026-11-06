@@ -17,6 +17,8 @@ pub const INDENTS: &str = "Indents, other than those of lists and quotes";
 pub const TABS: &str = "Custom tab stops";
 pub const BORDERS: &str = "Paragraph borders and shading";
 pub const FRAMES: &str = "Frames, text boxes and drop caps";
+pub const CHARACTER_STYLES: &str =
+    "Named character styles (their visible emphasis is kept where supported)";
 pub const STYLES: &str = "Custom paragraph styles (headings 1 to 6 are kept)";
 pub const BREAKS: &str = "Page and section breaks, and other pagination settings";
 pub const PAGE: &str = "Page size, margins, columns, page numbering and line numbers";
@@ -45,6 +47,9 @@ fn blank(story: &quill_core::Story) -> bool {
 /// the warning lists them.
 pub fn losses(doc: &Document) -> Vec<&'static str> {
     let mut found = Vec::new();
+    if !doc.styles.characters.is_empty() {
+        note(&mut found, CHARACTER_STYLES);
+    }
     if doc.has_changes() {
         note(&mut found, CHANGES);
     }

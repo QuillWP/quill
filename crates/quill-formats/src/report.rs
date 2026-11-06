@@ -31,6 +31,8 @@ impl ImportReport {
 pub const TRACKED_CHANGES: &str = "Tracked changes were accepted; their history was not kept.";
 pub const FORMAT_CHANGES: &str = "Tracked changes to paragraph, table and section formatting were \
      accepted; Quill keeps tracked insertions, deletions and character formatting.";
+pub const CHARACTER_STYLES: &str =
+    "Some character styles could not be kept as editable named styles.";
 pub const SHADING_COLORS: &str = "Some shading colors became gray patterns.";
 pub const NUMBERING: &str =
     "Automatic numbering and bullets were kept as typed text and will not renumber.";

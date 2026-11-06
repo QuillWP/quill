@@ -60,6 +60,10 @@ pub const WORD_COLORS: [(&str, Rgb); 8] = [
 /// directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CharProps {
+    /// Named character style, numbered from one; zero means none.
+    pub character_style: u16,
+    /// Direct formatting fields that override the named layer.
+    pub direct_format: u16,
     pub font: FontId,
     /// Size in half-points: 24 is 12 pt.
     pub size: u16,
@@ -95,6 +99,8 @@ pub struct CharProps {
 impl Default for CharProps {
     fn default() -> Self {
         CharProps {
+            character_style: 0,
+            direct_format: 0,
             font: 0,
             size: 24,
             bold: false,

@@ -51,7 +51,8 @@ const MAJOR: u16 = 1;
 /// 1.1: sections' own headers and footers. 1.2: bounded picture previews.
 /// 1.3: hyperlinks. 1.4: tracked changes, and comments' ranges, replies and
 /// resolved state. 1.5: live tables of contents. 1.6: solid shading colors.
-const MINOR: u16 = 6;
+/// 1.7: named character styles and direct-format masks.
+const MINOR: u16 = 7;
 
 /// Whether `bytes` is a `.qwp` file rather than some other ZIP (.docx).
 pub fn is_quill(bytes: &[u8]) -> bool {
@@ -156,6 +157,13 @@ pub fn write(doc: &Document, secs: u64) -> Vec<u8> {
     for s in &doc.styles.styles {
         o.nest(2, |o| style(o, s));
     }
+    for s in &doc.styles.characters {
+        o.nest(13, |o| {
+            o.text(1, &s.name);
+            o.uint(2, s.format.mask as u64);
+            o.nest(3, |o| chp(o, &s.format.props));
+        });
+    }
     o.nest(3, |o| document_props(o, &doc.props));
     o.nest(4, |o| section(o, &doc.section));
     o.nest(5, |o| summary(o, &doc.summary));
@@ -231,6 +239,8 @@ pub fn write(doc: &Document, secs: u64) -> Vec<u8> {
 
 fn chp(o: &mut Out, c: &CharProps) {
     let CharProps {
+        character_style,
+        direct_format,
         font,
         size,
         bold,
@@ -250,6 +260,10 @@ fn chp(o: &mut Out, c: &CharProps) {
         rev,
         comment,
     } = *c;
+    if character_style != 0 {
+        o.uint(19, character_style as u64);
+        o.uint(20, direct_format as u64);
+    }
     o.uint(1, font as u64);
     o.uint(2, size as u64);
     o.flag(3, bold);
@@ -907,6 +921,8 @@ fn read_chp_in(b: &[u8], tracked: bool) -> Result<CharProps, Damaged> {
             16 => c.link = read_link(f)?,
             17 if tracked => c.rev = read_revision(f)?,
             18 => c.comment = u32_of(f)?,
+            19 => c.character_style = u16_of(f)?,
+            20 => c.direct_format = u16_of(f)? & quill_core::character_styles::CharacterFormat::ALL,
             _ => {}
         }
     }
@@ -1413,6 +1429,27 @@ fn read_body(b: &[u8], z: &zip::Archive) -> Result<Document, Damaged> {
         match tag {
             1 => fonts.push(text(f)),
             2 => styles.push(read_style(f)?),
+            13 => {
+                let (mut name, mut mask, mut props) = (String::new(), 0, CharProps::default());
+                for (tag, f) in fields(f)? {
+                    match tag {
+                        1 => name = text(f),
+                        2 => mask = u16_of(f)?,
+                        3 => props = read_chp(f)?,
+                        _ => {}
+                    }
+                }
+                if doc
+                    .styles
+                    .add_character(
+                        &name,
+                        quill_core::character_styles::CharacterFormat::new(props, mask),
+                    )
+                    .is_none()
+                {
+                    return Err(Damaged);
+                }
+            }
             3 => doc.props = read_document_props(f)?,
             4 => doc.section = read_section(f)?,
             5 => doc.summary = read_summary(f)?,
@@ -1564,7 +1601,12 @@ fn read_picture(
 fn repair(doc: &mut Document) {
     let fonts = doc.fonts.len().max(1) as u16;
     let styles = doc.styles.styles.len().max(1) as u16;
+    let characters = doc.styles.characters.len();
     let fix_chp = |c: &mut CharProps| {
+        if c.character_style as usize > characters {
+            c.character_style = 0;
+            c.direct_format = 0;
+        }
         if c.font >= fonts {
             c.font = 0;
         }
@@ -1574,6 +1616,9 @@ fn repair(doc: &mut Document) {
             p.style = 0;
         }
     };
+    for s in &mut doc.styles.characters {
+        fix_chp(&mut s.format.props);
+    }
     for s in &mut doc.styles.styles {
         fix_pap(&mut s.pap);
         fix_chp(&mut s.chp);

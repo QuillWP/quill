@@ -18,6 +18,7 @@ pub struct Style {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StyleSheet {
+    pub characters: Vec<crate::character_styles::CharacterStyle>,
     pub styles: Vec<Style>,
 }
 
@@ -35,7 +36,10 @@ impl StyleSheet {
             size,
             ..Default::default()
         };
-        let mut sheet = StyleSheet { styles: Vec::new() };
+        let mut sheet = StyleSheet {
+            styles: Vec::new(),
+            characters: Vec::new(),
+        };
         let add = |sheet: &mut StyleSheet,
                    name: &str,
                    based_on: Option<StyleId>,

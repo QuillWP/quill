@@ -25,16 +25,8 @@ impl RichContent {
         }
     }
 
-    /// Text from another application can name a font that is not on this
-    /// computer, such as a web font a browser downloaded for one page.
-    /// Kept, it shows in a stand-in and warns on every open, so it takes
-    /// `font`, the font where it is going, instead. Returns the names of the
-    /// fonts the text had been using. Copies within Quill keep their fonts.
-    pub fn drop_missing_fonts(
-        &mut self,
-        font: &str,
-        installed: impl Fn(&str) -> bool,
-    ) -> Vec<String> {
+    /// Only fonts actually used by an external selection need a decision.
+    pub fn missing_fonts(&self, installed: impl Fn(&str) -> bool) -> Vec<String> {
         if !self.external {
             return Vec::new();
         }
@@ -47,17 +39,36 @@ impl RichContent {
         {
             used.extend(p.runs.iter().filter(|r| r.len > 0).map(|r| r.chp.font));
         }
-        let mut dropped = Vec::new();
-        for (id, name) in self.fonts.iter_mut().enumerate() {
-            if installed(name) {
-                continue;
+        let mut missing = Vec::new();
+        for id in used {
+            if let Some(name) = self.fonts.get(id as usize)
+                && !installed(name)
+                && !missing.contains(name)
+            {
+                missing.push(name.clone());
             }
-            if u16::try_from(id).is_ok_and(|id| used.contains(&id)) && !dropped.contains(name) {
-                dropped.push(name.clone());
-            }
-            *name = font.to_string();
         }
-        dropped
+        missing
+    }
+
+    /// Ask before changing the selection. None cancels the entire paste;
+    /// false keeps the font names, and true replaces only the missing ones.
+    pub fn resolve_missing_fonts(
+        &mut self,
+        font: &str,
+        installed: impl Fn(&str) -> bool,
+        choose: impl FnOnce(&[String], &str) -> Option<bool>,
+    ) -> Option<Vec<String>> {
+        let missing = self.missing_fonts(installed);
+        if missing.is_empty() || !choose(&missing, font)? {
+            return Some(Vec::new());
+        }
+        for name in &mut self.fonts {
+            if missing.contains(name) {
+                *name = font.to_string();
+            }
+        }
+        Some(missing)
     }
 
     pub fn from_document(doc: Document, plain: Option<&str>) -> Self {
@@ -126,6 +137,24 @@ impl RichContent {
         {
             used.insert(p.pap.style);
         }
+        let mut character_ids = BTreeSet::new();
+        for p in self
+            .fragment
+            .paras
+            .iter()
+            .chain(self.fragment.notes.iter().flat_map(|n| &n.paras))
+        {
+            character_ids.insert(p.mark_chp.character_style);
+            character_ids.extend(p.runs.iter().map(|r| r.chp.character_style));
+        }
+        let mut characters = BTreeMap::new();
+        for id in character_ids {
+            let Some(source) = self.styles.character(id) else {
+                continue;
+            };
+            let mapped = target.import_character_style(source, &self.fonts, true);
+            characters.insert(id, mapped);
+        }
         let mut styles = BTreeMap::new();
         for id in used {
             let source = self.styles.get(id);
@@ -164,10 +193,17 @@ impl RichContent {
             .chain(fragment.notes.iter_mut().flat_map(|note| &mut note.paras))
         {
             p.pap.style = styles.get(&p.pap.style).copied().unwrap_or(0);
-            font(&mut p.mark_chp);
-            for run in &mut p.runs {
-                font(&mut run.chp);
-            }
+            let mut remap = |c: &mut CharProps| {
+                font(c);
+                c.character_style = characters.get(&c.character_style).copied().unwrap_or(0);
+                if c.character_style == 0 {
+                    c.direct_format = 0;
+                }
+            };
+            remap(&mut p.mark_chp);
+            // Two fonts can arrive as one, so runs may need to merge.
+            let len = p.len();
+            p.format_range(0, len, &mut remap);
         }
         fragment
     }
@@ -179,7 +215,57 @@ mod tests {
     use quill_core::Selection;
 
     #[test]
-    fn pasted_text_gives_up_fonts_that_are_not_installed() {
+    fn character_style_name_conflicts_preserve_both_definitions_and_reuse_pasted_styles() {
+        use quill_core::character_styles::CharacterFormat;
+        let mut source = quill_core::text::from_plain_text("Styled");
+        let props = CharProps {
+            italic: true,
+            ..Default::default()
+        };
+        let id = source
+            .add_character_style("Emphasis", CharacterFormat::new(props, 1 << 3))
+            .unwrap();
+        source.apply_character_style(StoryId::Main, Position::new(0, 0), Position::new(0, 6), id);
+        let fragment = source.copy(StoryId::Main, Position::new(0, 0), Position::new(0, 6));
+        let rich = RichContent::new(&source, fragment);
+        let mut target = Document::new();
+        let original = target
+            .add_character_style(
+                "Emphasis",
+                CharacterFormat::new(
+                    CharProps {
+                        bold: true,
+                        ..Default::default()
+                    },
+                    1 << 2,
+                ),
+            )
+            .unwrap();
+        target.commit(Selection::default());
+        target.begin("Paste", Selection::default());
+        let fragment = rich.prepare(&mut target);
+        let mapped = fragment.paras[0].chp_of_char(0).character_style;
+        assert_ne!(mapped, original);
+        assert_eq!(
+            target.styles.character(original).unwrap().format.mask,
+            1 << 2
+        );
+        assert_eq!(target.styles.character(mapped).unwrap().format.mask, 1 << 3);
+        let count = target.styles.characters.len();
+        assert_eq!(
+            rich.prepare(&mut target).paras[0]
+                .chp_of_char(0)
+                .character_style,
+            mapped
+        );
+        assert_eq!(target.styles.characters.len(), count);
+        target.commit(Selection::default());
+        target.undo();
+        assert_eq!(target.styles.characters.len(), 1);
+    }
+
+    #[test]
+    fn replacing_missing_fonts_preserves_installed_fonts_and_other_formatting() {
         let installed = |name: &str| name != "Google Sans";
         let mut source = Document::new();
         let web = source.font_id("Google Sans");
@@ -204,10 +290,18 @@ mod tests {
 
         // A copy within Quill keeps its fonts.
         let mut own = RichContent::new(&source, fragment);
-        assert!(own.drop_missing_fonts("Times", installed).is_empty());
+        assert!(
+            own.resolve_missing_fonts("Times", installed, |_, _| panic!("internal copy"))
+                .unwrap()
+                .is_empty()
+        );
 
         let mut rich = RichContent::from_document(source, None);
-        assert_eq!(rich.drop_missing_fonts("Times", installed), ["Google Sans"]);
+        assert_eq!(
+            rich.resolve_missing_fonts("Times", installed, |_, _| Some(true))
+                .unwrap(),
+            ["Google Sans"]
+        );
         let mut target = Document::new();
         target.begin("Paste", Selection::default());
         let pasted = rich.prepare(&mut target);
@@ -219,17 +313,66 @@ mod tests {
     }
 
     #[test]
-    fn rtf_copied_from_a_browser_loses_its_web_font() {
+    fn external_rtf_replaces_its_web_font_after_the_choice() {
         let rtf = br"{\rtf1\ansi{\fonttbl\f0\fnil Google Sans;}\f0\fs24 Hello}";
         let doc = quill_formats::rtf::read(rtf).unwrap();
         let mut rich = RichContent::from_document(doc, Some("Hello"));
-        let dropped = rich.drop_missing_fonts("Georgia", |name| name != "Google Sans");
+        let dropped = rich
+            .resolve_missing_fonts("Georgia", |name| name != "Google Sans", |_, _| Some(true))
+            .unwrap();
         assert_eq!(dropped, ["Google Sans"]);
         let mut target = Document::new();
         target.begin("Paste", Selection::default());
         let pasted = rich.prepare(&mut target);
         let chp = pasted.paras[0].chp_of_char(0);
         assert_eq!(target.font_name(chp.font), "Georgia");
+    }
+
+    #[test]
+    fn missing_font_choice_keeps_names_or_cancels_without_replacing_them() {
+        let bytes = br"{\rtf1\ansi{\fonttbl{\f0 Garamond;}{\f1 Georgia;}{\f2 Unused;}}\f0\b Missing\f1\b0  installed}";
+        for choice in [Some(false), None] {
+            let doc = quill_formats::rtf::read(bytes).unwrap();
+            let mut rich = RichContent::from_document(doc, None);
+            let before = rich.fonts.clone();
+            let answer = rich.resolve_missing_fonts(
+                "Times",
+                |name| name == "Georgia",
+                |missing, replacement| {
+                    assert_eq!(missing, ["Garamond"]);
+                    assert_eq!(replacement, "Times");
+                    choice
+                },
+            );
+            assert_eq!(answer, choice.map(|_| Vec::<String>::new()));
+            assert_eq!(rich.fonts, before);
+            let mut target = Document::new();
+            let fragment = rich.prepare(&mut target);
+            let chp = fragment.paras[0].chp_of_char(0);
+            assert_eq!(target.font_name(chp.font), "Garamond");
+            assert!(chp.bold);
+        }
+    }
+
+    #[test]
+    fn two_missing_fonts_replaced_by_one_become_one_run() {
+        let bytes = br"{\rtf1\ansi{\fonttbl{\f0 Garamond;}{\f1 Aptos;}}\f0 One\f1  two}";
+        let doc = quill_formats::rtf::read(bytes).unwrap();
+        let mut rich = RichContent::from_document(doc, None);
+        rich.resolve_missing_fonts("Georgia", |_| false, |_, _| Some(true))
+            .unwrap();
+        let fragment = rich.prepare(&mut Document::new());
+        assert_eq!(fragment.paras[0].runs.len(), 1);
+    }
+
+    #[test]
+    fn installed_fonts_paste_without_asking() {
+        let doc = quill_core::text::from_plain_text("Installed");
+        let mut rich = RichContent::from_document(doc, None);
+        assert_eq!(
+            rich.resolve_missing_fonts("Georgia", |_| true, |_, _| panic!("installed font")),
+            Some(Vec::new())
+        );
     }
 
     #[test]

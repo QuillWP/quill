@@ -72,7 +72,12 @@ pub fn describe(doc: &Document) -> BTreeMap<String, String> {
             _ if c.object != 0 => format!("object {}", c.object),
             _ => String::new(),
         };
+        let character_style = doc
+            .styles
+            .character(c.character_style)
+            .map_or("", |s| s.name.as_str());
         let plain = CharProps {
+            character_style: 0,
             font: 0,
             object: 0,
             link: 0,
@@ -96,7 +101,7 @@ pub fn describe(doc: &Document) -> BTreeMap<String, String> {
             .map(|r| format!(" revision={r:?}"))
             .unwrap_or_default();
         format!(
-            "{plain:?} font={} {object}{link}{comment}{revision}",
+            "{plain:?} character_style={character_style:?} font={} {object}{link}{comment}{revision}",
             doc.font_name(c.font)
         )
     };
@@ -175,6 +180,22 @@ pub fn describe(doc: &Document) -> BTreeMap<String, String> {
                 s.builtin,
                 pap(&s.pap),
                 chp(&s.chp, None)
+            ),
+        );
+    }
+    for s in &doc.styles.characters {
+        let mut props = s.format.props;
+        props.font = 0;
+        out.insert(
+            format!("character style {}", s.name),
+            format!(
+                "mask {}, props {props:?}, font {}",
+                s.format.mask,
+                if s.format.mask & 1 != 0 {
+                    doc.font_name(s.format.props.font)
+                } else {
+                    "<inherited>"
+                }
             ),
         );
     }

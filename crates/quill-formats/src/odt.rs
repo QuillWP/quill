@@ -11,7 +11,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 const MIME: &str = "application/vnd.oasis.opendocument.text";
-const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:dc="http://purl.org/dc/elements/1.1/" office:version="1.3""#;
+const NS: &str = r#"xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:style="urn:oasis:names:tc:opendocument:xmlns:style:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" xmlns:fo="urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:quill="urn:quill:character-styles:1" office:version="1.3""#;
 
 /// Whether `bytes` are an OpenDocument Text package (or its template).
 pub fn is_odt(bytes: &[u8]) -> bool {
@@ -84,6 +84,47 @@ fn text_props(c: &CharProps, base: Option<&CharProps>) -> String {
         let _ = write!(attrs, " {prefix}:{name}=\"{}\"", escape(value));
     }
     format!("<style:text-properties{attrs}/>")
+}
+
+fn text_props_mask(c: &CharProps, mask: u16) -> String {
+    let all = crate::xml::parse(text_props(c, None).as_bytes()).expect("generated properties");
+    let mut out = String::from("<style:text-properties");
+    for (name, value) in all.attrs {
+        let bit = match name.as_str() {
+            "font-name" => 0,
+            "font-size" => 1,
+            "font-weight" => 2,
+            "font-style" => 3,
+            "text-underline-style" | "text-underline-type" | "text-underline-mode" => 4,
+            "text-line-through-style" => 5,
+            "text-outline" => 6,
+            "text-shadow" => 7,
+            "font-variant" => 8,
+            "text-transform" => 9,
+            "display" => 10,
+            "color" => 11,
+            "text-position" => 12,
+            "letter-spacing" => 13,
+            _ => continue,
+        };
+        if mask & (1 << bit) == 0 {
+            continue;
+        }
+        let prefix = match name.as_str() {
+            "font-name"
+            | "text-outline"
+            | "text-position"
+            | "text-underline-style"
+            | "text-underline-type"
+            | "text-underline-mode"
+            | "text-line-through-style" => "style",
+            "display" => "text",
+            _ => "fo",
+        };
+        let _ = write!(out, " {prefix}:{name}=\"{}\"", escape(&value));
+    }
+    out.push_str("/>");
+    out
 }
 
 fn para_props(p: &ParaProps) -> String {
@@ -207,11 +248,38 @@ impl Writer<'_> {
         let mut start = 0;
         for run in &p.runs {
             let t = self.id("t");
+            let mut base = self.doc.styles.get(p.pap.style).chp;
+            if let Some(style) = self.doc.styles.character(run.chp.character_style) {
+                quill_core::character_styles::CharacterFormat::copy_fields(
+                    &mut base,
+                    style.format.props,
+                    style.format.mask,
+                );
+                if style.format.mask & (1 << 12) != 0 {
+                    base.position = run.chp.position.wrapping_add(1);
+                }
+            }
             let _ = write!(
                 self.automatic,
                 r#"<style:style style:name="{t}" style:family="text">{}</style:style>"#,
-                text_props(&run.chp, Some(&self.doc.styles.get(p.pap.style).chp))
+                text_props(&run.chp, Some(&base))
             );
+            if let Some(style) = self.doc.styles.character(run.chp.character_style) {
+                let at = self
+                    .automatic
+                    .rfind("<style:style")
+                    .expect("just wrote a text style");
+                let end = self.automatic[at..].find('>').unwrap() + at;
+                self.automatic.insert_str(
+                    end,
+                    &format!(
+                        r#" style:parent-style-name="c{}" quill:character="{}" quill:direct="{}""#,
+                        run.chp.character_style,
+                        escape(&style.name),
+                        run.chp.direct_format
+                    ),
+                );
+            }
             // A linked run's text goes in a text:a inside its span.
             let (a_open, a_close) = match quill_core::link::get(run.chp.link) {
                 Some(l) => (
@@ -373,6 +441,17 @@ pub fn write(doc: &Document, now: u64) -> Vec<u8> {
         writer.automatic
     );
     let p = &doc.props;
+    for (i, style) in doc.styles.characters.iter().enumerate() {
+        let _ = write!(
+            named,
+            r#"<style:style style:name="c{}" style:display-name="{}" style:family="text" quill:character-format="{}" quill:character-font="{}">{}</style:style>"#,
+            i + 1,
+            escape(&style.name),
+            crate::character_styles::encode(style.format),
+            escape(doc.font_name(style.format.props.font)),
+            text_props_mask(&style.format.props, style.format.mask)
+        );
+    }
     let styles = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS}><office:font-face-decls>{fonts}</office:font-face-decls><office:styles>{named}</office:styles><office:automatic-styles><style:page-layout style:name="Page"><style:page-layout-properties fo:page-width="{}pt" fo:page-height="{}pt" style:print-orientation="{}" fo:margin-top="{}pt" fo:margin-bottom="{}pt" fo:margin-left="{}pt" fo:margin-right="{}pt"/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="Page"/></office:master-styles></office:document-styles>"#,
         points(p.page_width),

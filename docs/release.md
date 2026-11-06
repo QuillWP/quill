@@ -4,6 +4,11 @@ A checklist for each release. Work down it in order; every box is a thing
 to check by hand, since CI only proves that the code builds and passes its
 tests.
 
+On macOS, run the tests with access to the desktop's native services. A restricted
+runner can deny the spelling service and substitute printer paper dimensions;
+those host checks must also pass in a normal desktop session. Editing tests use
+a private clipboard so they do not replace the person's copied content.
+
 ## Before tagging
 
 Use Python 3.11+ and run `python3 tools/package.py --dist --check --with-source`

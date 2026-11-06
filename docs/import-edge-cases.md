@@ -93,8 +93,9 @@ loss. No file crashes or hangs.
 - Comments in footnotes are moved to the footnote's mark in the text (1).
 - Ruby guide text follows its base text in brackets (10).
 - Macros in `.docm` and `.dotm` files are left out.
-- Character styles become direct formatting (not warned; nothing visible
-  changes).
+- Foreign ODT character styles still become direct formatting, with a warning.
+  Named character styles in DOCX and RTF are preserved as of 2026-10-31;
+  Quill-generated HTML/ODT also keep names and override masks through metadata.
 - Table rows with more than 255 cells: the extra cells' text goes in the
   last cell (none in the corpus).
 

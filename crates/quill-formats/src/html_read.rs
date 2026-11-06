@@ -1041,6 +1041,18 @@ impl<'a> Reader<'a> {
         if let Some(style) = e.attr("style") {
             css(&mut self.doc, &mut f, style);
         }
+        if let Some(name) = e.attr("data-quill-character") {
+            if let Some(id) = self.doc.styles.find_character(name) {
+                f.chp.character_style = id;
+                f.chp.direct_format = e
+                    .attr("data-quill-direct")
+                    .and_then(|n| n.parse::<u16>().ok())
+                    .unwrap_or(0)
+                    & quill_core::character_styles::CharacterFormat::ALL;
+            } else {
+                self.report.note(notes::CHARACTER_STYLES);
+            }
+        }
         // The page's own margins are not the paragraphs'.
         if matches!(e.name.as_str(), "body" | "html") {
             f.pap = parent.pap.clone();
@@ -1540,6 +1552,42 @@ fn build(html: &str, limits: &Limits, file: bool) -> Result<(Document, ImportRep
         find_all(&root, "title", &mut titles);
         if let Some(t) = titles.first() {
             r.doc.summary.title = t.text().split_whitespace().collect::<Vec<_>>().join(" ");
+        }
+    }
+    let mut metadata = Vec::new();
+    find_all(&root, "meta", &mut metadata);
+    for e in metadata {
+        if e.attr("name") != Some("quill-character-style") {
+            continue;
+        }
+        if let (Some(name), Some(font), Some(encoded)) = (
+            e.attr("content"),
+            e.attr("data-font"),
+            e.attr("data-format"),
+        ) {
+            if name.trim().is_empty()
+                || name.chars().count() > 255
+                || font.len() > 1024
+                || r.doc.styles.characters.len() >= u16::MAX as usize
+                || r.doc.styles.find_character(name).is_some()
+            {
+                r.report.note(notes::CHARACTER_STYLES);
+                continue;
+            }
+            if let Some(mut format) = crate::character_styles::decode(encoded, 0) {
+                if format.mask & 1 != 0 {
+                    if r.doc.fonts.len() >= u16::MAX as usize {
+                        r.report.note(notes::CHARACTER_STYLES);
+                        continue;
+                    }
+                    format.props.font = r.doc.font_id(font);
+                }
+                if r.doc.styles.add_character(name, format).is_none() {
+                    r.report.note(notes::CHARACTER_STYLES);
+                }
+            } else {
+                r.report.note(notes::CHARACTER_STYLES);
+            }
         }
     }
     let normal = r.doc.styles.get(0).clone();

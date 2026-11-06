@@ -164,6 +164,7 @@ pub enum DialogId {
     Document,
     Border,
     Style,
+    CharacterStyles,
     Preferences,
     DefaultFont,
     ToolbarPreferences,

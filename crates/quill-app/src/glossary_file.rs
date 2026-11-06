@@ -11,6 +11,7 @@ pub struct Entry {
     pub frag: Fragment,
     pub fonts: Vec<String>,
     pub styles: Vec<String>,
+    pub characters: Vec<quill_core::character_styles::CharacterStyle>,
 }
 
 const HEADER: &str = "Quill Glossary 1";
@@ -21,6 +22,7 @@ pub fn serialize(list: &[Entry]) -> Vec<u8> {
     for e in list {
         let mut doc = Document::new();
         doc.fonts = e.fonts.clone();
+        doc.styles.characters = e.characters.clone();
         if doc.fonts.is_empty() {
             doc.fonts.push("New York".into());
         }
@@ -109,6 +111,7 @@ pub fn parse(data: &[u8]) -> Vec<Entry> {
             },
             fonts: doc.fonts.clone(),
             styles: doc.styles.styles.iter().map(|s| s.name.clone()).collect(),
+            characters: doc.styles.characters.clone(),
         });
     }
     out

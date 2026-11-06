@@ -147,3 +147,100 @@ fn table_rows_keep_columns_when_cells_are_empty() {
     let row = |k: usize| doc.main.paras[k].row.as_ref().unwrap().cells.len();
     assert_eq!((row(3), row(6)), (3, 2));
 }
+
+#[test]
+fn clipboard_tables_join_borders_and_keep_the_same_padding_in_html_and_rtf() {
+    let mut doc = Document::new();
+    doc.insert_table(StoryId::Main, Position::new(0, 0), 2, 2, 6000);
+    for p in &mut doc.main.paras {
+        if let Some(row) = p.row.as_mut() {
+            row.gap = 216;
+            row.indent = 0;
+        }
+    }
+    let markup = html::write_clipboard(&doc);
+    assert!(markup.contains("cellspacing=\"0\""));
+    assert!(markup.contains("border-collapse:collapse;border-spacing:0"));
+    assert_eq!(markup.matches(";padding:0pt 5.4pt 0pt 5.4pt").count(), 4);
+    let bytes = rtf::write_clipboard(&doc, true);
+    let text = String::from_utf8(bytes.clone()).unwrap();
+    assert!(text.contains("\\trgaph108\\trleft-108"));
+    // Exercise the standard RTF reader without Quill's private row data.
+    let standard = text
+        .split("{\\*\\quillrow ")
+        .enumerate()
+        .map(|(i, part)| {
+            if i == 0 {
+                part
+            } else {
+                part.split_once('}').unwrap().1
+            }
+        })
+        .collect::<String>();
+    let back = rtf::read(standard.as_bytes()).unwrap();
+    for row in back.main.paras.iter().filter_map(|p| p.row.as_ref()) {
+        assert_eq!((row.gap, row.indent), (216, 0));
+        assert_eq!(row.cells.len(), 2);
+    }
+    assert_eq!(
+        back.main.paras.iter().filter(|p| p.row.is_some()).count(),
+        2
+    );
+}
+
+#[test]
+fn word_cell_padding_overrides_row_defaults_and_resets_between_cells() {
+    let source = br"{\rtf1
+\trowd\trgaph15\trleft5\trpaddl15\trpaddr15\trpaddfl3\trpaddfr3
+\clpadl0\clpadr79\clpadfl3\clpadfr3\cellx4325
+\clpadl0\clpadr79\clpadfl3\clpadfr3\cellx8645
+\pard\intbl One\cell Two\cell\row
+\trowd\trgaph15\trpaddl50\trpaddr50\trpaddfl3\trpaddfr3
+\clpadl900\clpadr900\clpadfl0\clpadfr0\cellx4320\cellx8640
+\pard\intbl Three\cell Four\cell\row}";
+    let doc = rtf::read(source).unwrap();
+    let rows: Vec<_> = doc
+        .main
+        .paras
+        .iter()
+        .filter_map(|p| p.row.as_ref())
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!((rows[0].gap, rows[0].indent), (158, 84));
+    assert_eq!(rows[1].gap, 100);
+    assert_eq!(
+        (rows[0].cells[0].width, rows[0].cells[1].width),
+        (4320, 4320)
+    );
+}
+
+#[test]
+fn word_table_paragraphs_keep_inherited_space_after_and_explicit_overrides() {
+    let bytes = br"{\rtf1{\stylesheet{\s0\sa160 Normal;}{\s1\sb40\sa240 Spaced;}}
+\trowd\cellx3000\cellx6000
+\pard\intbl normal\cell
+\pard\intbl\s1 spaced\cell\row
+\trowd\cellx3000\cellx6000
+\pard\intbl\sa0 overridden\cell
+\pard\intbl restored\cell\row}";
+    let doc = rtf::read(bytes).unwrap();
+    let cells: Vec<_> = doc
+        .main
+        .paras
+        .iter()
+        .filter(|p| !p.text.is_empty())
+        .collect();
+    assert_eq!(
+        cells.iter().map(|p| p.pap.after).collect::<Vec<_>>(),
+        [160, 240, 0, 160]
+    );
+    assert_eq!(cells[1].pap.before, 40);
+    assert!(cells.iter().all(|p| p.pap.in_table));
+    let back = rtf::read(&rtf::write_clipboard(&doc, true)).unwrap();
+    for (before, after) in doc.main.paras.iter().zip(&back.main.paras) {
+        assert_eq!(
+            (before.pap.before, before.pap.after),
+            (after.pap.before, after.pap.after)
+        );
+    }
+}

@@ -94,3 +94,24 @@ path = "fuzz_targets/editing.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "character_styles"
+path = "fuzz_targets/character_styles.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "native"
+path = "fuzz_targets/native.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "clipboard"
+path = "fuzz_targets/clipboard.rs"
+test = false
+doc = false
+bench = false

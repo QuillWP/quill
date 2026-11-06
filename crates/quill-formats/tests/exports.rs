@@ -150,7 +150,7 @@ fn odt_is_a_real_package_with_styles_tables_images_notes_and_unicode() {
 }
 
 #[test]
-fn exported_files_save_atomically_and_open_again() {
+fn odt_and_html_save_atomically_and_open_again() {
     let dir = std::env::temp_dir().join(format!("quill-export-tests-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let doc = fixture();
@@ -161,7 +161,6 @@ fn exported_files_save_atomically_and_open_again() {
     ] {
         let path = dir.join(name);
         assert_eq!(Format::from_path(&path), Some(format));
-        assert!(format.export_only());
         quill_formats::save(&doc, &path, format).unwrap();
         assert!(std::fs::metadata(&path).unwrap().len() > 0);
         let loaded = quill_formats::load(&path).unwrap();

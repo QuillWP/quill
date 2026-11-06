@@ -10,8 +10,9 @@ the repository root, for example:
 cargo +nightly fuzz run docx
 ```
 
-The targets cover ZIP containers, XML, DOCX, ODT, RTF, image identification and
-decoding, settings, glossary files, and print-merge data.
+The targets cover ZIP containers, XML, DOCX, ODT, RTF, HTML, native .qwp files,
+image identification and decoding, settings, glossary files and print-merge data,
+plus `editing`, `character_styles` and `clipboard`, described below.
 
 ## Overnight campaign
 
@@ -29,10 +30,17 @@ use content hashes; Word lock files and macOS metadata files are excluded.
 This prepares inputs only and does not launch a fuzz campaign.
 
 Run `python3 tools/overnight_fuzz.py` from the repository root under
-`caffeinate -i` to seed the missing corpora, build all eleven targets with
+`caffeinate -i` to seed the missing corpora, build all fourteen targets with
 AddressSanitizer and checked arithmetic, and run each for three hours.
-Three targets run concurrently with three workers apiece (about twelve hours
-plus preparation). Original sample documents are only read.
+Three targets run concurrently with three workers apiece. `--hours 8` instead
+shares eight hours, giving three quarters to the targets that read whole
+documents. Original sample documents are only read.
+
+Character-style sources are made by `python3 tools/make_character_style_seeds.py`.
+Save them through Word into `fuzz/word-fixtures/2026-11-01/word`, then run
+`cargo run -p quill-formats --example seed_exports fuzz/word-fixtures/2026-11-01`
+for Quill's own .qwp, .rtf, .htm, .docx and .odt, and the script again with
+`--seed-corpus`.
 
 Each campaign has an ignored `fuzz/runs/<timestamp>/` directory containing
 `report.md` (updated every thirty seconds and finalized on completion),
@@ -64,7 +72,15 @@ text Undo. Resolution ends the reference model's history segment; native saves
 still check comment content and resolved state. This tests core editing, not
 mouse hit testing, caret navigation or rendering. Those remain separate UI tests.
 
-Overnight campaigns now include `editing` as an eleventh target. Failed property
+`character_styles` runs programs of define, apply, remove, redefine, rename,
+delete, Replace Fonts, paragraph style, join and Undo/Redo. After every step, text
+must show the style it names unless it overrides that field by hand. The same
+programs run in the normal test suite. `clipboard` pastes RTF or clipboard HTML
+into a document that already has conflicting style names, checks those rules, saves,
+and undoes. `native` reads .qwp files. `html` and `odt` now also save and reopen,
+and every target that saves checks HTML and ODT as well as native, DOCX and RTF.
+
+Overnight campaigns also include `editing`. Failed property
 checks save replayable operation programs just like parser crash inputs. Reduce
 one with `cargo +nightly fuzz tmin -a -O editing <artifact>` and retain the small
 program as a permanent test fixture.

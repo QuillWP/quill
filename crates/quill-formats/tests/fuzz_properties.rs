@@ -20,6 +20,23 @@ fn generated_editing_programs_preserve_documents_and_history() {
 }
 
 #[test]
+fn generated_character_style_programs_preserve_documents_and_history() {
+    for seed in 0..128u64 {
+        let mut state = seed + 1;
+        let program: Vec<u8> = (0..6 * 64)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        let result = std::panic::catch_unwind(|| editing::character_styles::exercise(&program));
+        assert!(result.is_ok(), "style seed {seed}, program {program:?}");
+    }
+}
+
+#[test]
 #[should_panic(expected = "changed")]
 fn semantic_oracle_detects_silent_text_loss() {
     let doc = quill_core::text::from_plain_text("Keep this text");

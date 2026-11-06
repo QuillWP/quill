@@ -84,42 +84,83 @@ impl Tables {
 }
 
 fn chp(out: &mut String, c: &CharProps, tables: &Tables) {
-    let _ = write!(out, "\\f{}\\fs{}", c.font, c.size);
-    let flags = [
-        (c.bold, "\\b"),
-        (c.italic, "\\i"),
-        (c.strike, "\\strike"),
-        (c.outline, "\\outl"),
-        (c.shadow, "\\shad"),
-        (c.small_caps, "\\scaps"),
-        (c.all_caps, "\\caps"),
-        (c.hidden, "\\v"),
-    ];
-    for (on, word) in flags {
-        if on {
+    character_values(
+        out,
+        c,
+        quill_core::character_styles::CharacterFormat::ALL,
+        tables,
+    );
+    revision_words(out, c, tables);
+}
+
+fn character_values(out: &mut String, c: &CharProps, mask: u16, tables: &Tables) {
+    if mask & 1 != 0 {
+        let _ = write!(out, "\\f{}", c.font);
+    }
+    if mask & 2 != 0 {
+        let _ = write!(out, "\\fs{}", c.size);
+    }
+    for (on, word, bit) in [
+        (c.bold, "\\b", 2),
+        (c.italic, "\\i", 3),
+        (c.strike, "\\strike", 5),
+        (c.outline, "\\outl", 6),
+        (c.shadow, "\\shad", 7),
+        (c.small_caps, "\\scaps", 8),
+        (c.all_caps, "\\caps", 9),
+        (c.hidden, "\\v", 10),
+    ] {
+        if mask & (1 << bit) != 0 {
             out.push_str(word);
+            if !on {
+                out.push('0');
+            }
         }
     }
-    out.push_str(match c.underline {
-        Underline::None => "",
-        Underline::Single => "\\ul",
-        Underline::Word => "\\ulw",
-        Underline::Double => "\\uldb",
-        Underline::Dotted => "\\uld",
-    });
-    if c.color != Rgb::BLACK {
+    if mask & (1 << 4) != 0 {
+        out.push_str(match c.underline {
+            Underline::None => "\\ulnone",
+            Underline::Single => "\\ul",
+            Underline::Word => "\\ulw",
+            Underline::Double => "\\uldb",
+            Underline::Dotted => "\\uld",
+        });
+    }
+    if mask & (1 << 11) != 0 {
         let _ = write!(out, "\\cf{}", tables.index(c.color));
     }
-    // RTF raises and lowers in half-points.
-    let shift = crate::half_points(c.position);
-    if shift > 0 {
-        let _ = write!(out, "\\up{shift}");
-    } else if shift < 0 {
-        let _ = write!(out, "\\dn{}", -shift);
+    if mask & (1 << 12) != 0 {
+        let _ = write!(out, "\\up{}", crate::half_points(c.position));
     }
-    if c.spacing != 0 {
+    if mask & (1 << 13) != 0 {
         let _ = write!(out, "\\expndtw{}", c.spacing);
     }
+}
+
+fn run_chp(out: &mut String, doc: &Document, _p: &Paragraph, c: &CharProps, tables: &Tables) {
+    if doc.styles.character(c.character_style).is_none() {
+        chp(out, c, tables);
+        return;
+    }
+    let _ = write!(
+        out,
+        "\\cs{}",
+        doc.styles.styles.len() + c.character_style as usize
+    );
+    // RTF readers may treat the preceding plain reset as direct formatting.
+    // Write the resolved appearance as well as the named style, then retain
+    // Quill's direct-field mask separately for editable round trips.
+    character_values(
+        out,
+        c,
+        quill_core::character_styles::CharacterFormat::ALL,
+        tables,
+    );
+    let _ = write!(out, "\\quillchardirect{}", c.direct_format);
+    revision_words(out, c, tables);
+}
+
+fn revision_words(out: &mut String, c: &CharProps, tables: &Tables) {
     if let Some(r) = quill_core::revision::get(c.rev) {
         if let Some(by) = &r.inserted {
             let _ = write!(
@@ -412,7 +453,7 @@ fn paragraph(
         out.push_str("\\pard\\plain");
         pap(out, &p.pap, tables);
         out.push_str("\\plain");
-        chp(out, &p.mark_chp, tables);
+        run_chp(out, doc, p, &p.mark_chp, tables);
         match nested {
             // Programs that cannot nest tables read the group after it.
             Some(row) => {
@@ -452,7 +493,7 @@ fn paragraph(
             }
         }
         out.push('{');
-        chp(out, c, tables);
+        run_chp(out, doc, p, c, tables);
         let run = &p.text[s..e];
         match doc
             .picture(c.object)
@@ -489,7 +530,7 @@ fn paragraph(
     }
     // The mark's own format goes just before it.
     out.push_str("\\plain");
-    chp(out, &p.mark_chp, tables);
+    run_chp(out, doc, p, &p.mark_chp, tables);
     out.push_str(match p.mark {
         Mark::CellEnd if p.pap.nest > 0 => "\\nestcell\n",
         Mark::CellEnd => "\\cell\n",
@@ -626,7 +667,7 @@ fn row_definition(out: &mut String, row: &RowProps, tables: &Tables) {
     let _ = write!(
         out,
         "\\trowd\\trgaph{}\\trleft{}\\trrh{}{}",
-        row.gap,
+        row.gap / 2,
         row.indent - row.gap / 2,
         trrh,
         match row.align {
@@ -832,6 +873,10 @@ pub fn write(doc: &Document) -> Vec<u8> {
         }
     }
     doc.styles.styles.iter().for_each(|s| note(&s.chp));
+    doc.styles
+        .characters
+        .iter()
+        .for_each(|s| note(&s.format.props));
     line_colors.extend(doc.styles.styles.iter().filter_map(|s| s.pap.shading_color));
     for c in line_colors {
         if !colors.contains(&c) {
@@ -871,6 +916,22 @@ pub fn write(doc: &Document) -> Vec<u8> {
         chp(&mut out, &s.chp, &tables);
         // A semicolon ends the name, so one in it is written escaped.
         for (k, part) in s.name.split(';').enumerate() {
+            if k > 0 {
+                out.push_str("\\u59?");
+            }
+            text(&mut out, part);
+        }
+        out.push_str(";}\n");
+    }
+    for (i, style) in doc.styles.characters.iter().enumerate() {
+        let _ = write!(
+            out,
+            "{{\\*\\cs{}\\additive",
+            doc.styles.styles.len() + i + 1
+        );
+        character_values(&mut out, &style.format.props, style.format.mask, &tables);
+        out.push(' ');
+        for (k, part) in style.name.split(';').enumerate() {
             if k > 0 {
                 out.push_str("\\u59?");
             }

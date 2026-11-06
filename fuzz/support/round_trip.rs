@@ -14,6 +14,10 @@ pub fn check_imported(doc: &Document) {
         .expect("Quill must reopen its own DOCX export");
     quill_formats::rtf::read(&quill_formats::rtf::write(doc))
         .expect("Quill must reopen its own RTF export");
+    quill_formats::html::read_file(&quill_formats::html::write(doc))
+        .expect("Quill must reopen its own HTML save");
+    quill_formats::odt_read::read(&quill_formats::odt::write(doc, 0))
+        .expect("Quill must reopen its own ODT save");
 }
 
 #[allow(dead_code)]

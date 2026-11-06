@@ -13,6 +13,9 @@ mod platform {
     pub fn sequence() -> Option<u64> {
         unsafe {
             let board: *mut AnyObject = msg_send![class!(NSPasteboard), generalPasteboard];
+            if board.is_null() {
+                return None;
+            }
             let count: isize = msg_send![board, changeCount];
             Some(count as u64)
         }
@@ -21,6 +24,9 @@ mod platform {
     pub fn rtf() -> Option<Vec<u8>> {
         unsafe {
             let board: *mut AnyObject = msg_send![class!(NSPasteboard), generalPasteboard];
+            if board.is_null() {
+                return None;
+            }
             let kind = NSString::from_str("public.rtf");
             let data: *mut AnyObject = msg_send![board, dataForType: &*kind];
             if data.is_null() {
@@ -38,6 +44,9 @@ mod platform {
     pub fn put_rtf(bytes: &[u8]) -> bool {
         unsafe {
             let board: *mut AnyObject = msg_send![class!(NSPasteboard), generalPasteboard];
+            if board.is_null() {
+                return false;
+            }
             let kind = NSString::from_str("public.rtf");
             let data: *mut AnyObject = msg_send![class!(NSData), dataWithBytes: bytes.as_ptr().cast::<std::ffi::c_void>() length: bytes.len()];
             msg_send![board, setData: data forType: &*kind]

@@ -56,7 +56,12 @@ impl Cached {
 impl Clipboard {
     pub fn new() -> Self {
         Clipboard {
-            system: arboard::Clipboard::new().ok(),
+            // Editing tests must not read or replace the person's clipboard.
+            system: if cfg!(test) {
+                None
+            } else {
+                arboard::Clipboard::new().ok()
+            },
             rich: None,
             local_text: None,
         }
@@ -108,9 +113,10 @@ impl Clipboard {
             Some(Clip::Plain(t)) if !t.is_empty() => vec![Form::Unformatted],
             _ => Vec::new(),
         };
-        if crate::paste_special::clipboard_image()
-            .and_then(quill_formats::images::picture)
-            .is_some()
+        if self.system.is_some()
+            && crate::paste_special::clipboard_image()
+                .and_then(quill_formats::images::picture)
+                .is_some()
         {
             out.push(Form::Picture);
         }
@@ -167,7 +173,10 @@ impl Clipboard {
         self.rich = Some(Cached {
             text,
             html,
-            sequence: crate::system_clipboard::sequence(),
+            sequence: self
+                .system
+                .as_ref()
+                .and_then(|_| crate::system_clipboard::sequence()),
             content,
         });
     }
@@ -232,6 +241,28 @@ impl Clipboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_clipboard_keeps_rich_content_without_system_ownership() {
+        let mut clipboard = Clipboard::without_system();
+        let doc = quill_core::text::from_plain_text("private copy");
+        let fragment = Fragment {
+            paras: doc.main.paras.clone(),
+            ..Fragment::default()
+        };
+        clipboard.put(&doc, fragment);
+        assert!(clipboard.rich.as_ref().unwrap().sequence.is_none());
+        assert_eq!(clipboard.plain_text().as_deref(), Some("private copy"));
+        assert_eq!(
+            clipboard.forms(),
+            [
+                crate::paste_special::Form::Formatted,
+                crate::paste_special::Form::Unformatted
+            ]
+        );
+        clipboard.put_text("plain copy");
+        assert!(matches!(clipboard.get(), Some(Clip::Plain(text)) if text == "plain copy"));
+    }
 
     #[test]
     fn a_copied_picture_wins_only_over_no_text_or_its_address() {

@@ -286,6 +286,19 @@ impl Writer<'_> {
             }
             let css = character(self.doc, &chp, (!self.inline).then_some(&style.chp));
             let _ = write!(out, "<span class=\"run\" style=\"{}\">", escape(&css));
+            if let Some(style) = self.doc.styles.character(run.chp.character_style) {
+                // No extra visible element: attributes retain the named layer
+                // while ordinary CSS remains sufficient for other readers.
+                let at = out.rfind('>').expect("just wrote a span");
+                out.insert_str(
+                    at,
+                    &format!(
+                        r#" data-quill-character="{}" data-quill-direct="{}""#,
+                        escape(&style.name),
+                        run.chp.direct_format
+                    ),
+                );
+            }
             let end = start + run.len;
             for c in p.text[start..end].chars() {
                 match c {
@@ -352,7 +365,13 @@ impl Writer<'_> {
             match block {
                 Block::Paragraph(p) => self.paragraph(p, out, note),
                 Block::Table(rows) => {
-                    out.push_str("<table><tbody>\n");
+                    if self.inline {
+                        // Clipboard HTML has no page stylesheet. Keep borders
+                        // joined and prevent the receiving app's cell spacing.
+                        out.push_str("<table cellspacing=\"0\" style=\"border-collapse:collapse;border-spacing:0;\"><tbody>\n");
+                    } else {
+                        out.push_str("<table><tbody>\n");
+                    }
                     for row in rows {
                         let props =
                             quill_core::table::row_props(paras, &row, self.doc.props.text_width());
@@ -363,9 +382,18 @@ impl Writer<'_> {
                                 quill_core::props::VAlign::Center => ";vertical-align:middle",
                                 quill_core::props::VAlign::Bottom => ";vertical-align:bottom",
                             };
+                            let padding = if self.inline {
+                                format!(
+                                    ";padding:0pt {}pt 0pt {}pt",
+                                    points(props.gap / 2),
+                                    points(props.gap / 2)
+                                )
+                            } else {
+                                String::new()
+                            };
                             let _ = write!(
                                 out,
-                                "<td style=\"width:{}pt{valign}{}\">",
+                                "<td style=\"width:{}pt{valign}{}{padding}\">",
                                 points(props.cells[i].width),
                                 cell_css(&props.cells[i])
                             );
@@ -378,6 +406,18 @@ impl Writer<'_> {
                 }
             }
         }
+    }
+}
+
+fn character_style_metadata(doc: &Document, out: &mut String) {
+    for style in &doc.styles.characters {
+        let _ = write!(
+            out,
+            r#"<meta name="quill-character-style" content="{}" data-font="{}" data-format="{}">"#,
+            escape(&style.name),
+            escape(doc.font_name(style.format.props.font)),
+            crate::character_styles::encode(style.format)
+        );
     }
 }
 
@@ -434,7 +474,9 @@ pub fn write(doc: &Document) -> Vec<u8> {
     // A linked run's span takes its color from the link.
     out.push_str("a.lk>.run{color:inherit;}\n");
     out.push_str(&writer.link_css());
-    out.push_str("</style></head><body>\n");
+    out.push_str("</style>");
+    character_style_metadata(doc, &mut out);
+    out.push_str("</head><body>\n");
     out.push_str(&body);
     out.push_str("</body></html>\n");
     out.into_bytes()
@@ -444,6 +486,7 @@ pub fn write(doc: &Document) -> Vec<u8> {
 /// the document head and its stylesheet when inserting the selection.
 pub fn write_clipboard(doc: &Document) -> String {
     let mut out = String::from("<div>");
+    character_style_metadata(doc, &mut out);
     Writer {
         doc,
         inline: true,

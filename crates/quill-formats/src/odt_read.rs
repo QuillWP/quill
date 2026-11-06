@@ -275,6 +275,7 @@ struct Reader<'a> {
     pictures: &'a dyn Fn(&str) -> Option<Arc<[u8]>>,
     /// Named paragraph style -> our style.
     styles: HashMap<&'a str, StyleId>,
+    characters: HashMap<&'a str, u16>,
     base: (ParaProps, CharProps),
     resolved: HashMap<(bool, String), ParaStyle>,
     tabs_relative: bool,
@@ -342,6 +343,7 @@ fn build<'a>(
         st,
         pictures,
         styles: HashMap::new(),
+        characters: HashMap::new(),
         base: (ParaProps::default(), CharProps::default()),
         resolved: HashMap::new(),
         tabs_relative: true,
@@ -958,6 +960,50 @@ impl<'a> Reader<'a> {
                 s.next = n;
             }
         }
+        let mut names: Vec<_> = self
+            .st
+            .named
+            .keys()
+            .filter(|(family, _)| *family == "text")
+            .map(|(_, n)| *n)
+            .collect();
+        names.sort();
+        for name in names {
+            let style = self.st.named[&("text", name)];
+            if let (Some(encoded), Some(font)) =
+                (style.attr("character-format"), style.attr("character-font"))
+            {
+                if font.len() > 1024 {
+                    self.report.note(notes::CHARACTER_STYLES);
+                    continue;
+                }
+                let display = style.attr("display-name").unwrap_or(name);
+                if let Some(mut format) = crate::character_styles::decode(encoded, 0) {
+                    if display.trim().is_empty()
+                        || display.chars().count() > 255
+                        || self.doc.styles.characters.len() >= u16::MAX as usize
+                        || self.doc.styles.find_character(display).is_some()
+                    {
+                        self.report.note(notes::CHARACTER_STYLES);
+                        continue;
+                    }
+                    if format.mask & 1 != 0 {
+                        if self.doc.fonts.len() >= u16::MAX as usize {
+                            self.report.note(notes::CHARACTER_STYLES);
+                            continue;
+                        }
+                        format.props.font = self.doc.font_id(font);
+                    }
+                    if let Some(id) = self.doc.styles.add_character(display, format) {
+                        self.characters.insert(name, id);
+                    } else {
+                        self.report.note(notes::CHARACTER_STYLES);
+                    }
+                } else {
+                    self.report.note(notes::CHARACTER_STYLES);
+                }
+            }
+        }
         self.resolved.clear();
     }
 
@@ -1030,8 +1076,33 @@ impl<'a> Reader<'a> {
     fn apply_text_style(&mut self, name: Option<&str>, c: &mut CharProps) {
         let chain = self.chain("text", name);
         for s in chain {
+            let before = *c;
             if let Some(t) = s.child("text-properties") {
                 self.apply_text(t, c);
+            }
+            if let Some(id) = s.attr("name").and_then(|n| self.characters.get(n)).copied() {
+                c.character_style = id;
+                c.direct_format = 0;
+            } else if s
+                .attr("name")
+                .is_some_and(|name| self.st.named.contains_key(&("text", name)))
+            {
+                self.report.note(notes::CHARACTER_STYLES);
+            } else if c.character_style != 0 {
+                c.direct_format |=
+                    quill_core::character_styles::CharacterFormat::difference(before, *c);
+            }
+            if let Some(name) = s.attr("character") {
+                if let Some(id) = self.doc.styles.find_character(name) {
+                    c.character_style = id;
+                    c.direct_format = s
+                        .attr("direct")
+                        .and_then(|n| n.parse::<u16>().ok())
+                        .unwrap_or(0)
+                        & quill_core::character_styles::CharacterFormat::ALL;
+                } else {
+                    self.report.note(notes::CHARACTER_STYLES);
+                }
             }
         }
     }

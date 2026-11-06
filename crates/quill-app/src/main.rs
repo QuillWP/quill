@@ -7,6 +7,7 @@ mod app;
 mod bars;
 mod border_dialog;
 mod canvas;
+mod character_style_dialog;
 mod chrome;
 mod clock;
 mod color_glyph;

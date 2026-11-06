@@ -20,6 +20,7 @@ pub enum Action {
     /// Font size in half-points.
     Size(u16),
     Style(u16),
+    CharacterStyle(u16),
     /// Open a header or footer in the pane.
     Pane(quill_core::StoryId),
     ToggleFormattingToolbar,
@@ -539,7 +540,33 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
         items: window_items,
     };
 
-    let mut menus = vec![file, edit, view, insert, format, font, tools, window];
+    let mut character_items = vec![
+        b.cmd("Manage Character Styles...", Cmd::CharacterStylesDialog),
+        sep(),
+        b.item("None", Action::CharacterStyle(0))
+            .checked(chp.character_style == 0),
+    ];
+    for (i, s) in v.doc.styles.characters.iter().enumerate() {
+        character_items.push(
+            b.item(s.name.clone(), Action::CharacterStyle((i + 1) as u16))
+                .checked(cx.view.current_chp().character_style as usize == i + 1),
+        );
+    }
+    let character_styles = Menu {
+        title: "Character Styles".into(),
+        items: character_items,
+    };
+    let mut menus = vec![
+        file,
+        edit,
+        view,
+        insert,
+        format,
+        font,
+        character_styles,
+        tools,
+        window,
+    ];
     if mac {
         menus.insert(0, app);
     } else {
