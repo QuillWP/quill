@@ -224,6 +224,23 @@ impl Picture {
         p.size = (width, height);
         p
     }
+
+    /// The picture cropped (or padded) to `width` x `height` at its present
+    /// scale by moving only its right and bottom edges, the ones the side
+    /// handles drag. What shows of the rest stays where it was.
+    pub fn trimmed_to(&self, width: Twips, height: Twips) -> Picture {
+        let (sx, sy) = self.scale();
+        let mut p = self.clone();
+        let (width, height) = (width.max(20), height.max(20));
+        let show_w = width as f32 * 100.0 / sx.max(0.01);
+        let show_h = height as f32 * 100.0 / sy.max(0.01);
+        let to_units =
+            |show: f32, natural: Twips| CROP_WHOLE as f32 * (1.0 - show / natural.max(1) as f32);
+        p.crop.right = (to_units(show_w, p.natural.0) - p.crop.left as f32).round() as i32;
+        p.crop.bottom = (to_units(show_h, p.natural.1) - p.crop.top as f32).round() as i32;
+        p.size = (width, height);
+        p
+    }
 }
 
 #[cfg(test)]
@@ -280,6 +297,25 @@ mod tests {
         // Wider than the picture: white space on both sides.
         let pad = p.cropped_to(2880, 720);
         assert_eq!(pad.crop.left, -50_000);
+    }
+
+    #[test]
+    fn trimming_moves_only_the_right_and_bottom_edges() {
+        let mut p = Picture::from_bytes(png_header()).unwrap();
+        p.natural = (1440, 720);
+        p.size = (2880, 720);
+        p.crop.left = 10_000;
+        // Half as wide: the right edge comes in, the left stays put.
+        let t = p.trimmed_to(1440, 360);
+        assert_eq!(t.crop.left, 10_000);
+        assert_eq!(t.crop.right, 45_000);
+        assert_eq!(t.crop.top, 0);
+        assert_eq!(t.crop.bottom, 50_000);
+        assert!((t.scale().0 - p.scale().0).abs() < 0.1);
+        assert!((t.scale().1 - p.scale().1).abs() < 0.1);
+        // Dragging back out uncrops the same edge.
+        let back = t.trimmed_to(p.size.0, p.size.1);
+        assert_eq!(back.crop, p.crop);
     }
 
     #[test]

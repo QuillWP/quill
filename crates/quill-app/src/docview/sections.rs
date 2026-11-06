@@ -44,7 +44,7 @@ impl DocView {
         let Some((_, s)) = self.secs.get(self.section_index(para)) else {
             return width;
         };
-        column_width(width, s)
+        s.column_width(width)
     }
 
     /// The section page `k` starts in.
@@ -268,12 +268,6 @@ fn section_break_label(start: quill_core::SectionStart) -> &'static str {
         EvenPage => "Section Break (Even Page)",
         OddPage => "Section Break (Odd Page)",
     }
-}
-
-/// The width of one of section `s`'s columns, in a text area `width` wide.
-pub fn column_width(width: i32, s: &SectionProps) -> i32 {
-    let n = s.columns.max(1) as i32;
-    ((width - (n - 1) * s.column_spacing) / n).max(144)
 }
 
 #[cfg(test)]

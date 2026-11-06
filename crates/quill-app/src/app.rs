@@ -2949,8 +2949,14 @@ fn file_name(path: &std::path::Path) -> String {
         .unwrap_or_else(|| "Untitled".into())
 }
 
-/// "Report.qwp" -> "Report", for suggesting a name in Save As.
+/// Added to the title of a window reopened from a recovery file, after the
+/// document's name so the name still comes first.
+const RECOVERED: &str = " - Recovered";
+
+/// A window title without its extension, for naming a saved or printed
+/// copy: "Report.qwp" -> "Report". A recovered window's suffix goes too.
 fn strip_ext(title: &str) -> &str {
+    let title = title.strip_suffix(RECOVERED).unwrap_or(title);
     match title.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() && ext.len() <= 4 => stem,
         _ => title,
@@ -3126,7 +3132,7 @@ impl ApplicationHandler<UserEvent> for App {
         if !self.recovered {
             self.recovered = true;
             for (path, title, doc) in crate::recovery::load_all() {
-                self.new_window(el, doc, Some(format!("Recovered - {title}")));
+                self.new_window(el, doc, Some(format!("{title}{RECOVERED}")));
                 if let Some((_, window)) = self.windows.last_mut() {
                     window.recovery = Some(path);
                 }
@@ -3578,6 +3584,15 @@ fn window_icon() -> Option<winit::window::Icon> {
 mod tests {
     use super::*;
     use quill_core::{Position, Selection};
+
+    #[test]
+    fn a_recovered_window_is_saved_under_its_own_name() {
+        let title = format!("Long.qwp{RECOVERED}");
+        assert_eq!(title, "Long.qwp - Recovered");
+        assert_eq!(strip_ext(&title), "Long");
+        assert_eq!(strip_ext(&format!("Untitled1{RECOVERED}")), "Untitled1");
+        assert_eq!(strip_ext("Notes.docx"), "Notes");
+    }
 
     fn paint_editor(state: &mut WinState, width: u32, height: u32, fonts: &mut Fonts) {
         let mut cache = GlyphCache::new();

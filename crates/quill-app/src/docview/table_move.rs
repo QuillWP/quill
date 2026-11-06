@@ -21,7 +21,7 @@ pub struct TableDrag {
 impl DocView {
     /// The table the insertion point is in, and its handle in window
     /// points.
-    fn table_handle(&self) -> Option<(usize, usize, Rect)> {
+    pub(super) fn table_handle(&self) -> Option<(usize, usize, Rect)> {
         if self.outline {
             return None;
         }
@@ -54,16 +54,26 @@ impl DocView {
         ok.then_some(p)
     }
 
+    /// The table whose handle is under a window point, allowing a little
+    /// slack around the box.
+    fn table_handle_at(&self, wx: f32, wy: f32) -> Option<(usize, usize)> {
+        let (first, last, r) = self.table_handle()?;
+        let grow = Rect::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0);
+        grow.contains(wx, wy).then_some((first, last))
+    }
+
+    /// Whether a window point is on the handle. A table at the top of a
+    /// page has its handle in the header area, and the handle comes first.
+    pub(super) fn on_table_handle(&self, wx: f32, wy: f32) -> bool {
+        self.table_handle_at(wx, wy).is_some()
+    }
+
     /// A click on the handle: select the table and start a move. Returns
     /// true if the click was the handle's.
     pub(super) fn table_mouse_down(&mut self, wx: f32, wy: f32) -> bool {
-        let Some((first, last, r)) = self.table_handle() else {
+        let Some((first, last)) = self.table_handle_at(wx, wy) else {
             return false;
         };
-        let grow = Rect::new(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0);
-        if !grow.contains(wx, wy) {
-            return false;
-        }
         self.select_table();
         self.drag = None;
         self.table_drag = Some(TableDrag {

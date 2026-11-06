@@ -575,7 +575,10 @@ impl DocView {
                 self.doc.begin_typing(self.sel);
                 let at = self.delete_selection();
                 let style = self.doc.main.paras[at.para].pap.style;
-                let at = self.doc.split_paragraph(MAIN, at);
+                let typing = self
+                    .typing_chp
+                    .unwrap_or_else(|| self.doc.main.paras[at.para].chp_at(at.offset));
+                let at = self.doc.split_paragraph_typing(MAIN, at, Some(typing));
                 // In Outline view a new paragraph after a heading is a
                 // heading of the same level.
                 if self.outline
@@ -587,11 +590,20 @@ impl DocView {
                 self.finish_edit(Selection::caret(at));
             }
             LineBreak => self.type_special(chars::LINE_BREAK),
+            // A break can't go inside a table cell: say so rather than
+            // do nothing, or break only the line.
+            PageBreak | SectionBreak if self.doc.main.paras[focus.para].pap.in_table => {
+                self.status = Some(format!(
+                    "A {} can't go inside a table.",
+                    if cmd == PageBreak {
+                        "page break"
+                    } else {
+                        "section break"
+                    }
+                ));
+            }
             PageBreak => self.type_special(chars::PAGE_BREAK),
             SectionBreak => {
-                if self.doc.main.paras[focus.para].pap.in_table {
-                    return Effect::None;
-                }
                 self.doc.begin("Section Break", self.sel);
                 let at = self.delete_selection();
                 let at = self.doc.insert_section_break(at);

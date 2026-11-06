@@ -860,7 +860,7 @@ impl DocView {
         };
         self.last_click = Some((now, wx, wy, count));
         if count == 1
-            && (self.picture_mouse_down(wx, wy, shift)
+            && (self.picture_mouse_down(wx, wy, shift, cmd)
                 || self.table_mouse_down(wx, wy)
                 || self.border_mouse_down(wx, wy))
         {
@@ -1299,6 +1299,36 @@ mod tests {
         assert_eq!(view.doc.main.paras[0].text, "big RED dog");
         assert_eq!(view.sel, Selection::caret(Position::new(0, 5)));
     }
+    #[test]
+    fn a_font_chosen_at_the_insertion_point_carries_on_after_return() {
+        let mut clip = Clipboard::new();
+        let mut v = DocView::new(Document::new(), "t".into());
+        let typewriter = v.doc.font_id("American Typewriter");
+        let normal = v.doc.main.paras[0].mark_chp.font;
+        assert_ne!(typewriter, normal);
+        v.format_chars("Font", |c| c.font = typewriter);
+        // A typo put right: Backspace forgets the chosen format, so Return
+        // has to take it from the text before the insertion point.
+        v.type_text("Helloo");
+        v.exec(Cmd::Backspace, false, &mut clip);
+        v.exec(Cmd::NewParagraph, false, &mut clip);
+        v.type_text("World");
+        assert_eq!(v.doc.main.paras[1].chp_of_char(0).font, typewriter);
+        // Chosen and then Return straight away, before typing anything.
+        v.exec(Cmd::NewParagraph, false, &mut clip);
+        let bold = !v.current_chp().bold;
+        v.format_chars("Bold", |c| c.bold = bold);
+        v.exec(Cmd::NewParagraph, false, &mut clip);
+        v.type_text("Again");
+        let c = v.doc.main.paras[3].chp_of_char(0);
+        assert_eq!((c.font, c.bold), (typewriter, bold));
+        // Return in the middle of a paragraph splits it as before.
+        v.sel = Selection::caret(Position::new(1, 2));
+        v.exec(Cmd::NewParagraph, false, &mut clip);
+        assert_eq!(v.doc.main.paras[2].text, "rld");
+        assert_eq!(v.doc.main.paras[2].chp_of_char(0).font, typewriter);
+    }
+
     /// "Before", a 2 by 2 table holding a, b, c, d, then "After".
     fn with_table(clip: &mut Clipboard) -> DocView {
         let mut v = DocView::new(Document::new(), "t".into());
@@ -1674,6 +1704,68 @@ mod tests {
         // Away from any border, a press is an ordinary click.
         let (wx, wy) = v.to_window(row_x(&v) + 5.0, v.tops[0] + 3.0);
         assert_eq!(v.border_cursor(wx, wy), None);
+    }
+
+    #[test]
+    fn a_break_in_a_table_cell_is_refused_with_a_reason() {
+        let mut clip = Clipboard::new();
+        let mut v = with_table(&mut clip);
+        let before = v.doc.main.paras.clone();
+        v.sel = Selection::caret(Position::new(1, 1));
+        for cmd in [Cmd::PageBreak, Cmd::SectionBreak] {
+            v.status = None;
+            v.exec(cmd, false, &mut clip);
+            assert_eq!(v.doc.main.paras, before);
+            assert!(
+                v.status
+                    .as_deref()
+                    .is_some_and(|s| s.contains("inside a table"))
+            );
+        }
+        let names = |v: &DocView| {
+            let (menu, _) = crate::app_menus::context_menu(v, false, false);
+            menu.items
+                .iter()
+                .map(|i| i.label.clone())
+                .collect::<Vec<_>>()
+        };
+        assert!(!names(&v).contains(&"Insert".to_string()));
+        v.sel = Selection::caret(Position::new(0, 1));
+        assert!(names(&v).contains(&"Insert".to_string()));
+    }
+
+    #[test]
+    fn the_move_handle_of_a_table_at_the_top_of_a_page_is_not_the_header() {
+        let mut fonts = quill_layout::Fonts::new(quill_layout::Catalog::scan_system());
+        if fonts.family_names().is_empty() {
+            return;
+        }
+        let mut v = DocView::new(Document::new(), "t".into());
+        v.doc.insert_table(MAIN, Position::new(0, 0), 2, 2, 1440);
+        v.sel = Selection::caret(Position::new(0, 0));
+        v.page_view = true;
+        v.area = Rect::new(0.0, 0.0, 800.0, 600.0);
+        v.update_layout(&mut fonts);
+        let (_, _, r) = v.table_handle().expect("a handle");
+        let (hx, hy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        assert!(
+            v.header_at(hx, hy + 30.0).is_none(),
+            "the table, not the header"
+        );
+        assert!(
+            v.header_at(hx, hy - 30.0).is_some(),
+            "above it is the header"
+        );
+        assert!(v.header_at(hx, hy).is_none(), "the handle comes first");
+        v.mouse_down(hx, hy, false, false);
+        v.mouse_up();
+        assert_eq!(
+            v.sel.range(),
+            (
+                Position::new(0, 0),
+                Position::new(v.doc.main.paras.len() - 1, 0)
+            )
+        );
     }
 
     #[test]

@@ -551,6 +551,8 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
         actions: vec![Action::None],
     };
     let selected = !view.sel.is_empty();
+    // Breaks can't go inside a table, so a table cell's menu leaves them out.
+    let in_table = view.current_pap().in_table;
     let insert = Menu {
         title: "Insert".into(),
         items: vec![
@@ -591,7 +593,7 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
         toc_items.insert(1, Item::separator());
     }
     // In a table: add a row or a column next to the selected cells.
-    if view.current_pap().in_table {
+    if in_table {
         toc_items.push(b.cmd("Insert Row Above", Cmd::InsertRowAbove));
         toc_items.push(b.cmd("Insert Row Below", Cmd::InsertRowBelow));
         toc_items.push(b.cmd("Insert Column Left", Cmd::InsertColumnLeft));
@@ -629,8 +631,19 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
                 b.cmd("Paste as Text", Cmd::PasteText)
                     .enabled(can_paste_text),
                 Item::separator(),
-                b.item("Insert", Action::None).submenu(insert),
-                Item::separator(),
+            ])
+            .chain(
+                (!in_table)
+                    .then(|| {
+                        [
+                            b.item("Insert", Action::None).submenu(insert),
+                            Item::separator(),
+                        ]
+                    })
+                    .into_iter()
+                    .flatten(),
+            )
+            .chain([
                 b.cmd("Font…", Cmd::CharacterDialog),
                 b.cmd("Paragraph…", Cmd::ParagraphDialog),
             ])

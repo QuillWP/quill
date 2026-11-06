@@ -1,7 +1,7 @@
 //! Pictures in the text, as the original handles them: click one to select it
-//! (a frame with three handles), drag the corner handle to scale it, drag
-//! a side handle to crop it, or Shift-drag a side handle to scale it
-//! within its crop.
+//! (a frame with three handles), drag the corner handle to scale it at its
+//! own proportions (Command-drag to stretch it), drag a side handle to crop
+//! that edge, or Shift-drag a side handle to scale it within its crop.
 
 use super::*;
 use quill_core::Picture;
@@ -22,9 +22,13 @@ pub struct PicDrag {
     pub at: Position,
     pub handle: Handle,
     pub shift: bool,
+    /// Command was down: the corner stretches instead of keeping the
+    /// picture's proportions.
+    pub stretch: bool,
     /// The picture's frame when the drag began, in window points.
     pub start: Rect,
-    /// Where the pointer is now.
+    /// Where the handle was grabbed, and where the pointer is now.
+    pub from: (f32, f32),
     pub to: (f32, f32),
 }
 
@@ -149,7 +153,7 @@ impl DocView {
 
     /// A click on a picture: select it, or start dragging one of its
     /// handles. Returns true if the click was the picture's.
-    pub(super) fn picture_mouse_down(&mut self, wx: f32, wy: f32, shift: bool) -> bool {
+    pub(super) fn picture_mouse_down(&mut self, wx: f32, wy: f32, shift: bool, cmd: bool) -> bool {
         if let Some(at) = self.selected_picture()
             && let Some(r) = self.picture_rect(at)
             && let Some((handle, _)) = Self::handles(r)
@@ -160,7 +164,9 @@ impl DocView {
                 at,
                 handle,
                 shift,
+                stretch: cmd,
                 start: r,
+                from: (wx, wy),
                 to: (wx, wy),
             });
             self.drag_status();
@@ -189,12 +195,20 @@ impl DocView {
     /// The frame the picture would have if the drag ended here.
     fn dragged_rect(d: &PicDrag) -> Rect {
         let r = d.start;
-        let w = (d.to.0 - r.x).max(4.0);
-        let h = (d.to.1 - r.y).max(4.0);
+        // Measured from the grab point, so a handle grabbed off its center
+        // does not jump.
+        let w = (r.w + d.to.0 - d.from.0).max(4.0);
+        let h = (r.h + d.to.1 - d.from.1).max(4.0);
         match d.handle {
             Handle::Right => Rect::new(r.x, r.y, w, r.h),
             Handle::Bottom => Rect::new(r.x, r.y, r.w, h),
-            Handle::Corner => Rect::new(r.x, r.y, w, h),
+            Handle::Corner if d.stretch => Rect::new(r.x, r.y, w, h),
+            // Keep the proportions, following whichever side the pointer
+            // has pulled further.
+            Handle::Corner => {
+                let k = (w / r.w.max(1.0)).max(h / r.h.max(1.0));
+                Rect::new(r.x, r.y, (r.w * k).max(4.0), (r.h * k).max(4.0))
+            }
         }
     }
 
@@ -249,7 +263,7 @@ impl DocView {
         }
         let new = match (d.handle, d.shift) {
             (Handle::Corner, _) => pic.scaled_to(w, h),
-            (_, false) => pic.cropped_to(w, h),
+            (_, false) => pic.trimmed_to(w, h),
             // Shift with a side handle scales the picture by that side and
             // keeps the other side's size, cropping to it.
             (Handle::Right, true) => {
@@ -326,7 +340,61 @@ mod tests {
         assert_eq!(v.picture_cursor(r.right() + 4.0, r.bottom() + 4.0), None);
         assert_eq!(v.picture_cursor(r.x + 5.0, r.y + 5.0), None);
         // While a handle is being dragged the pointer keeps its shape.
-        assert!(v.picture_mouse_down(corner.0, corner.1, false));
+        assert!(v.picture_mouse_down(corner.0, corner.1, false, false));
         assert_eq!(v.picture_cursor(0.0, 0.0), Some(Handle::Corner));
+    }
+
+    /// Insert a 64 x 48 point picture, select it and lay it out.
+    fn view_with_picture() -> Option<(DocView, Position, Rect)> {
+        let mut fonts = crate::pdf::tests::test_fonts()?;
+        let mut v = DocView::new(quill_core::Document::new(), "Pic".into());
+        let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x40\0\0\0\x30\x08\x02\0\0\0".to_vec();
+        v.insert_picture(Picture::from_bytes(png).unwrap());
+        v.update_layout(&mut fonts);
+        let at = Position::new(0, 0);
+        let end = Position::new(0, chars::OBJECT.len_utf8());
+        v.set_selection(Selection::new(at, end));
+        let r = v.picture_rect(at)?;
+        Some((v, at, r))
+    }
+
+    #[test]
+    fn the_corner_keeps_proportions_unless_command_is_down() {
+        let Some((mut v, at, r)) = view_with_picture() else {
+            return;
+        };
+        let corner = (r.right() - 3.0, r.bottom() - 3.0);
+        // Pull right only: the height follows.
+        assert!(v.picture_mouse_down(corner.0, corner.1, false, false));
+        v.picture_drag(corner.0 + r.w, corner.1);
+        v.picture_mouse_up();
+        let pic = v.picture_at(at).unwrap();
+        let (sx, sy) = pic.scale();
+        assert!((sx - sy).abs() < 1.0, "{sx} x {sy}");
+        assert!(sx > 150.0);
+        // With Command it stretches across only.
+        let r = v.picture_rect(at).unwrap();
+        let corner = (r.right() - 3.0, r.bottom() - 3.0);
+        assert!(v.picture_mouse_down(corner.0, corner.1, false, true));
+        v.picture_drag(corner.0 + 40.0, corner.1);
+        v.picture_mouse_up();
+        let (sx2, sy2) = v.picture_at(at).unwrap().scale();
+        assert!(sx2 > sx + 10.0, "{sx} x {sy} then {sx2} x {sy2}");
+        assert!((sy2 - sy).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_side_handle_crops_only_its_own_edge() {
+        let Some((mut v, at, r)) = view_with_picture() else {
+            return;
+        };
+        let right = (r.right() - 3.0, r.y + r.h / 2.0);
+        assert!(v.picture_mouse_down(right.0, right.1, false, false));
+        v.picture_drag(right.0 - r.w / 2.0, right.1);
+        v.picture_mouse_up();
+        let pic = v.picture_at(at).unwrap();
+        assert_eq!(pic.crop.left, 0);
+        assert!(pic.crop.right > 40_000, "{:?}", pic.crop);
+        assert!((pic.scale().0 - 100.0).abs() < 1.0);
     }
 }

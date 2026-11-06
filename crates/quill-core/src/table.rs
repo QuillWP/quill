@@ -406,9 +406,9 @@ impl Document {
     }
 
     /// Change a row's settings.
-    /// Keep tables that ran margin to margin doing so when the margins or
-    /// the paper change from `was` to `now` wide. Tables given a width of
-    /// their own stay as they are.
+    /// Keep tables that ran margin to margin (or across their whole column)
+    /// doing so when the margins or the paper change from `was` to `now`
+    /// wide. Tables given a width of their own stay as they are.
     pub(crate) fn fit_full_width_tables(&mut self, was: Twips, now: Twips) {
         if was == now || was <= 0 || now <= 0 {
             return;
@@ -425,7 +425,10 @@ impl Document {
                 p += 1;
                 continue;
             };
+            let first = rows[0].first;
             p = last.end + 1;
+            let section = self.section_props_at(first);
+            let (was, now) = (section.column_width(was), section.column_width(now));
             if is_full_width(&self.main.paras, &rows, was) {
                 self.fit_rows(story, &rows, was, now);
             }
@@ -868,6 +871,21 @@ mod tests {
         d.undo();
         assert_eq!(d.props.text_width(), tw);
         assert_eq!(widths(&d), [tw / 3 * 3, tw / 3 * 3, 2880]);
+    }
+
+    #[test]
+    fn a_table_across_a_whole_column_follows_the_margins() {
+        let mut d = from_plain_text("a");
+        d.section.columns = 2;
+        let column = |d: &Document| d.section.column_width(d.props.text_width());
+        let was = column(&d);
+        d.insert_table(Main, Position::new(0, 0), 1, 2, was / 2);
+        let mut props = d.props.clone();
+        props.margin_left += 720;
+        let sel = crate::Selection::caret(Position::new(0, 0));
+        assert!(d.set_document_props("Document Setup", props, sel));
+        let row = d.main.paras.iter().find_map(|p| p.row.as_ref()).unwrap();
+        assert_eq!(row.width(), column(&d));
     }
 
     #[test]

@@ -45,9 +45,9 @@ pub fn table_selection(view: &DocView) -> Option<TableSel> {
 /// The room a new table has where the insertion point is: the text
 /// column, or the text of the cell it is in.
 fn available_width(view: &DocView) -> Twips {
-    let text_width = view.doc.props.text_width();
-    let paras = &view.doc.main.paras;
     let p = view.sel.focus.para;
+    let text_width = view.doc.column_width_at(p);
+    let paras = &view.doc.main.paras;
     let Some(row) = table::row_at(paras, p) else {
         return text_width;
     };
@@ -221,6 +221,8 @@ pub fn insert_apply(st: &InsertState, d: &Dialog, view: &mut DocView) -> bool {
     if let Some((total, room)) = insert_too_wide(st, d, view, cols, width) {
         let place = if view.current_pap().in_table {
             "the cell"
+        } else if view.doc.section_props_at(view.sel.focus.para).columns > 1 {
+            "the column"
         } else {
             "the page"
         };
@@ -248,7 +250,7 @@ pub fn insert_apply(st: &InsertState, d: &Dialog, view: &mut DocView) -> bool {
                 "c_side" => Convert::SideBySide,
                 _ => Convert::Paragraphs(cols),
             };
-            let text_width = view.doc.props.text_width();
+            let text_width = view.doc.column_width_at(a);
             view.doc.convert_to_table(MAIN, a, b, how, |n| {
                 if width > 0 {
                     width
@@ -343,7 +345,7 @@ pub fn convert_lines(view: &mut DocView, plan: &ConvertPlan, with_neighbors: boo
     } else {
         (plan.first, plan.last)
     };
-    let text_width = view.doc.props.text_width();
+    let text_width = view.doc.column_width_at(a);
     view.doc.begin("Convert to Table", view.sel);
     let at = view
         .doc
@@ -406,7 +408,7 @@ fn cell_alignment(view: &DocView, ts: &TableSel) -> (usize, usize) {
     let paras = &view.doc.main.paras;
     let row = &ts.rows[0];
     let k = ts.from.min(row.cells.len() - 1);
-    let props = table::row_props(paras, row, view.doc.props.text_width());
+    let props = table::row_props(paras, row, view.doc.column_width_at(row.first));
     let v = match props.cells[k].valign {
         VAlign::Top => 0,
         VAlign::Center => 1,
@@ -425,7 +427,7 @@ fn cell_alignment(view: &DocView, ts: &TableSel) -> (usize, usize) {
 /// share one.
 fn selected_rows(view: &DocView, ts: &TableSel) -> (Vec<RowProps>, Option<Twips>) {
     let paras = &view.doc.main.paras;
-    let tw = view.doc.props.text_width();
+    let tw = view.doc.column_width_at(ts.rows[0].first);
     let props: Vec<RowProps> = ts
         .rows
         .iter()
@@ -561,7 +563,7 @@ pub fn table_cells_apply(d: &Dialog, view: &mut DocView) -> bool {
             _ => ts.from.min(n - 1)..=ts.to.min(n - 1),
         }
     };
-    let tw = view.doc.props.text_width();
+    let tw = view.doc.column_width_at(rows[0].first);
     view.doc.begin("Format Cells", view.sel);
     for row in &rows {
         let paras = &view.doc.main.paras;
@@ -628,7 +630,7 @@ pub fn table_layout_button(d: &Dialog, view: &mut DocView, id: &str) {
     let Some(ts) = table_selection(view) else {
         return;
     };
-    let tw = view.doc.props.text_width();
+    let tw = view.doc.column_width_at(ts.rows[0].first);
     let what = if d.is_on("row") || (d.is_on("selection") && d.is_on("vert")) {
         "row"
     } else if d.is_on("column") {
@@ -742,7 +744,7 @@ pub fn insert_rows(view: &mut DocView, below: bool) {
     let Some(row) = row.cloned() else {
         return;
     };
-    let tw = view.doc.props.text_width();
+    let tw = view.doc.column_width_at(row.first);
     let props = table::row_props(&view.doc.main.paras, &row, tw);
     view.doc.begin("Insert Row", view.sel);
     view.doc
@@ -762,8 +764,8 @@ pub fn insert_columns(view: &mut DocView, right: bool) {
     let Some(ts) = table_selection(view) else {
         return;
     };
-    let tw = view.doc.props.text_width();
     let first = ts.rows[0].first;
+    let tw = view.doc.column_width_at(first);
     let here = view.sel.focus.para;
     let rows = table::table_rows(&view.doc.main.paras, first);
     let Some(top) = rows.first().map(|r| r.first) else {
@@ -975,6 +977,22 @@ mod tests {
         let rows = table::table_rows(&v.doc.main.paras, v.sel.focus.para);
         assert_eq!(rows.len(), 3);
         assert_eq!(v.doc.main.paras[v.sel.focus.para].pap.level(), 2);
+    }
+
+    #[test]
+    fn a_table_inserted_in_a_column_is_as_wide_as_the_column() {
+        let mut v = DocView::new(Document::new(), "T".into());
+        v.doc.section.columns = 2;
+        let column = v.doc.section.column_width(v.doc.props.text_width());
+        assert!(column < v.doc.props.text_width() / 2);
+        let (mut d, st) = insert_table(&v);
+        d.set_field("cols", "3");
+        insert_changed(&v, &mut d, "cols");
+        let width = units::parse_length(&d.field_text("width")).unwrap();
+        assert!((width * 3 - column).abs() <= 20, "{width} x 3 in {column}");
+        // A table the width of the page is too wide for the column.
+        let (_, room) = insert_too_wide(&st, &d, &v, 3, column).unwrap();
+        assert_eq!(room, column);
     }
 
     #[test]

@@ -192,6 +192,15 @@ pub struct SectionProps {
     pub headers: Option<std::sync::Arc<Vec<Story>>>,
 }
 
+impl SectionProps {
+    /// The width of one of this section's columns, in a text area `width`
+    /// wide.
+    pub fn column_width(&self, width: Twips) -> Twips {
+        let n = self.columns.max(1) as Twips;
+        ((width - (n - 1) * self.column_spacing) / n).max(144)
+    }
+}
+
 impl Default for SectionProps {
     /// The original's defaults, as its Section dialog shows them.
     fn default() -> Self {
@@ -1344,6 +1353,21 @@ impl Document {
     /// style names a different next style, the new paragraph gets that
     /// style. Returns the start of the new paragraph.
     pub fn split_paragraph(&mut self, story: StoryId, at: Position) -> Position {
+        self.split_paragraph_typing(story, at, None)
+    }
+
+    /// Return typed at the keyboard: as `split_paragraph`, but a new empty
+    /// paragraph that keeps its style also keeps `typing`, the format the
+    /// person was typing in, so a font chosen at the insertion point
+    /// carries on to the next line instead of falling back to the mark's.
+    /// Only the look is taken; the mark keeps its own links, comments and
+    /// revision.
+    pub fn split_paragraph_typing(
+        &mut self,
+        story: StoryId,
+        at: Position,
+        typing: Option<CharProps>,
+    ) -> Position {
         let mut head = self.story(story).paras[at.para].clone();
         let at_end = at.offset == head.len();
         let mut tail = head.split_off(at.offset);
@@ -1359,6 +1383,15 @@ impl Document {
                 // its table cell.
                 tail.pap.in_table = head.pap.in_table;
                 tail.pap.nest = head.pap.nest;
+            } else if let Some(chp) = typing {
+                let own = tail.mark_chp;
+                tail.mark_chp = CharProps {
+                    object: own.object,
+                    link: own.link,
+                    rev: own.rev,
+                    comment: own.comment,
+                    ..chp
+                };
             }
         }
         self.splice(story, at.para, 1, vec![head, tail]);
@@ -1965,6 +1998,13 @@ impl Document {
             .iter()
             .filter(|p| p.mark == Mark::SectionBreak)
             .count()
+    }
+
+    /// The width of a column in the section paragraph `para` is in: the
+    /// room a table or a paragraph there has.
+    pub fn column_width_at(&self, para: usize) -> Twips {
+        self.section_props_at(para)
+            .column_width(self.props.text_width())
     }
 
     /// The settings of the section that paragraph `para` is in.

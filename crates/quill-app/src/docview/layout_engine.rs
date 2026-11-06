@@ -374,7 +374,7 @@ impl DocView {
     /// the section of its page: a click above or below a page's text opens
     /// it, as in the original.
     pub fn header_at(&self, wx: f32, wy: f32) -> Option<(StoryId, usize)> {
-        if !self.page_view || self.pages.is_empty() {
+        if !self.page_view || self.pages.is_empty() || self.on_table_handle(wx, wy) {
             return None;
         }
         let (pw, ph) = self.page_size();
@@ -777,7 +777,7 @@ impl DocView {
                 first_para: *first,
                 start: s.start,
                 columns: s.columns.max(1) as usize,
-                column_width: sections::column_width(text_width, s) as f32 / 20.0,
+                column_width: s.column_width(text_width) as f32 / 20.0,
                 spacing: s.column_spacing as f32 / 20.0,
             })
             .collect();
