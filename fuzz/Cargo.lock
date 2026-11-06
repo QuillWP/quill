@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "quill-app"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "ab_glyph_rasterizer",
  "arboard",
@@ -1432,11 +1432,11 @@ dependencies = [
 
 [[package]]
 name = "quill-core"
-version = "0.12.0"
+version = "0.13.0"
 
 [[package]]
 name = "quill-formats"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "gif",
  "image-webp",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "quill-layout"
-version = "0.12.0"
+version = "0.13.0"
 dependencies = [
  "ab_glyph",
  "ab_glyph_rasterizer",

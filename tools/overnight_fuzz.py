@@ -47,17 +47,17 @@ def seed():
     xml_archives = 0
     for folder, _, names in os.walk(samples):
         for name in names:
-            if name.startswith('._'):
+            if name.startswith(('._', '~$')):
                 continue
             path = Path(folder) / name
             ext = path.suffix.lower()
             try:
                 if path.stat().st_size > LIMIT:
                     continue
-                target = {'.odt':'odt', '.fodt':'odt', '.html':'html', '.htm':'html', '.png':'images', '.jpg':'images', '.jpeg':'images', '.bmp':'images', '.tif':'images', '.tiff':'images', '.qwp':'native', '.md':'markdown', '.markdown':'markdown'}.get(ext)
+                target = {'.docx':'docx', '.rtf':'rtf', '.odt':'odt', '.fodt':'odt', '.html':'html', '.htm':'html', '.png':'images', '.jpg':'images', '.jpeg':'images', '.bmp':'images', '.tif':'images', '.tiff':'images', '.qwp':'native', '.md':'markdown', '.markdown':'markdown'}.get(ext)
                 if target:
                     add(target, path.read_bytes())
-                if ext == '.odt':
+                if ext in ('.docx', '.odt'):
                     add('zip', path.read_bytes())
                 if ext in ('.rtf', '.htm', '.html') and 'Clipboard' in str(path):
                     add('clipboard', bytes([0 if ext == '.rtf' else 1]) + path.read_bytes())
