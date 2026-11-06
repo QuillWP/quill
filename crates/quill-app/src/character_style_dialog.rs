@@ -121,6 +121,16 @@ pub fn summary(doc: &Document, f: CharacterFormat) -> String {
     if has(11) {
         parts.push(format!("Color {}", crate::palette::hex(p.color)));
     }
+    if has(14) && p.script != quill_core::Script::None {
+        parts.push(
+            if p.script == quill_core::Script::Super {
+                "Superscript"
+            } else {
+                "Subscript"
+            }
+            .to_string(),
+        );
+    }
     if has(12) && p.position != 0 {
         let way = if p.position > 0 { "Raised" } else { "Lowered" };
         parts.push(format!("{way} {} pt", points(p.position)));
@@ -148,6 +158,7 @@ macro_rules! fields {
         $apply!(color, 11);
         $apply!(position, 12);
         $apply!(spacing, 13);
+        $apply!(script, 14);
     };
 }
 
@@ -220,6 +231,7 @@ pub fn editor(view: &DocView, fonts: &[quill_layout::FontFamilyInfo], id: Option
                 0,
                 quill_layout::FontFamilyInfo {
                     name,
+                    draws_name: false,
                     variants: vec![quill_layout::FontVariant {
                         bold: false,
                         italic: false,

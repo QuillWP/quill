@@ -19,8 +19,22 @@ impl DocView {
     /// The outline level of paragraph `i`: 1-9 for headings, 10 for body
     /// text.
     pub(super) fn level(&self, i: usize) -> u8 {
+        if i == 0 && self.outline_heading_to_come().is_some() {
+            return 1;
+        }
         let p = &self.doc.main.paras[i].pap;
         self.doc.styles.heading_level(p.style).unwrap_or(BODY)
+    }
+
+    /// The Heading 1 style an empty document's first paragraph takes when
+    /// typed in, while it is still empty in Outline view.
+    pub(super) fn outline_heading_to_come(&self) -> Option<u16> {
+        let paras = &self.doc.main.paras;
+        if !(self.outline && self.outline_start && paras.len() == 1 && paras[0].is_empty()) {
+            return None;
+        }
+        let h = self.doc.styles.find("heading 1")?;
+        (self.doc.styles.heading_level(paras[0].pap.style).is_none()).then_some(h)
     }
 
     /// The paragraphs under paragraph `i`: those after it up to the next
@@ -325,18 +339,10 @@ impl DocView {
         self.outline = on;
         if on {
             self.page_view = false;
-            // An empty document starts its outline with a heading.
-            let paras = &self.doc.main.paras;
-            if paras.len() == 1
-                && paras[0].is_empty()
-                && self.level(0) == BODY
-                && let Some(h) = self.doc.styles.find("heading 1")
-            {
-                let sel = self.sel;
-                self.doc.begin("Outline", sel);
-                self.doc.apply_style(MAIN, 0, 0, h);
-                self.doc.commit(sel);
-            }
+            // An empty document starts its outline with a heading, but only
+            // once something is typed: switching views is not an edit, and
+            // the empty paragraph keeps the document's own font till then.
+            self.outline_start = true;
         }
         self.outline_dirty = true;
         self.invalidate_layout();
@@ -461,6 +467,26 @@ mod tests {
 
     fn levels(v: &DocView) -> Vec<u8> {
         (0..v.doc.main.paras.len()).map(|i| v.level(i)).collect()
+    }
+
+    #[test]
+    fn an_empty_outline_is_unchanged_until_typed_in() {
+        let mut d = quill_core::Document::with_default_font("Big Caslon", 24);
+        d.forget_history();
+        let mut v = DocView::new(d, "T".into());
+        v.set_outline(true);
+        assert!(!v.doc.is_modified());
+        assert_eq!(v.level(0), 1);
+        let font = v.doc.main.paras[0].chp_at(0).font;
+        assert_eq!(v.doc.font_name(font), "Big Caslon");
+        v.type_text("Title");
+        let h = v.doc.styles.find("heading 1").unwrap();
+        assert_eq!(v.doc.main.paras[0].pap.style, h);
+        assert_eq!(v.level(0), 1);
+        // One Undo takes the text and the heading together.
+        v.doc.undo();
+        assert!(v.doc.main.paras[0].is_empty());
+        assert_ne!(v.doc.main.paras[0].pap.style, h);
     }
 
     #[test]

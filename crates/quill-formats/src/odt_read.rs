@@ -26,6 +26,8 @@ use std::sync::Arc;
 /// hostile file cannot ask for millions of empty cells.
 const MAX_COLUMNS: usize = 255;
 const MAX_REPEATED_ROWS: usize = 1000;
+/// The most rows a cell spanning down is read as covering.
+const MAX_ROWS_SPANNED: i32 = 10_000;
 
 /// Fields Quill keeps as their current text.
 const FIELDS: &[&str] = &[
@@ -257,20 +259,46 @@ fn stated(e: &Element) -> u16 {
         (9, &["text-transform"][..]),
         (10, &["display"][..]),
         (11, &["color", "use-window-font-color"][..]),
-        (12, &["text-position"][..]),
         (13, &["letter-spacing"][..]),
     ] {
         if has(names) {
             mask |= 1 << bit;
         }
     }
-    // A superscript or subscript position also sets a smaller size.
-    if e.attr("text-position")
-        .is_some_and(|v| v.split_whitespace().nth(1).is_some_and(|w| w != "100%"))
-    {
-        mask |= 1 << 1;
+    if let Some(v) = e.attr("text-position") {
+        mask |= match script_of(v) {
+            (_, quill_core::Script::None) => 1 << 12,
+            _ => 1 << 14,
+        };
     }
     mask
+}
+
+/// What an ODT text-position says: a superscript or subscript ("super",
+/// "sub", or a shift with a smaller size, as LibreOffice writes one with
+/// its own amounts), or else a shift by hand, in percent of the size,
+/// which comes back with the script as the part not explained by it.
+fn script_of(v: &str) -> (f64, quill_core::Script) {
+    let mut words = v.split_whitespace();
+    let first = words.next().unwrap_or("0%");
+    let scale = words.next().and_then(percent).unwrap_or(100.0);
+    match first {
+        "super" => (0.0, quill_core::Script::Super),
+        "sub" => (0.0, quill_core::Script::Sub),
+        w => {
+            let raise = percent(w).unwrap_or(0.0);
+            if raise != 0.0 && scale < 100.0 {
+                let script = if raise > 0.0 {
+                    quill_core::Script::Super
+                } else {
+                    quill_core::Script::Sub
+                };
+                (0.0, script)
+            } else {
+                (raise, quill_core::Script::None)
+            }
+        }
+    }
 }
 
 /// The first family in a font-family list, without its quotes.
@@ -780,18 +808,9 @@ impl<'a> Reader<'a> {
             c.shadow = v != "none";
         }
         if let Some(v) = e.attr("text-position") {
-            let mut words = v.split_whitespace();
-            let raise = match words.next() {
-                Some("super") => 33.0,
-                Some("sub") => -33.0,
-                Some(w) => percent(w).unwrap_or(0.0),
-                None => 0.0,
-            };
-            let scale = words.next().and_then(percent).unwrap_or(100.0);
+            let (raise, script) = script_of(v);
+            c.script = script;
             c.position = (c.size as f64 * 10.0 * raise / 100.0).round() as Twips;
-            if raise != 0.0 {
-                c.size = ((c.size as f64 * scale / 100.0).round() as u16).clamp(2, 3200);
-            }
         }
     }
 
@@ -995,6 +1014,7 @@ impl<'a> Reader<'a> {
                 s.next = n;
             }
         }
+        self.doc.styles.break_based_on_loops();
         let mut names: Vec<_> = self
             .st
             .named
@@ -2150,6 +2170,10 @@ impl<'a> Reader<'a> {
             })
             .collect();
         let mut gap = None;
+        // Cells spanning rows down: by grid column, how many more rows they
+        // cover, how many columns wide, and their settings, which the cells
+        // under them take.
+        let mut down: Vec<Option<(usize, usize, CellProps)>> = Vec::new();
         for row in rows {
             let mut cells = Vec::new();
             let mut row_chp = self.doc.styles.get(0).chp;
@@ -2165,9 +2189,39 @@ impl<'a> Reader<'a> {
                     .unwrap_or(1)
                     .clamp(1, MAX_COLUMNS as i32) as usize;
                 if covered {
-                    col += repeat;
+                    // Under a cell spanning rows: an empty cell continuing
+                    // it, as Quill and Word keep a vertical merge. Beside a
+                    // cell spanning columns: nothing.
+                    let mut c = 0;
+                    while c < repeat {
+                        match down.get(col).cloned().flatten() {
+                            Some((left, cols, props)) => {
+                                let n = self.doc.styles.get(0);
+                                let mut p = Paragraph::new(n.pap.clone(), n.chp);
+                                p.pap.set_level(self.table_depth);
+                                p.mark = Mark::CellEnd;
+                                out.push(p);
+                                cells.push(CellProps {
+                                    width: widths.iter().skip(col).take(cols).sum(),
+                                    vmerge: quill_core::props::VMerge::Continue,
+                                    ..props.clone()
+                                });
+                                down[col] = (left > 1).then_some((left - 1, cols, props));
+                                col += cols;
+                                c += cols;
+                            }
+                            None => {
+                                col += 1;
+                                c += 1;
+                            }
+                        }
+                    }
                     continue;
                 }
+                let rows_spanned = cell
+                    .int("number-rows-spanned")
+                    .unwrap_or(1)
+                    .clamp(1, MAX_ROWS_SPANNED) as usize;
                 let span = cell
                     .int("number-columns-spanned")
                     .unwrap_or(1)
@@ -2225,6 +2279,7 @@ impl<'a> Reader<'a> {
                     last.mark = Mark::CellEnd;
                     row_chp = last.mark_chp;
                     let width: Twips = widths.iter().skip(col).take(span).sum();
+                    let at = col;
                     col += span;
                     if full {
                         continue;
@@ -2243,7 +2298,19 @@ impl<'a> Reader<'a> {
                             Some("bottom") => quill_core::props::VAlign::Bottom,
                             _ => quill_core::props::VAlign::Top,
                         },
+                        vmerge: if rows_spanned > 1 {
+                            quill_core::props::VMerge::Restart
+                        } else {
+                            quill_core::props::VMerge::None
+                        },
                     });
+                    if rows_spanned > 1 && repeat == 1 {
+                        if down.len() < at + 1 {
+                            down.resize(at + 1, None);
+                        }
+                        let props = cells.last().cloned().unwrap_or_default();
+                        down[at] = Some((rows_spanned - 1, span, props));
+                    }
                 }
             }
             if cells.is_empty() {
@@ -2592,8 +2659,10 @@ mod tests {
         assert!(!p.chp_of_char(0).bold);
         assert!(p.chp_of_char(1).bold && p.chp_of_char(1).italic);
         let sup = p.chp_of_char(2);
-        assert_eq!(sup.size, 23);
-        assert!(sup.position > 0);
+        // The text's own size; the superscript is drawn smaller.
+        assert_eq!(sup.size, 40);
+        assert_eq!(sup.script, quill_core::Script::Super);
+        assert_eq!(sup.position, 0);
     }
 
     #[test]

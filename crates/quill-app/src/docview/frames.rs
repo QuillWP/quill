@@ -93,6 +93,20 @@ impl DocView {
         let h: f32 = (i..=last)
             .map(|p| layout(p).map_or(0.0, |l| l.height))
             .sum();
+        // A drop cap spans body lines, not the oversized letter's line
+        // box (which also includes font leading and descent).
+        let h = if f.drop_lines > 0 {
+            layout(last + 1)
+                .and_then(|body| {
+                    let count = usize::from(f.drop_lines);
+                    let used = count.min(body.lines.len());
+                    let line = body.lines.get(used.checked_sub(1)?)?;
+                    Some(line.top + line.height * (1 + count - used) as f32)
+                })
+                .unwrap_or(h)
+        } else {
+            h
+        };
         let pt = |t: i32| t as f32 / 20.0;
         let props = &self.doc.props;
         let column = pt(props.text_width());
@@ -359,6 +373,35 @@ mod tests {
         assert_eq!(moved.v, FrameV::At(2200));
         assert_eq!(moved.h_rel, FrameRel::Page);
         assert_eq!(moved.v_rel, FrameRel::Page);
+    }
+
+    #[test]
+    fn drop_caps_wrap_the_requested_number_of_body_lines() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        for lines in [2, 3, 4] {
+            let mut doc = quill_core::text::from_plain_text(&format!(
+                "W\n{}",
+                "rapped text flows around the cap and returns to the margin. ".repeat(20)
+            ));
+            doc.main.paras[0].format_range(0, 1, &mut |c| c.size = 96);
+            doc.main.paras[0].pap.frame = Some(Frame {
+                drop_lines: lines,
+                from_text: 40,
+                ..Default::default()
+            });
+            let mut view = DocView::new(doc, "Drop cap".into());
+            view.page_view = true;
+            view.area = Rect::new(0.0, 0.0, 900.0, 700.0);
+            view.update_layout(&mut fonts);
+            let body = view.layout(1);
+            for line in &body.lines[..usize::from(lines)] {
+                assert!(line.left > 0.0, "line beside {lines}-line cap");
+            }
+            assert_eq!(body.lines[usize::from(lines)].left, 0.0);
+            assert_eq!(view.doc.main.paras[0].chp_of_char(0).size, 96);
+        }
     }
 
     #[test]

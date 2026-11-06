@@ -34,7 +34,7 @@ use quill_core::document::{
 use quill_core::notes::AnnotationInfo;
 use quill_core::props::{
     BorderLine, BorderStyle, Borders, CellProps, Frame, FrameH, FrameRel, FrameV, RowHeight,
-    RowProps, TabLeader, VAlign,
+    RowProps, Script, TabLeader, VAlign, VMerge,
 };
 use quill_core::{
     Align, CharProps, Crop, Document, ImageFormat, LineSpacing, Mark, Object, ParaProps, Paragraph,
@@ -52,8 +52,9 @@ const MAJOR: u16 = 1;
 /// 1.3: hyperlinks. 1.4: tracked changes, and comments' ranges, replies and
 /// resolved state. 1.5: live tables of contents. 1.6: solid shading colors.
 /// 1.7: named character styles and direct-format masks. 1.8: paragraph styles
-/// linked to a character style.
-const MINOR: u16 = 8;
+/// linked to a character style. 1.9: vertically merged cells. 1.10:
+/// superscript and subscript as a flag, and each document's sizes for them.
+const MINOR: u16 = 10;
 
 /// Whether `bytes` is a `.qwp` file rather than some other ZIP (.docx).
 pub fn is_quill(bytes: &[u8]) -> bool {
@@ -255,6 +256,7 @@ fn chp(o: &mut Out, c: &CharProps) {
         hidden,
         color,
         position,
+        script,
         spacing,
         object,
         link,
@@ -300,6 +302,11 @@ fn chp(o: &mut Out, c: &CharProps) {
     }
     if comment != 0 {
         o.uint(18, comment as u64);
+    }
+    match script {
+        Script::None => {}
+        Script::Super => o.uint(21, 1),
+        Script::Sub => o.uint(21, 2),
     }
     // The same goes for tracked changes.
     if let Some(r) = quill_core::revision::get(rev) {
@@ -521,6 +528,7 @@ fn row(o: &mut Out, r: &RowProps) {
             shading,
             shading_color,
             valign,
+            vmerge,
         } = c;
         o.nest(1, |o| {
             o.int(1, *width as i64);
@@ -534,6 +542,11 @@ fn row(o: &mut Out, r: &RowProps) {
                 VAlign::Top => {}
                 VAlign::Center => o.uint(4, 1),
                 VAlign::Bottom => o.uint(4, 2),
+            }
+            match vmerge {
+                VMerge::None => {}
+                VMerge::Restart => o.uint(6, 1),
+                VMerge::Continue => o.uint(6, 2),
             }
         });
     }
@@ -644,6 +657,7 @@ fn document_props(o: &mut Out, p: &DocumentProps) {
         track_changes,
         live_toc,
         view,
+        scripts,
     } = p;
     o.int(1, *page_width as i64);
     o.int(2, *page_height as i64);
@@ -689,6 +703,12 @@ fn document_props(o: &mut Out, p: &DocumentProps) {
             },
         );
     }
+    o.nest(21, |o| {
+        o.uint(1, scripts.raise as u64);
+        o.uint(2, scripts.super_size as u64);
+        o.uint(3, scripts.drop as u64);
+        o.uint(4, scripts.sub_size as u64);
+    });
 }
 
 fn summary(o: &mut Out, s: &SummaryInfo) {
@@ -931,6 +951,13 @@ fn read_chp_in(b: &[u8], tracked: bool) -> Result<CharProps, Damaged> {
             18 => c.comment = u32_of(f)?,
             19 => c.character_style = u16_of(f)?,
             20 => c.direct_format = u16_of(f)? & quill_core::character_styles::CharacterFormat::ALL,
+            21 => {
+                c.script = match u16_of(f)? {
+                    1 => Script::Super,
+                    2 => Script::Sub,
+                    _ => Script::None,
+                }
+            }
             _ => {}
         }
     }
@@ -1164,6 +1191,13 @@ fn read_row(b: &[u8]) -> Result<RowProps, Damaged> {
                                 _ => VAlign::Top,
                             }
                         }
+                        6 => {
+                            c.vmerge = match u16_of(f)? {
+                                1 => VMerge::Restart,
+                                2 => VMerge::Continue,
+                                _ => VMerge::None,
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -1307,6 +1341,19 @@ fn read_document_props(b: &[u8]) -> Result<DocumentProps, Damaged> {
                     2 => Some(SavedView::PageLayout),
                     _ => None,
                 }
+            }
+            21 => {
+                let s = &mut p.scripts;
+                for (tag, g) in fields(f)? {
+                    match tag {
+                        1 => s.raise = u16_of(g)?,
+                        2 => s.super_size = u16_of(g)?,
+                        3 => s.drop = u16_of(g)?,
+                        4 => s.sub_size = u16_of(g)?,
+                        _ => {}
+                    }
+                }
+                *s = s.clamped();
             }
             _ => {}
         }
@@ -1645,6 +1692,7 @@ fn repair(doc: &mut Document) {
             s.next = 0;
         }
     }
+    doc.styles.break_based_on_loops();
     let fix_story = |story: &mut Story| {
         if story.paras.is_empty() {
             story.paras.push(Paragraph::default());

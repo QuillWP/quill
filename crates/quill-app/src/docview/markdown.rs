@@ -40,7 +40,9 @@ impl DocView {
     /// will turn back into, if it has been edited.
     pub fn losses_on_return(&self) -> Vec<&'static str> {
         match &self.md_source {
-            Some(s) if self.source_edited() => markdown::losses(&s.original),
+            Some(s) if self.source_edited() => {
+                markdown::losses(&s.original, &crate::settings::with(|s| s.document.clone()))
+            }
             _ => Vec::new(),
         }
     }

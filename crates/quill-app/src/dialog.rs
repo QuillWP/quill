@@ -144,6 +144,8 @@ pub struct PopItem {
     pub label: &'static str,
     /// What the pointer shows over it.
     pub tip: Option<String>,
+    /// False for a button that does nothing now.
+    pub enabled: bool,
 }
 
 pub struct Dialog {
@@ -947,6 +949,7 @@ impl Dialog {
             );
             if !it.label.is_empty() {
                 modern_box(c, r, 5.0, 0xB5B5B5, 0xF4F4F4);
+                let ink = if it.enabled { 0x202020 } else { 0xA0A0A0 };
                 let w = label.width(MODERN_FONT, SIZE, false, it.label);
                 label.draw(
                     c,
@@ -956,7 +959,7 @@ impl Dialog {
                     r.x + (r.w - w) / 2.0,
                     r.y + r.h / 2.0 + 4.5,
                     it.label,
-                    0x202020,
+                    ink,
                 );
                 continue;
             }
@@ -1248,6 +1251,7 @@ impl Dialog {
                     .popout
                     .as_ref()
                     .and_then(|p| p.items.iter().find(|it| it.rect.contains(lx, ly)))
+                    .filter(|it| it.enabled)
                     .map(|it| (it.id, !it.label.is_empty(), it.rgb.is_some()));
                 return match hit {
                     Some((id, true, _)) => Outcome::Button(id),

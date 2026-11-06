@@ -220,6 +220,23 @@ enum Item {
 }
 
 const MAX_INCLUDE_DEPTH: usize = 8;
+/// What the main document and everything it includes may come to, in
+/// characters, fields and paragraph ends: about 1,300 pages. Each item
+/// carries its formatting, so this is kept well under Quill's document
+/// limit to bound the memory INCLUDE fan-out can take.
+const MAX_ITEMS: usize = 4_000_000;
+/// How many items a whole merge may go through, records times items. It
+/// bounds the time a merge takes when records are skipped and so make no
+/// output to count.
+const MAX_STEPS: usize = 4 * MAX_ITEMS;
+
+const TOO_LARGE: &str = "The merged document would be larger than Quill can hold";
+
+fn too_large(what: &str) -> MergeError {
+    MergeError {
+        message: format!("{TOO_LARGE} ({what})"),
+    }
+}
 
 /// The main document as items, without its «DATA» instruction.
 fn items(doc: &Document) -> Vec<Item> {
@@ -265,9 +282,12 @@ fn expand_includes(
     source: Vec<Item>,
     include: &mut dyn FnMut(&str) -> Result<Document, String>,
     depth: usize,
+    room: &mut usize,
     errors: &mut Vec<MergeError>,
 ) -> Vec<Item> {
     let mut out = Vec::new();
+    // What is left of MAX_ITEMS is shared by every level of INCLUDE.
+    *room = room.saturating_sub(source.len());
     for item in source {
         let Item::Field(field, _) = &item else {
             out.push(item);
@@ -292,7 +312,14 @@ fn expand_includes(
             });
         } else {
             match include(name) {
-                Ok(doc) => out.extend(expand_includes(items(&doc), include, depth + 1, errors)),
+                Ok(doc) => {
+                    let more = items(&doc);
+                    if more.len() > *room {
+                        errors.push(too_large(&format!("INCLUDE \u{201C}{name}\u{201D}")));
+                        continue;
+                    }
+                    out.extend(expand_includes(more, include, depth + 1, room, errors));
+                }
                 Err(message) => errors.push(MergeError { message }),
             }
         }
@@ -369,7 +396,19 @@ fn merge_using(
     answers: Option<&HashMap<AskKey, String>>,
 ) -> Result<(Document, Vec<MergeError>), AskRequest> {
     let mut errors = Vec::new();
-    let items = expand_includes(items(main), include, 0, &mut errors);
+    let mut room = MAX_ITEMS;
+    let source = items(main);
+    let items = if source.len() > room {
+        errors.push(too_large("the main document"));
+        Vec::new()
+    } else {
+        expand_includes(source, include, 0, &mut room, &mut errors)
+    };
+    // The output so far, counted as it grows, so a merge stops at Quill's
+    // limits instead of after building something too big to hold.
+    let mut size = crate::limits::Size::default();
+    let mut steps = 0usize;
+    let mut stopped = errors.iter().any(|e| e.message.starts_with(TOO_LARGE));
     let (first, last) = range.unwrap_or((0, data.records.len().saturating_sub(1)));
     let last = last.min(data.records.len().saturating_sub(1));
     let mut out: Vec<Paragraph> = Vec::new();
@@ -377,19 +416,31 @@ fn merge_using(
     let mut known: Vec<String> = data.fields.clone();
     let mut record = first;
     let blank = |pap: &ParaProps, chp: CharProps| Paragraph::new(pap.clone(), chp);
-    while record <= last && !data.records.is_empty() {
+    'records: while !stopped && record <= last && !data.records.is_empty() {
         let out_start = out.len();
         let mut skip = false;
         let mut para: Option<Paragraph> = None;
         // Branches: whether each open IF is taking its text.
         let mut stack: Vec<bool> = Vec::new();
         for it in &items {
+            steps += 1;
+            if steps > MAX_STEPS {
+                errors.push(too_large("too many records for its size"));
+                stopped = true;
+                break 'records;
+            }
+            if let Some(why) = size.too_large() {
+                errors.push(too_large(&why));
+                stopped = true;
+                break 'records;
+            }
             let active = stack.iter().all(|&b| b);
             match it {
                 Item::Text(c, chp) if active => {
                     let p = para.get_or_insert_with(|| blank(&ParaProps::default(), *chp));
                     let at = p.len();
                     p.insert(at, &c.to_string(), *chp);
+                    size.characters += 1;
                 }
                 Item::End(src) if active => {
                     let mut p = para.take().unwrap_or_else(|| blank(&src.pap, src.mark_chp));
@@ -401,6 +452,8 @@ fn merge_using(
                     };
                     p.mark_chp = src.mark_chp;
                     p.row = src.row.clone();
+                    size.paragraphs += 1;
+                    size.runs += p.run_bounds().count();
                     out.push(p);
                 }
                 Item::Field(f, chp) => {
@@ -503,9 +556,16 @@ fn merge_using(
                                     ),
                                 });
                             }
+                            let v = v.unwrap_or_default();
+                            size.characters += v.chars().count();
+                            if let Some(why) = size.too_large() {
+                                errors.push(too_large(&why));
+                                stopped = true;
+                                break 'records;
+                            }
                             let p = para.get_or_insert_with(|| blank(&ParaProps::default(), *chp));
                             let at = p.len();
-                            p.insert(at, &v.unwrap_or_default(), *chp);
+                            p.insert(at, &v, *chp);
                         }
                         _ => {}
                     }
@@ -519,6 +579,8 @@ fn merge_using(
             });
         }
         if let Some(p) = para.take() {
+            size.paragraphs += 1;
+            size.runs += p.run_bounds().count();
             out.push(p);
         }
         if skip {
@@ -540,6 +602,10 @@ fn merge_using(
     }
     errors.dedup();
     let mut doc = main.clone();
+    // A merge stopped at the limits has errors and no partial result.
+    if stopped {
+        out.clear();
+    }
     if out.is_empty() {
         out.push(main.main.paras[0].clone());
     }
@@ -667,6 +733,49 @@ mod tests {
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(out.main.paras[0].text, "Ada Bob");
         assert_eq!(out.main.paras.len(), 1);
+    }
+
+    #[test]
+    fn include_fan_out_stops_at_the_limit_with_no_result() {
+        // Each document includes itself ten times: 10^8 copies unbounded.
+        let text = format!(
+            "{}{}",
+            "x".repeat(50_000),
+            "\u{00AB}INCLUDE self\u{00BB}".repeat(10)
+        );
+        let main = doc(&text);
+        let data = Data::from_document(&doc("Name\nA")).unwrap();
+        let (out, errors) = merge_with_includes(&main, &data, None, &mut |_| Ok(doc(&text)));
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("larger than Quill can hold")),
+            "{errors:?}"
+        );
+        // Nothing merged comes back: only the main document's first paragraph.
+        assert_eq!(out.main.paras, main.main.paras[..1]);
+    }
+
+    #[test]
+    fn many_records_stop_at_the_document_limit() {
+        let main = doc(&format!("{}\u{00AB}Name\u{00BB}", "y".repeat(2_000)));
+        let mut records = String::from("Name");
+        for _ in 0..20_000 {
+            records.push_str("\nA");
+        }
+        let data = Data::from_document(&doc(&records)).unwrap();
+        let (out, errors) = merge(&main, &data, None);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("larger than Quill can hold")),
+            "{errors:?}"
+        );
+        assert_eq!(out.main.paras.len(), 1);
+        // Under the limit, the same merge succeeds.
+        let (out, errors) = merge(&main, &data, Some((0, 99)));
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(out.main.paras.len(), 100);
     }
 
     #[test]

@@ -36,6 +36,7 @@ impl DocView {
                     .collect(),
             ),
             comment_scale: self.comment_scale,
+            scripts: p.scripts,
             ..fields(1)
         }
     }
@@ -454,7 +455,7 @@ impl DocView {
         let height = |i: usize| self.layouts[i].as_ref().map_or(0.0, |l| l.height);
         let mut tops = vec![0.0; n + 1];
         let mut xs = vec![0.0; n];
-        let mut blocks = Vec::new();
+        let mut blocks: Vec<Block> = Vec::new();
         let frames_on = self.frames_on();
         let mut frames = Vec::new();
         let mut clears: Vec<quill_layout::Clear> = Vec::new();
@@ -477,6 +478,9 @@ impl DocView {
                 *y += height;
             }
         };
+        // Vertically merged cells still open above: where each is across,
+        // and the height its text needs against the height its rows have.
+        let mut spans: Vec<MergeSpan> = Vec::new();
         let mut i = 0;
         while i < n {
             if i > 0 {
@@ -487,6 +491,31 @@ impl DocView {
                 .in_table
                 .then(|| table::row_at_level(paras, i, 1))
                 .flatten();
+            // Merges this row does not continue end with the row above,
+            // which grows if their text needs more room.
+            let lefts_here: Vec<f32> = row.as_ref().map_or(Vec::new(), |r| {
+                let props = table::row_props(paras, r, self.column_twips(i));
+                props
+                    .lefts(self.column_twips(i))
+                    .iter()
+                    .zip(&props.cells)
+                    .filter(|(_, c)| c.vmerge == quill_core::VMerge::Continue)
+                    .map(|(l, _)| *l as f32 / 20.0)
+                    .collect()
+            });
+            let continues = |s: &MergeSpan| lefts_here.iter().any(|l| (l - s.left).abs() < 1.0);
+            let extra = spans
+                .iter()
+                .filter(|s| !continues(s))
+                .map(|s| s.need - s.have)
+                .fold(0.0f32, f32::max);
+            if extra > 0.0
+                && let Some(last) = blocks.last_mut()
+            {
+                last.height += extra;
+                y += extra;
+            }
+            spans.retain(|s| continues(s));
             // A frame: its paragraphs go where the frame says, and the text
             // after them flows round it.
             if frames_on
@@ -600,7 +629,19 @@ impl DocView {
                     y,
                     &mut nested,
                 );
-                tallest = tallest.max(end - y);
+                // The top of a vertical merge has the rows below for its
+                // text: it asks of this row only its first line, and the
+                // last row of the merge grows for the rest, as in the original.
+                let wants = if props.cells[k].vmerge == quill_core::VMerge::Restart {
+                    let first_line = self.layouts[a]
+                        .as_ref()
+                        .and_then(|l| l.lines.first().map(|line| line.top + line.height))
+                        .unwrap_or_else(|| height(a));
+                    first_line.min(end - y)
+                } else {
+                    end - y
+                };
+                tallest = tallest.max(wants);
                 used.push(end - y);
                 cells.push((a, b, x0, x1));
             }
@@ -625,8 +666,35 @@ impl DocView {
                     }
                 }
             }
+            // This row's part of the merges it continues, and the merges it
+            // starts.
+            let mut joined_above = vec![false; cells.len()];
+            if let Some(Block {
+                row: Some(above), ..
+            }) = blocks.last_mut()
+            {
+                for s in &mut spans {
+                    s.have += h;
+                    above.joined_below[s.cell] = true;
+                    if let Some(k) = cells.iter().position(|c| (c.2 - s.left).abs() < 1.0) {
+                        s.cell = k;
+                        joined_above[k] = true;
+                    }
+                }
+            }
+            for (k, c) in cells.iter().enumerate() {
+                if props.cells[k].vmerge == quill_core::VMerge::Restart {
+                    spans.push(MergeSpan {
+                        left: c.2,
+                        cell: k,
+                        need: used[k],
+                        have: h,
+                    });
+                }
+            }
             tops[row.end] = y;
             xs[row.end] = cells.last().map_or(0.0, |c| c.3) + pad;
+            let joined_below = vec![false; cells.len()];
             blocks.push(Block {
                 first: row.first,
                 last: row.end,
@@ -636,10 +704,20 @@ impl DocView {
                     cells,
                     props,
                     nested,
+                    joined_below,
+                    joined_above,
                 }),
             });
             y += h;
             i = row.end + 1;
+        }
+        // A merge in a table's last row ends with the document.
+        let extra = spans.iter().map(|s| s.need - s.have).fold(0.0f32, f32::max);
+        if extra > 0.0
+            && let Some(last) = blocks.last_mut()
+        {
+            last.height += extra;
+            y += extra;
         }
         end_notes(&mut y, n - 1);
         tops[n] = y;
@@ -921,18 +999,26 @@ fn place_cell(
             }
             tops[row.end] = cy;
             xs[row.end] = cells.last().map_or(left, |c| c.3) + pad;
-            nested.push(NestedRow {
-                first: row.first,
-                last: row.end,
-                level: level + 1,
-                top: cy,
-                height: h,
-                geom: RowGeom {
-                    cells,
-                    props,
-                    nested: Vec::new(),
+            // Before the tables in its own cells, which were placed first:
+            // rows are drawn in this order, and a row's shading must not
+            // cover the lines of a table inside it.
+            nested.insert(
+                mark,
+                NestedRow {
+                    first: row.first,
+                    last: row.end,
+                    level: level + 1,
+                    top: cy,
+                    height: h,
+                    geom: RowGeom {
+                        cells,
+                        props,
+                        nested: Vec::new(),
+                        joined_below: Vec::new(),
+                        joined_above: Vec::new(),
+                    },
                 },
-            });
+            );
             cy += h;
             j = row.end + 1;
         } else {
@@ -954,6 +1040,16 @@ fn place_cell(
         }
     }
     cy
+}
+
+/// A vertical merge being laid out: its cell's left boundary, its cell
+/// in the last row placed, the height its text needs and the height of its
+/// rows so far, in points.
+struct MergeSpan {
+    left: f32,
+    cell: usize,
+    need: f32,
+    have: f32,
 }
 
 /// The room left under a table at the end of a cell, in points.

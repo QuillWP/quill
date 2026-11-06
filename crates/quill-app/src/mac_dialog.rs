@@ -1268,9 +1268,12 @@ impl NativeDialog {
                     let _: () = msg_send![&*object, setBehavior: 1isize];
                     let _: () = msg_send![&*object, setContentViewController: vc];
                     let bounds: NSRect = msg_send![anchor, bounds];
-                    // Below the control (the lower edge of the view).
+                    // Below the control. Buttons are flipped views, where
+                    // the lower edge is MaxY (3) rather than MinY (1).
+                    let flipped: bool = msg_send![anchor, isFlipped];
+                    let below: usize = if flipped { 3 } else { 1 };
                     let _: () = msg_send![
-                        &*object, showRelativeToRect: bounds ofView: anchor preferredEdge: 1usize
+                        &*object, showRelativeToRect: bounds ofView: anchor preferredEdge: below
                     ];
                     self.popover = Some(Popover {
                         object,
@@ -1725,6 +1728,11 @@ unsafe fn popover_view(
                 let title = NSString::from_str(item.label);
                 let _: () = msg_send![ptr, setTitle: &*title];
                 let _: () = msg_send![ptr, setBezelStyle: 1usize];
+                let _: () = msg_send![ptr, setEnabled: item.enabled];
+                if let Some(tip) = &item.tip {
+                    let tip = NSString::from_str(tip);
+                    let _: () = msg_send![ptr, setToolTip: &*tip];
+                }
             }
             let _: () = msg_send![ptr, setTarget: delegate];
             let _: () = msg_send![ptr, setAction: sel!(quillDialogAction:)];

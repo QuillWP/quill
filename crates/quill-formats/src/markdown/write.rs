@@ -607,8 +607,14 @@ impl Writer<'_> {
                 under: chp.underline != Underline::None
                     && base.underline == Underline::None
                     && chp.link == 0,
-                sup: chp.position > base.position && chp.object == 0,
-                sub: chp.position < base.position && chp.object == 0,
+                sup: (chp.script == quill_core::Script::Super
+                    || (chp.script == quill_core::Script::None && chp.position > base.position))
+                    && base.script != quill_core::Script::Super
+                    && chp.object == 0,
+                sub: (chp.script == quill_core::Script::Sub
+                    || (chp.script == quill_core::Script::None && chp.position < base.position))
+                    && base.script != quill_core::Script::Sub
+                    && chp.object == 0,
                 link: if shows_its_address(&p.text[from_here..end], chp.link) {
                     0
                 } else {

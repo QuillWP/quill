@@ -31,14 +31,10 @@ impl RichContent {
             return Vec::new();
         }
         let mut used = BTreeSet::new();
-        for p in self
-            .fragment
-            .paras
-            .iter()
-            .chain(self.fragment.notes.iter().flat_map(|note| &note.paras))
-        {
+        let mut fragment = self.fragment.clone();
+        each_para(&mut fragment, &mut |p| {
             used.extend(p.runs.iter().filter(|r| r.len > 0).map(|r| r.chp.font));
-        }
+        });
         let mut missing = Vec::new();
         for id in used {
             if let Some(name) = self.fonts.get(id as usize)
@@ -128,25 +124,15 @@ impl RichContent {
         let font = |chp: &mut CharProps| {
             chp.font = fonts.get(chp.font as usize).copied().unwrap_or(0);
         };
+        let mut fragment = self.fragment.clone();
         let mut used = BTreeSet::new();
-        for p in self
-            .fragment
-            .paras
-            .iter()
-            .chain(self.fragment.notes.iter().flat_map(|note| &note.paras))
-        {
-            used.insert(p.pap.style);
-        }
         let mut character_ids = BTreeSet::new();
-        for p in self
-            .fragment
-            .paras
-            .iter()
-            .chain(self.fragment.notes.iter().flat_map(|n| &n.paras))
-        {
-            character_ids.insert(p.mark_chp.character_style);
-            character_ids.extend(p.runs.iter().map(|r| r.chp.character_style));
-        }
+        each_para(&mut fragment, &mut |p| {
+            used.insert(p.pap.style);
+            for c in p.runs.iter().map(|r| &r.chp).chain([&p.mark_chp]) {
+                character_ids.insert(c.character_style);
+            }
+        });
         let mut characters = BTreeMap::new();
         for id in character_ids {
             let Some(source) = self.styles.character(id) else {
@@ -186,12 +172,7 @@ impl RichContent {
             };
             styles.insert(id, mapped);
         }
-        let mut fragment = self.fragment.clone();
-        for p in fragment
-            .paras
-            .iter_mut()
-            .chain(fragment.notes.iter_mut().flat_map(|note| &mut note.paras))
-        {
+        each_para(&mut fragment, &mut |p| {
             p.pap.style = styles.get(&p.pap.style).copied().unwrap_or(0);
             let mut remap = |c: &mut CharProps| {
                 font(c);
@@ -204,8 +185,25 @@ impl RichContent {
             // Two fonts can arrive as one, so runs may need to merge.
             let len = p.len();
             p.format_range(0, len, &mut remap);
-        }
+        });
         fragment
+    }
+}
+
+/// Every paragraph a fragment carries: its own, its notes', and the headers
+/// and footers that come with the section breaks in it.
+fn each_para(fragment: &mut Fragment, f: &mut impl FnMut(&mut Paragraph)) {
+    for p in fragment
+        .paras
+        .iter_mut()
+        .chain(fragment.notes.iter_mut().flat_map(|note| &mut note.paras))
+    {
+        if let Some(headers) = p.section.as_mut().and_then(|s| s.headers.as_mut()) {
+            for story in std::sync::Arc::make_mut(headers) {
+                story.paras.iter_mut().for_each(&mut *f);
+            }
+        }
+        f(p);
     }
 }
 
@@ -363,6 +361,42 @@ mod tests {
             .unwrap();
         let fragment = rich.prepare(&mut Document::new());
         assert_eq!(fragment.paras[0].runs.len(), 1);
+    }
+
+    /// Found by fuzzing: a pasted section break's footer kept the source's
+    /// style number, past the end of this document's styles, and Save As
+    /// .docx then crashed looking it up.
+    #[test]
+    fn a_pasted_section_breaks_footer_uses_this_documents_styles_and_fonts() {
+        let mut stylesheet = String::from(r"{\s0 Normal;}");
+        for k in 1..40 {
+            stylesheet.push_str(&format!(r"{{\s{k} Filler {k};}}"));
+        }
+        stylesheet.push_str(r"{\s40\i Footer Style;}");
+        let rtf = format!(
+            r"{{\rtf1\ansi{{\fonttbl{{\f0 Times;}}{{\f1 Garamond;}}}}{{\stylesheet{stylesheet}}}{body}}}",
+            body = r"\pard\plain One\sect\sectd{\footer\pard\plain\s40\f1 Footer\par}\pard\plain Two\sect\sectd\pard\plain Three\par"
+        );
+        let doc = quill_formats::rtf::read(rtf.as_bytes()).unwrap();
+        let rich = RichContent::from_document(doc, None);
+        let fonts = rich.missing_fonts(|name| name == "Times");
+        assert_eq!(fonts, ["Garamond"], "the footer's font is asked about");
+        let mut target = Document::new();
+        target.begin("Paste", Selection::default());
+        let fragment = rich.prepare(&mut target);
+        target.insert_fragment(StoryId::Main, Position::new(0, 0), &fragment);
+        target.commit(Selection::default());
+        let footer = target
+            .main
+            .paras
+            .iter()
+            .find_map(|p| p.section.as_ref()?.headers.as_ref())
+            .and_then(|h| h.iter().find(|s| s.paras[0].text == "Footer"))
+            .expect("the pasted footer");
+        let p = &footer.paras[0];
+        assert_eq!(target.styles.get(p.pap.style).name, "Footer Style");
+        assert_eq!(target.font_name(p.chp_of_char(0).font), "Garamond");
+        quill_formats::docx::read(&quill_formats::docx::write(&target, 0)).unwrap();
     }
 
     #[test]

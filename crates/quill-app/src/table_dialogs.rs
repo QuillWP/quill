@@ -66,6 +66,95 @@ fn available_width(view: &DocView) -> Twips {
     }
 }
 
+/// The room an existing table has, from paragraph `first` of it, and what
+/// to call that room: the text column, or the cell a table in a cell
+/// sits in.
+fn room_for_table(view: &DocView, first: usize) -> (Twips, &'static str) {
+    let paras = &view.doc.main.paras;
+    let text_width = view.doc.column_width_at(first);
+    let level = paras[first].pap.level();
+    if level > 1
+        && let Some(outer) = table::row_at_level(paras, first, level - 1)
+    {
+        let props = table::row_props(paras, &outer, text_width);
+        let k = outer.cell_of(first).unwrap_or(outer.cells.len() - 1);
+        return ((props.cells[k].width - props.gap).max(360), "the cell");
+    }
+    let place = if view.doc.section_props_at(first).columns > 1 {
+        "the column"
+    } else {
+        "the page"
+    };
+    (text_width, place)
+}
+
+/// The widest row of the table holding paragraph `first`.
+fn widest_row(view: &DocView, first: usize) -> Twips {
+    let paras = &view.doc.main.paras;
+    let text_width = view.doc.column_width_at(first);
+    table::table_rows(paras, first)
+        .iter()
+        .map(|r| table::row_props(paras, r, text_width).width())
+        .max()
+        .unwrap_or(0)
+}
+
+/// A change is about to make the table at `first` (now `before` wide at
+/// its widest row) `after` wide. If that takes it past its room for the
+/// first time, ask whether to go ahead, as Insert Table does. True to go
+/// ahead.
+pub(crate) fn confirm_wider(
+    view: &DocView,
+    first: usize,
+    before: Twips,
+    after: Twips,
+    button: &str,
+) -> bool {
+    let (room, place) = room_for_table(view, first);
+    // A table made to fill the room can come out a few twips over.
+    if after <= room + 20 || before > room + 20 {
+        return true;
+    }
+    #[cfg(not(test))]
+    return crate::app::ask(
+        &format!("The table will be wider than {place}."),
+        &format!(
+            "Its columns will add up to {}, but there is room for {}. {button} anyway?",
+            units::length(after),
+            units::length(room)
+        ),
+        button,
+    );
+    #[cfg(test)]
+    {
+        let _ = (place, button);
+        WIDER_ANSWER.with(|a| a.get())
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What the "wider than" question answers in tests.
+    pub(crate) static WIDER_ANSWER: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// The widest row of the table at `first` once `widths` gives each row's
+/// new total, rows it leaves out keeping theirs.
+pub(crate) fn widest_after(view: &DocView, first: usize, changed: &[(usize, Twips)]) -> Twips {
+    let paras = &view.doc.main.paras;
+    let text_width = view.doc.column_width_at(first);
+    table::table_rows(paras, first)
+        .iter()
+        .map(|r| {
+            changed
+                .iter()
+                .find(|(end, _)| *end == r.end)
+                .map_or_else(|| table::row_props(paras, r, text_width).width(), |c| c.1)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 /// What Insert Table will do: make a new table, or turn the selected
 /// paragraphs into one.
 #[derive(Clone, Debug)]
@@ -605,6 +694,24 @@ pub fn table_cells_apply(d: &Dialog, view: &mut DocView) -> bool {
         }
     };
     let tw = view.doc.column_width_at(rows[0].first);
+    if let Some(w) = width.filter(|w| *w >= 72) {
+        let paras = &view.doc.main.paras;
+        let after: Vec<(usize, Twips)> = rows
+            .iter()
+            .map(|row| {
+                let mut p = table::row_props(paras, row, tw);
+                for k in cols(p.cells.len()) {
+                    p.cells[k].width = w;
+                }
+                (row.end, p.width())
+            })
+            .collect();
+        let first = rows[0].first;
+        let after = widest_after(view, first, &after);
+        if !confirm_wider(view, first, widest_row(view, first), after, "Apply") {
+            return false;
+        }
+    }
     view.doc.begin("Format Cells", view.sel);
     for row in &rows {
         let paras = &view.doc.main.paras;
@@ -653,7 +760,7 @@ pub fn table_layout(view: &DocView) -> Option<Dialog> {
     d.button("merge", "Merge Cells", 141.0, 56.0, 84.0, false);
     d.button("split", "Split Cell", 141.0, 79.0, 84.0, false);
     d.button("cancel", "Cancel", 141.0, 102.0, 84.0, false);
-    if ts.from == ts.to {
+    if ts.from == ts.to && ts.rows.len() == 1 {
         d.disable("merge");
     }
     Some(d)
@@ -735,17 +842,53 @@ pub fn change_cells(view: &mut DocView, id: &str, what: &str) {
             view.doc.delete_rows(MAIN, &a, &b);
         }
         ("split", _) => {
-            for row in ts.rows.iter().rev() {
-                let paras = &view.doc.main.paras;
-                let p = table::row_props(paras, row, tw);
-                view.doc.split_cells(MAIN, row, &p, ts.from, ts.to);
+            // A cell merged down is split back into its rows' cells, not
+            // into two side by side.
+            let all = table::table_rows(paras, ts.rows[0].first);
+            let start = all
+                .iter()
+                .position(|r| r.first == ts.rows[0].first)
+                .unwrap_or(0);
+            let merged: Vec<(usize, usize)> = (start..start + ts.rows.len())
+                .flat_map(|r| {
+                    let n = all[r].cells.len();
+                    (ts.from.min(n - 1)..=ts.to.min(n - 1)).map(move |k| (r, k))
+                })
+                .filter(|&(r, k)| table::merge_top(paras, &all, r, k, tw).is_some())
+                .collect();
+            if merged.is_empty() {
+                for row in ts.rows.iter().rev() {
+                    let paras = &view.doc.main.paras;
+                    let p = table::row_props(paras, row, tw);
+                    view.doc.split_cells(MAIN, row, &p, ts.from, ts.to);
+                }
+            } else {
+                for (r, k) in merged {
+                    view.doc.unmerge_down(MAIN, &all, r, k, tw);
+                }
             }
         }
         ("merge", _) => {
+            let all = table::table_rows(paras, ts.rows[0].first);
+            let start = all
+                .iter()
+                .position(|r| r.first == ts.rows[0].first)
+                .unwrap_or(0);
             for row in ts.rows.iter().rev() {
                 let paras = &view.doc.main.paras;
                 let p = table::row_props(paras, row, tw);
                 view.doc.merge_cells(MAIN, row, &p, ts.from, ts.to);
+            }
+            // Cells selected down more than one row become one tall cell.
+            if ts.rows.len() > 1 {
+                let paras = &view.doc.main.paras;
+                let all = table::table_rows(paras, ts.rows[0].first);
+                let rows = &all[start..(start + ts.rows.len()).min(all.len())];
+                let cells: Vec<usize> = rows
+                    .iter()
+                    .map(|r| ts.from.min(r.cells.len() - 1))
+                    .collect();
+                view.doc.merge_cells_down(MAIN, rows, &cells, tw);
             }
         }
         (_, w) => {
@@ -827,6 +970,26 @@ pub fn insert_columns(view: &mut DocView, right: bool) {
     let row_index = rows.iter().position(|r| r.first <= here && here <= r.end);
     let full = table::is_full_width(&view.doc.main.paras, &rows, tw);
     let n = ts.to - ts.from + 1;
+    if !full {
+        let paras = &view.doc.main.paras;
+        let after: Vec<(usize, Twips)> = rows
+            .iter()
+            .map(|row| {
+                let p = table::row_props(paras, row, tw);
+                let last = row.cells.len() - 1;
+                let beside = if right {
+                    ts.to.min(last)
+                } else {
+                    ts.from.min(last)
+                };
+                (row.end, p.width() + n as Twips * p.cells[beside].width)
+            })
+            .collect();
+        let after = widest_after(view, top, &after);
+        if !confirm_wider(view, top, widest_row(view, top), after, "Insert") {
+            return;
+        }
+    }
     view.doc.begin("Insert Column", view.sel);
     for row in rows.iter().rev() {
         let p = table::row_props(&view.doc.main.paras, row, tw);
@@ -897,6 +1060,63 @@ mod tests {
         let rows = table::table_rows(&v.doc.main.paras, 0);
         assert!(rows.iter().all(|r| r.cells.len() == 5));
         assert_eq!(v.sel.focus.para, rows[0].cells[1].0);
+    }
+
+    #[test]
+    fn merge_cells_down_a_column_and_split_it_again() {
+        let mut v = view_with_table();
+        v.doc
+            .insert_text(MAIN, Position::new(0, 0), "top", Default::default());
+        v.doc
+            .insert_text(MAIN, Position::new(4, 0), "under", Default::default());
+        v.doc.forget_history();
+        // From the first row's first cell to the second row's.
+        v.set_selection(Selection::new(Position::new(0, 0), Position::new(4, 0)));
+        change_cells(&mut v, "merge", "cells");
+        let paras = &v.doc.main.paras;
+        let rows = table::table_rows(paras, 0);
+        let vm = |r: usize| table::row_props(paras, &rows[r], 8640).cells[0].vmerge;
+        assert_eq!(vm(0), quill_core::VMerge::Restart);
+        assert_eq!(vm(1), quill_core::VMerge::Continue);
+        assert_eq!(paras[rows[0].cells[0].0].text, "top");
+        assert_eq!(paras[rows[0].cells[0].1].text, "under");
+        assert!(paras[rows[1].cells[0].0].text.is_empty());
+        // Split Cell on it takes the merge apart, keeping the text on top.
+        v.set_selection(Selection::caret(Position::new(rows[1].cells[0].0, 0)));
+        change_cells(&mut v, "split", "cells");
+        let paras = &v.doc.main.paras;
+        let rows = table::table_rows(paras, 0);
+        for r in &rows {
+            let p = table::row_props(paras, r, 8640);
+            assert_eq!(p.cells.len(), 3);
+            assert_eq!(p.cells[0].vmerge, quill_core::VMerge::None);
+        }
+    }
+
+    #[test]
+    fn a_column_that_takes_the_table_past_the_page_is_asked_about() {
+        // 3 columns of 2000 twips in a 8640-twip column: a fourth fits, a
+        // fifth does not.
+        let mut v = view_with_table();
+        let cells = |v: &DocView| {
+            let paras = &v.doc.main.paras;
+            table::row_props(paras, &table::table_rows(paras, 0)[0], 8640)
+                .cells
+                .len()
+        };
+        insert_columns(&mut v, true);
+        assert_eq!(cells(&v), 4);
+        WIDER_ANSWER.with(|a| a.set(false));
+        insert_columns(&mut v, true);
+        assert_eq!(cells(&v), 4);
+        WIDER_ANSWER.with(|a| a.set(true));
+        insert_columns(&mut v, true);
+        assert_eq!(cells(&v), 5);
+        // Once it is past the page, widening it more is not asked again.
+        WIDER_ANSWER.with(|a| a.set(false));
+        insert_columns(&mut v, true);
+        assert_eq!(cells(&v), 6);
+        WIDER_ANSWER.with(|a| a.set(true));
     }
 
     #[test]

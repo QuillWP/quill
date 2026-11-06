@@ -95,6 +95,12 @@ impl App {
         let Some(action) = action else {
             return;
         };
+        self.menu_action(el, action);
+    }
+
+    /// Do what a menu item chose, for the window in front.
+    #[cfg(target_os = "macos")]
+    pub(super) fn menu_action(&mut self, el: &ActiveEventLoop, action: Action) {
         // While a text field in a dialog is being edited (Find, Replace and
         // the like), Cut, Copy, Paste, Select All and Undo are the field's.
         #[cfg(target_os = "macos")]

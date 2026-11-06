@@ -222,13 +222,9 @@ pub struct Settings {
     /// Interface size as a percentage of the platform's usual size, for
     /// trying out sizes by editing the settings file.
     pub interface_scale: u16,
-    /// The formatting toolbar and the ruler's button row, as a percentage
-    /// of the original's size (before the interface size above).
-    pub formatting_toolbar_scale: u16,
     /// The top toolbar's button pitch in points.
     pub toolbar_spacing: u16,
-    /// Extra points after each formatting toolbar and ruler control, before
-    /// `formatting_toolbar_scale` applies.
+    /// Extra points after each formatting toolbar and ruler control.
     pub formatting_toolbar_spacing: u16,
     /// Text size in points in the font, size and style boxes.
     pub toolbar_picker_font_size: u16,
@@ -344,7 +340,6 @@ impl Default for Settings {
             document_zoom: 150.0,
             window_frame: None,
             interface_scale: 100,
-            formatting_toolbar_scale: 110,
             toolbar_spacing: 24,
             formatting_toolbar_spacing: 3,
             toolbar_picker_font_size: 12,
@@ -514,11 +509,6 @@ impl Settings {
         );
         put(
             &mut out,
-            "formatting_toolbar_scale",
-            self.formatting_toolbar_scale.to_string(),
-        );
-        put(
-            &mut out,
             "toolbar_spacing",
             self.toolbar_spacing.to_string(),
         );
@@ -572,6 +562,12 @@ impl Settings {
         );
         put(&mut out, "font", self.font.clone());
         put(&mut out, "size", self.size.to_string());
+        // New documents' superscript and subscript sizes, in percent.
+        let sc = self.document.scripts;
+        put(&mut out, "superscript_raise", sc.raise.to_string());
+        put(&mut out, "superscript_size", sc.super_size.to_string());
+        put(&mut out, "subscript_drop", sc.drop.to_string());
+        put(&mut out, "subscript_size", sc.sub_size.to_string());
 
         section(&mut out, "Spelling", Some("Preferences > Spelling"));
         put(&mut out, "always_suggest", b(self.always_suggest));
@@ -793,9 +789,6 @@ impl Settings {
                     };
                 }
                 "interface_scale" => s.interface_scale = v.parse().unwrap_or(100u16).clamp(50, 300),
-                "formatting_toolbar_scale" => {
-                    s.formatting_toolbar_scale = v.parse().unwrap_or(110u16).clamp(50, 300)
-                }
                 "toolbar_spacing" => s.toolbar_spacing = v.parse().unwrap_or(24u16).clamp(16, 48),
                 "formatting_toolbar_spacing" => {
                     s.formatting_toolbar_spacing = v.parse().unwrap_or(3u16).min(20)
@@ -955,6 +948,18 @@ impl Settings {
                 "make_backup" => s.make_backup = flag,
                 "font" if !v.is_empty() => s.font = v.into(),
                 "size" => s.size = v.parse().unwrap_or(24u16).clamp(2, 3276),
+                "superscript_raise" | "superscript_size" | "subscript_drop" | "subscript_size" => {
+                    if let Ok(n) = v.trim().parse::<u16>() {
+                        let sc = &mut s.document.scripts;
+                        match k {
+                            "superscript_raise" => sc.raise = n,
+                            "superscript_size" => sc.super_size = n,
+                            "subscript_drop" => sc.drop = n,
+                            _ => sc.sub_size = n,
+                        }
+                        *sc = sc.clamped();
+                    }
+                }
                 "doc.page_width" => d.page_width = num(d.page_width).clamp(1440, 31680),
                 "doc.page_height" => d.page_height = num(d.page_height).clamp(1440, 31680),
                 "doc.margin_left" => d.margin_left = num(d.margin_left),
@@ -1171,41 +1176,15 @@ mod tests {
 
     #[test]
     fn interface_sizes_read_back_and_stay_in_range() {
-        let s = Settings::from_text(
-            "interface_scale = 90\nformatting_toolbar_scale = 100\ntoolbar_spacing = 22\n",
-        );
-        assert_eq!(
-            (
-                s.interface_scale,
-                s.formatting_toolbar_scale,
-                s.toolbar_spacing
-            ),
-            (90, 100, 22)
-        );
-        assert!(s.to_text().contains("\nformatting_toolbar_scale = 100\n"));
+        let s = Settings::from_text("interface_scale = 90\ntoolbar_spacing = 22\n");
+        assert_eq!((s.interface_scale, s.toolbar_spacing), (90, 22));
         assert!(
             !Settings::from_text("open_with_formatting_toolbar = 0\n").open_with_formatting_toolbar
         );
         let back = Settings::from_text(&s.to_text());
-        assert_eq!(
-            (
-                back.interface_scale,
-                back.formatting_toolbar_scale,
-                back.toolbar_spacing
-            ),
-            (90, 100, 22)
-        );
-        let wild = Settings::from_text(
-            "interface_scale = 5\nformatting_toolbar_scale = 900\ntoolbar_spacing = x\n",
-        );
-        assert_eq!(
-            (
-                wild.interface_scale,
-                wild.formatting_toolbar_scale,
-                wild.toolbar_spacing
-            ),
-            (50, 300, 24)
-        );
+        assert_eq!((back.interface_scale, back.toolbar_spacing), (90, 22));
+        let wild = Settings::from_text("interface_scale = 5\ntoolbar_spacing = x\n");
+        assert_eq!((wild.interface_scale, wild.toolbar_spacing), (50, 24));
     }
 
     #[test]

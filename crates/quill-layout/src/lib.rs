@@ -42,6 +42,35 @@ mod tests {
     }
 
     #[test]
+    fn superscripts_are_drawn_by_the_document_s_sizes() {
+        let Some(mut f) = fonts() else { return };
+        let mut p = para("x2", ParaProps::default());
+        p.format_range(1, 2, &mut |c| c.script = quill_core::Script::Super);
+        let style_of = |l: &ParaLayout| {
+            let g = &l.glyphs[1];
+            l.styles[g.style as usize]
+        };
+        let l = lay(&p, 400.0, &mut f);
+        let st = style_of(&l);
+        // 12 pt text: drawn at two thirds the size, a third of it up.
+        assert_eq!((st.size, st.raise), (8.0, 4.0));
+        assert_eq!(st.chp.size, 16);
+        // Other sizes for the document change only how it is drawn.
+        let opts = LayoutOptions {
+            width: 400.0,
+            scripts: quill_core::ScriptSizes {
+                raise: 25,
+                super_size: 100,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let l = layout_paragraph(&p, &names, &mut f, &opts);
+        assert_eq!((style_of(&l).size, style_of(&l).raise), (12.0, 3.0));
+        assert_eq!(p.chp_of_char(1).size, 24);
+    }
+
+    #[test]
     fn empty_paragraph_has_one_line_of_height() {
         let Some(mut f) = fonts() else { return };
         let l = lay(&para("", ParaProps::default()), 400.0, &mut f);

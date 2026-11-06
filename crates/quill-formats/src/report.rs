@@ -4,6 +4,9 @@
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ImportReport {
     notes: Vec<&'static str>,
+    /// The file's format has no page size or margins (HTML, Markdown, plain
+    /// text), so the ones it came with are only Quill's built-in defaults.
+    pub no_page: bool,
 }
 
 impl ImportReport {

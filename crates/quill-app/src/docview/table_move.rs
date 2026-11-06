@@ -31,7 +31,15 @@ impl DocView {
         let (x, y) = self.to_window(left, b.top);
         // In Normal view the table can start at the window's edge.
         let x = (x - SIZE - 2.0).max(self.area.x + 1.0);
-        Some((first, last, Rect::new(x, y - SIZE - 2.0, SIZE, SIZE)))
+        let top = y - SIZE - 2.0;
+        // Keep the handle visible while the table's top is visible. Once
+        // the table scrolls above the view, its handle goes with it.
+        let top = if y >= self.area.y {
+            top.max(self.area.y + 1.0)
+        } else {
+            top
+        };
+        Some((first, last, Rect::new(x, top, SIZE, SIZE)))
     }
 
     /// Where a dragged table would go: before paragraph `p`, which is not
@@ -159,5 +167,38 @@ impl DocView {
             let w = (self.column_twips(p) as f32 / 20.0).max(40.0);
             c.fill(Rect::new(x, y - 1.0, w, 2.0), color::BLACK);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normal_view_table_handle_stays_visible_and_selects_the_table() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut view = DocView::new(Document::new(), "Table".into());
+        view.doc.insert_table(MAIN, Position::new(0, 0), 2, 2, 1440);
+        view.sel = Selection::caret(Position::new(0, 0));
+        view.area = Rect::new(20.0, 100.0, 800.0, 600.0);
+        view.update_layout(&mut fonts);
+        let table_top = view.blocks[0].top;
+        let (_, y) = view.to_window(0.0, table_top);
+        // The table starts exactly at the top edge of the visible text.
+        view.scroll_y = y - view.area.y;
+        let (first, last, r) = view.table_handle().expect("a handle");
+        assert!(r.x >= view.area.x && r.y >= view.area.y);
+        assert!(r.y + r.h <= view.area.y + view.area.h);
+        view.mouse_down(r.x + r.w / 2.0, r.y + r.h / 2.0, false, false);
+        view.mouse_up();
+        assert_eq!(
+            view.sel.range(),
+            (Position::new(first, 0), Position::new(last + 1, 0))
+        );
+        view.scroll_y += 20.0;
+        let (_, _, r) = view.table_handle().expect("a scrolled handle");
+        assert!(r.y + r.h < view.area.y);
     }
 }

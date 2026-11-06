@@ -73,16 +73,29 @@ impl DocView {
             ..opts.clone()
         };
         if self.captions {
-            // The comments pane sets every comment in one small size,
-            // whatever the document's own fonts are.
+            // The comments pane sets every comment in the system's own
+            // interface font at one small size, whatever the document's
+            // fonts are, so comments read like the rest of the window. Only
+            // the drawing changes; the comments keep their own formatting.
             let mut p = paras[i].clone();
             let len = p.len();
             let size = (comment_cards::COMMENT_SIZE * 2.0 * self.comment_scale).round() as u16;
-            p.format_range(0, len, &mut |c| c.size = size);
+            p.format_range(0, len, &mut |c| {
+                c.size = size;
+                c.font = comment_cards::INTERFACE_FONT;
+            });
             p.mark_chp.size = size;
+            p.mark_chp.font = comment_cards::INTERFACE_FONT;
             p.pap.before = 0;
             p.pap.after = 0;
-            layout_paragraph_joined(&p, name, fonts, &o, j)
+            let name = |id| {
+                if id == comment_cards::INTERFACE_FONT {
+                    quill_layout::fonts::UI_FONT.to_string()
+                } else {
+                    name(id)
+                }
+            };
+            layout_paragraph_joined(&p, &name, fonts, &o, j)
         } else if self.outline && !self.show_formatting {
             // Outline view without formatting: everything in the Normal
             // style's font and size.

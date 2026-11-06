@@ -7,7 +7,7 @@
 use crate::document::{Document, StoryId};
 use crate::limits::MAX_TABLE_LEVEL;
 use crate::para::{Mark, Paragraph, chars};
-use crate::props::{RowProps, Twips};
+use crate::props::{RowProps, Twips, VMerge};
 use crate::story::Position;
 
 /// One row: its paragraphs from `first` to its end mark at `end`, and each
@@ -254,6 +254,133 @@ pub fn row_props(paras: &[Paragraph], row: &Row, text_width: Twips) -> RowProps 
         }
         None => RowProps::even(n, text_width / n as Twips),
     }
+}
+
+/// The cell of a row whose left boundary is at `left` (twips from the
+/// margin, as `RowProps::lefts` gives it), give or take a point: how a
+/// vertical merge finds its column in the rows above and below, which may
+/// have different cells.
+pub fn cell_at_left(props: &RowProps, left: Twips, text_width: Twips) -> Option<usize> {
+    props
+        .lefts(text_width)
+        .iter()
+        .position(|&l| (l - left).abs() <= 20)
+}
+
+/// Where the vertical merge that cell `k` of `rows[r]` belongs to starts:
+/// its row and cell. None for a cell in no merge, including a continuing
+/// cell with no top cell above it.
+pub fn merge_top(
+    paras: &[Paragraph],
+    rows: &[Row],
+    r: usize,
+    k: usize,
+    text_width: Twips,
+) -> Option<(usize, usize)> {
+    let props = row_props(paras, &rows[r], text_width);
+    match props.cells.get(k)?.vmerge {
+        VMerge::None => None,
+        VMerge::Restart => Some((r, k)),
+        VMerge::Continue => {
+            let left = props.lefts(text_width)[k];
+            let mut up = r;
+            while up > 0 {
+                up -= 1;
+                let above = row_props(paras, &rows[up], text_width);
+                let j = cell_at_left(&above, left, text_width)?;
+                match above.cells[j].vmerge {
+                    VMerge::Restart => return Some((up, j)),
+                    VMerge::Continue => {}
+                    VMerge::None => return None,
+                }
+            }
+            None
+        }
+    }
+}
+
+/// The cell of `rows[r + 1]` that continues the merge cell `k` of
+/// `rows[r]` is in, if any.
+pub fn merged_below(
+    paras: &[Paragraph],
+    rows: &[Row],
+    r: usize,
+    k: usize,
+    text_width: Twips,
+) -> Option<usize> {
+    let props = row_props(paras, &rows[r], text_width);
+    if props.cells.get(k)?.vmerge == VMerge::None {
+        return None;
+    }
+    let next = row_props(paras, rows.get(r + 1)?, text_width);
+    let j = cell_at_left(&next, props.lefts(text_width)[k], text_width)?;
+    (next.cells[j].vmerge == VMerge::Continue).then_some(j)
+}
+
+/// `row`'s settings with only real vertical merges kept (see `merges`),
+/// for writers that go a row at a time. Free for a row with none.
+pub fn row_props_merged(paras: &[Paragraph], row: &Row, text_width: Twips) -> RowProps {
+    let mut props = row_props(paras, row, text_width);
+    if props.cells.iter().all(|c| c.vmerge == VMerge::None) {
+        return props;
+    }
+    let rows = rows_around(paras, row);
+    let Some(r) = rows.iter().position(|x| x.first == row.first) else {
+        return props;
+    };
+    for k in 0..props.cells.len() {
+        let real = match props.cells[k].vmerge {
+            VMerge::Restart => merged_below(paras, &rows, r, k, text_width).is_some(),
+            VMerge::Continue => merge_top(paras, &rows, r, k, text_width).is_some(),
+            VMerge::None => true,
+        };
+        if !real {
+            props.cells[k].vmerge = VMerge::None;
+        }
+    }
+    props
+}
+
+/// A cell's place in a vertical merge, worked out over a whole table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Merged {
+    /// Not merged with the cells above or below.
+    No,
+    /// The top cell of a merge this many rows tall.
+    Top(usize),
+    /// Under the top cell, continuing it.
+    Under,
+}
+
+/// Each cell of a table's rows, given by their settings top to bottom, as
+/// part of a vertical merge or not. Only real merges count: a continuing
+/// cell with nothing above it to continue, or a top cell with nothing
+/// under it, is an ordinary cell. What the writers save.
+pub fn merges(rows: &[RowProps], text_width: Twips) -> Vec<Vec<Merged>> {
+    let lefts: Vec<Vec<Twips>> = rows.iter().map(|r| r.lefts(text_width)).collect();
+    let mut out: Vec<Vec<Merged>> = rows
+        .iter()
+        .map(|r| vec![Merged::No; r.cells.len()])
+        .collect();
+    for r in 0..rows.len() {
+        for k in 0..rows[r].cells.len() {
+            if rows[r].cells[k].vmerge != VMerge::Restart {
+                continue;
+            }
+            let mut n = 1;
+            while let Some(next) = rows.get(r + n)
+                && let Some(j) = cell_at_left(next, lefts[r][k], text_width)
+                && next.cells[j].vmerge == VMerge::Continue
+            {
+                out[r + n][j] = Merged::Under;
+                n += 1;
+            }
+            if n > 1 {
+                out[r][k] = Merged::Top(n);
+            }
+        }
+    }
+    out
 }
 
 /// Whether every row of a table runs margin to margin in `text_width`,
@@ -506,6 +633,31 @@ impl Document {
         count: usize,
         props: &RowProps,
     ) {
+        let at = if below { row.end + 1 } else { row.first };
+        // New rows are merged with nothing, unless they go inside a
+        // vertical merge, which they then carry on: where the row after
+        // them continues one.
+        let mut props = props.clone();
+        let paras = &self.story(story).paras;
+        let after = paras
+            .get(at)
+            .filter(|p| p.pap.level() == paras[row.end].pap.level())
+            .and_then(|_| row_at_level(paras, at, paras[row.end].pap.level()));
+        // Room enough that the cells' lefts can be compared.
+        let wide = props.width().max(1);
+        let lefts = props.lefts(wide);
+        let next = after.map(|r| row_props(paras, &r, wide));
+        for (k, cell) in props.cells.iter_mut().enumerate() {
+            let inside = next.as_ref().is_some_and(|n| {
+                cell_at_left(n, lefts[k], wide)
+                    .is_some_and(|j| n.cells[j].vmerge == VMerge::Continue)
+            });
+            cell.vmerge = if inside {
+                VMerge::Continue
+            } else {
+                VMerge::None
+            };
+        }
         let mut new = Vec::new();
         for _ in 0..count {
             for &(a, _) in &row.cells {
@@ -513,7 +665,6 @@ impl Document {
             }
             new.push(self.row_mark(story, row.end, props.clone()));
         }
-        let at = if below { row.end + 1 } else { row.first };
         self.splice(story, at, 0, new);
     }
 
@@ -680,6 +831,118 @@ impl Document {
         self.splice(story, row.first, row.end - row.first + 1, new);
     }
 
+    /// Merge Cells across rows: cell `cells[i]` of each of `rows`, top to
+    /// bottom, becomes one tall cell. The top one takes the text of them
+    /// all, as separate paragraphs (empty cells add nothing); the ones
+    /// under it continue it, empty, as the original keeps a vertical merge.
+    pub fn merge_cells_down(
+        &mut self,
+        story: StoryId,
+        rows: &[Row],
+        cells: &[usize],
+        text_width: Twips,
+    ) {
+        if rows.len() < 2 || cells.len() != rows.len() {
+            return;
+        }
+        // The lower rows first, from the bottom, so the rows above keep
+        // their paragraph numbers.
+        let mut moved: Vec<Vec<Paragraph>> = Vec::new();
+        for (row, &k) in rows.iter().zip(cells).skip(1).rev() {
+            let paras = &self.story(story).paras;
+            let Some(&(a, b)) = row.cells.get(k) else {
+                return;
+            };
+            let empty = a == b && paras[a].text.is_empty();
+            moved.push(if empty {
+                Vec::new()
+            } else {
+                paras[a..=b].to_vec()
+            });
+            let mut props = row_props(paras, row, text_width);
+            props.cells[k].vmerge = VMerge::Continue;
+            let mut new: Vec<Paragraph> = Vec::new();
+            for (j, &(x, y)) in row.cells.iter().enumerate() {
+                if j == k {
+                    let mut blank = Paragraph::new(paras[a].pap.clone(), paras[b].mark_chp);
+                    blank.mark = Mark::CellEnd;
+                    new.push(blank);
+                } else {
+                    new.extend_from_slice(&paras[x..=y]);
+                }
+            }
+            let mut mark = paras[row.end].clone();
+            mark.row = Some(Box::new(props));
+            new.push(mark);
+            self.splice(story, row.first, row.end - row.first + 1, new);
+        }
+        moved.reverse();
+        let top = &rows[0];
+        let k = cells[0];
+        let paras = &self.story(story).paras;
+        let Some(&(a, b)) = top.cells.get(k) else {
+            return;
+        };
+        let mut cell: Vec<Paragraph> = if a == b && paras[a].text.is_empty() {
+            Vec::new()
+        } else {
+            paras[a..=b].to_vec()
+        };
+        for more in moved {
+            if let Some(last) = cell.last_mut() {
+                last.mark = Mark::Paragraph;
+            }
+            cell.extend(more);
+        }
+        if cell.is_empty() {
+            cell.push(paras[a].clone());
+        }
+        if let Some(last) = cell.last_mut() {
+            last.mark = Mark::CellEnd;
+        }
+        let mut props = row_props(paras, top, text_width);
+        props.cells[k].vmerge = VMerge::Restart;
+        let mut new: Vec<Paragraph> = Vec::new();
+        for (j, &(x, y)) in top.cells.iter().enumerate() {
+            if j == k {
+                new.append(&mut cell);
+            } else {
+                new.extend_from_slice(&paras[x..=y]);
+            }
+        }
+        let mut mark = paras[top.end].clone();
+        mark.row = Some(Box::new(props));
+        new.push(mark);
+        self.splice(story, top.first, top.end - top.first + 1, new);
+    }
+
+    /// Undo a vertical merge: the merge cell `k` of `rows[r]` is in goes
+    /// back to separate cells, its text staying in the top one.
+    pub fn unmerge_down(
+        &mut self,
+        story: StoryId,
+        rows: &[Row],
+        r: usize,
+        k: usize,
+        text_width: Twips,
+    ) {
+        let paras = &self.story(story).paras;
+        let Some((mut r, mut k)) = merge_top(paras, rows, r, k, text_width) else {
+            return;
+        };
+        loop {
+            let paras = &self.story(story).paras;
+            let below = merged_below(paras, rows, r, k, text_width);
+            let mut props = row_props(paras, &rows[r], text_width);
+            props.cells[k].vmerge = VMerge::None;
+            self.set_row(story, rows[r].end, props);
+            match below {
+                Some(j) => (r, k) = (r + 1, j),
+                None => break,
+            }
+        }
+    }
+
     /// Format > Table Layout > Merge Cells: cells `from..=to` of a row
     /// become one cell as wide as them all, holding their text as
     /// separate paragraphs (empty cells add nothing).
@@ -828,6 +1091,54 @@ mod tests {
         d.commit(crate::Selection::default());
         d.undo();
         assert_eq!(texts(&d), ["|", "|", "/", "|", "|", "/", ""]);
+    }
+
+    #[test]
+    fn merging_cells_down_keeps_their_text_in_the_top_one() {
+        let mut d = from_plain_text("a\tx\nb\ty\n\tz");
+        d.convert_to_table(Main, 0, 2, Convert::Tabs, |_| 1000);
+        d.commit(crate::Selection::default());
+        let before = d.main.clone();
+        let rows = table_rows(&d.main.paras, 0);
+        d.merge_cells_down(Main, &rows, &[0, 0, 0], 8640);
+        d.commit(crate::Selection::default());
+        assert_eq!(
+            texts(&d),
+            ["a", "b|", "x|", "/", "|", "y|", "/", "|", "z|", "/", ""]
+        );
+        let rows = table_rows(&d.main.paras, 0);
+        let vm = |r: usize| row_props(&d.main.paras, &rows[r], 8640).cells[0].vmerge;
+        assert_eq!(
+            [vm(0), vm(1), vm(2)],
+            [VMerge::Restart, VMerge::Continue, VMerge::Continue]
+        );
+        assert_eq!(merge_top(&d.main.paras, &rows, 2, 0, 8640), Some((0, 0)));
+        assert_eq!(merged_below(&d.main.paras, &rows, 0, 0, 8640), Some(0));
+        assert_eq!(merged_below(&d.main.paras, &rows, 2, 0, 8640), None);
+        assert_eq!(merge_top(&d.main.paras, &rows, 1, 1, 8640), None);
+        // A row inserted inside the merge carries it on; one under it does
+        // not join it.
+        let props = row_props(&d.main.paras, &rows[0], 8640);
+        d.insert_rows(Main, &rows[0], true, 1, &props);
+        let rows = table_rows(&d.main.paras, 0);
+        assert_eq!(merge_top(&d.main.paras, &rows, 3, 0, 8640), Some((0, 0)));
+        assert_eq!(merge_top(&d.main.paras, &rows, 1, 0, 8640), Some((0, 0)));
+        let props = row_props(&d.main.paras, &rows[3], 8640);
+        d.insert_rows(Main, &rows[3], true, 1, &props);
+        let rows = table_rows(&d.main.paras, 0);
+        assert_eq!(merge_top(&d.main.paras, &rows, 4, 0, 8640), None);
+        d.commit(crate::Selection::default());
+        d.undo();
+        let rows = table_rows(&d.main.paras, 0);
+        // Split Cell takes the merge apart; the text stays at the top.
+        d.unmerge_down(Main, &rows, 1, 0, 8640);
+        let rows = table_rows(&d.main.paras, 0);
+        let vm = |r: usize| row_props(&d.main.paras, &rows[r], 8640).cells[0].vmerge;
+        assert_eq!([vm(0), vm(1), vm(2)], [VMerge::None; 3]);
+        d.commit(crate::Selection::default());
+        d.undo();
+        d.undo();
+        assert_eq!(d.main, before);
     }
 
     #[test]

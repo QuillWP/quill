@@ -202,6 +202,10 @@ struct RowGeom {
     props: quill_core::RowProps,
     /// The rows of tables in this row's cells, at any depth.
     nested: Vec<NestedRow>,
+    /// Cells merged with the cell under them, or the one above, which
+    /// draw no line between.
+    joined_below: Vec<bool>,
+    joined_above: Vec<bool>,
 }
 
 /// A row of a table inside a cell: where it sits, in points from the left
@@ -299,6 +303,10 @@ pub struct DocView {
     pub outline: bool,
     collapsed: Vec<bool>,
     outline_dirty: bool,
+    /// An empty document opened in Outline: its one paragraph shows as a
+    /// heading and becomes Heading 1 when typed in, so merely looking
+    /// leaves the document unchanged.
+    outline_start: bool,
     /// Collapsed flags for paragraphs just moved, from the first one.
     collapse_after: Option<(usize, Vec<bool>)>,
     pub first_line_only: bool,
@@ -416,6 +424,7 @@ impl DocView {
             outline: false,
             collapsed: Vec::new(),
             outline_dirty: false,
+            outline_start: false,
             collapse_after: None,
             first_line_only: false,
             show_formatting: true,
@@ -720,7 +729,8 @@ impl DocView {
             let (offset, upstream) = l.hit(li, x - self.xs[para]);
             return (Position::new(para, offset), upstream);
         }
-        let b = &self.blocks[self.block_at(y)];
+        let bi = self.block_at(y);
+        let b = &self.blocks[bi];
         let para = match &b.row {
             None => b.first,
             Some(row) => {
@@ -731,6 +741,23 @@ impl DocView {
                     .position(|c| x < c.3)
                     .unwrap_or(row.cells.len() - 1);
                 let (mut a, mut last, _, _) = row.cells[k];
+                // Under the top of a vertical merge: the top cell, which
+                // holds the text.
+                if row.joined_above.get(k).copied().unwrap_or(false) {
+                    let left = row.cells[k].2;
+                    for above in self.blocks[..bi].iter().rev() {
+                        let Some(r) = &above.row else {
+                            break;
+                        };
+                        let Some(j) = r.cells.iter().position(|c| (c.2 - left).abs() < 1.0) else {
+                            break;
+                        };
+                        (a, last) = (r.cells[j].0, r.cells[j].1);
+                        if !r.joined_above.get(j).copied().unwrap_or(false) {
+                            break;
+                        }
+                    }
+                }
                 // A table in that cell, under the point: its cell instead,
                 // and so on inwards.
                 let mut level = 1;
@@ -1614,6 +1641,58 @@ mod tests {
         doc.insert_text(MAIN, Position::new(5, 0), "side", chp);
         doc.forget_history();
         DocView::new(doc, "T".into())
+    }
+
+    #[test]
+    fn rows_of_a_merged_cell_grow_to_hold_its_text() {
+        let mut fonts = quill_layout::Fonts::new(quill_layout::Catalog::scan_system());
+        if fonts.family_names().is_empty() {
+            return;
+        }
+        let mut doc = quill_core::text::from_plain_text("one\ttwo\nthree\tfour");
+        doc.convert_to_table(MAIN, 0, 1, quill_core::table::Convert::Tabs, |_| 2000);
+        let rows = quill_core::table::table_rows(&doc.main.paras, 0);
+        doc.merge_cells_down(MAIN, &rows, &[0, 0], 8640);
+        // Six lines in the merged cell, one in each of the others.
+        let chp = doc.main.paras[0].chp_at(0);
+        for i in 0..5 {
+            doc.split_paragraph(MAIN, Position::new(i, doc.main.paras[i].len()));
+            doc.insert_text(MAIN, Position::new(i + 1, 0), "more", chp);
+        }
+        doc.forget_history();
+        let mut v = DocView::new(doc, "T".into());
+        v.area = Rect::new(0.0, 0.0, 800.0, 600.0);
+        v.update_layout(&mut fonts);
+        let rows: Vec<&Block> = v.blocks.iter().filter(|b| b.row.is_some()).collect();
+        assert_eq!(rows.len(), 2);
+        let (top, under) = (rows[0].row.as_ref().unwrap(), rows[1].row.as_ref().unwrap());
+        assert_eq!(top.joined_below, [true, false]);
+        assert_eq!(under.joined_above, [true, false]);
+        // The two rows together hold the merged cell's six paragraphs.
+        let line = v.layout(1).height;
+        assert!(rows[0].height + rows[1].height >= 6.0 * line - 0.5);
+        assert!(rows[0].height < 2.0 * line + 0.5);
+        // A click under the merge lands in the top cell.
+        let x = top.cells[0].2 + 5.0;
+        let (at, _) = v.hit_doc(x, rows[1].top + 1.0);
+        assert!(at.para <= top.cells[0].1);
+    }
+
+    #[test]
+    fn a_table_two_levels_in_is_drawn_after_the_one_holding_it() {
+        let mut fonts = quill_layout::Fonts::new(quill_layout::Catalog::scan_system());
+        if fonts.family_names().is_empty() {
+            return;
+        }
+        let mut v = nested_view();
+        v.doc.insert_table(MAIN, Position::new(1, 0), 1, 2, 600);
+        v.area = Rect::new(0.0, 0.0, 800.0, 600.0);
+        v.update_layout(&mut fonts);
+        // Rows are drawn in this order: the middle table's shading must go
+        // down before the deepest table's lines.
+        let row = v.blocks[0].row.as_ref().unwrap();
+        let levels: Vec<u8> = row.nested.iter().map(|n| n.level).collect();
+        assert_eq!(levels, [2, 3]);
     }
 
     #[test]

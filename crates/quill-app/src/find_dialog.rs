@@ -398,6 +398,7 @@ pub fn character_spec(
 ) -> Dialog {
     let mut family_choices = vec![quill_layout::FontFamilyInfo {
         name: String::new(),
+        draws_name: false,
         variants: Vec::new(),
     }];
     family_choices.extend_from_slice(fonts);
@@ -442,9 +443,9 @@ pub fn character_spec(
         d.set_check3(id, v);
     }
     for (id, on) in [
-        ("pos_normal", spec.position == Some(0)),
-        ("pos_super", spec.position.is_some_and(|p| p > 0)),
-        ("pos_sub", spec.position.is_some_and(|p| p < 0)),
+        ("pos_normal", spec.script == Some(quill_core::Script::None)),
+        ("pos_super", spec.script == Some(quill_core::Script::Super)),
+        ("pos_sub", spec.script == Some(quill_core::Script::Sub)),
         ("sp_normal", spec.spacing == Some(0)),
         ("sp_cond", spec.spacing.is_some_and(|p| p < 0)),
         ("sp_exp", spec.spacing.is_some_and(|p| p > 0)),
@@ -455,7 +456,14 @@ pub fn character_spec(
         Some(t) if t != 0 => units::points(t.abs()),
         _ => String::new(),
     };
-    d.set_field("pos_by", &by(spec.position));
+    d.set_field(
+        "pos_by",
+        &spec
+            .position
+            .filter(|&p| p != 0)
+            .map(units::points)
+            .unwrap_or_default(),
+    );
     d.set_field("sp_by", &by(spec.spacing));
     d.enable("apply", false);
     d.focus("size");
@@ -488,11 +496,18 @@ pub fn read_character_spec(d: &Dialog, view: &mut DocView) -> Option<CharSpec> {
     s.all_caps = d.check3_state("allcaps");
     s.hidden = d.check3_state("hidden");
     let by = |id| units::parse(&d.field_text(id), "pt").map(|t| t.abs());
-    s.position = match d.radio_on(1) {
-        "pos_normal" => Some(0),
-        "pos_super" => Some(by("pos_by").unwrap_or(60)),
-        "pos_sub" => Some(-by("pos_by").unwrap_or(40)),
+    s.script = match d.radio_on(1) {
+        "pos_normal" => Some(quill_core::Script::None),
+        "pos_super" => Some(quill_core::Script::Super),
+        "pos_sub" => Some(quill_core::Script::Sub),
         _ => None,
+    };
+    // A shift by hand matters only when one is typed.
+    let raised = d.field_text("pos_by");
+    s.position = if raised.trim().is_empty() {
+        None
+    } else {
+        Some(units::parse(&raised, "pt")?)
     };
     s.spacing = match d.radio_on(2) {
         "sp_normal" => Some(0),

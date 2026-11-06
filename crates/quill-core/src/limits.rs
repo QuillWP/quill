@@ -142,6 +142,13 @@ impl SectionProps {
         if let Some(d) = &mut self.line_from_text {
             *d = distance(*d);
         }
+        // The section's own headers and footers, whether its settings sit on
+        // a section break or are the document's last.
+        if let Some(headers) = &mut self.headers {
+            std::sync::Arc::make_mut(headers)
+                .iter_mut()
+                .for_each(Story::keep_in_bounds);
+        }
     }
 }
 
@@ -160,6 +167,10 @@ impl CharProps {
             && let Some((_, old)) = &r.formatted
         {
             let mut fixed = *old;
+            fixed.direct_format &= crate::character_styles::CharacterFormat::ALL;
+            if fixed.character_style == 0 {
+                fixed.direct_format = 0;
+            }
             fixed.size = fixed.size.clamp(MIN_SIZE, MAX_SIZE);
             fixed.position = length(fixed.position);
             fixed.spacing = length(fixed.spacing);
@@ -257,11 +268,6 @@ impl Paragraph {
         }
         if let Some(s) = &mut self.section {
             s.keep_in_bounds();
-            if let Some(headers) = &mut s.headers {
-                std::sync::Arc::make_mut(headers)
-                    .iter_mut()
-                    .for_each(Story::keep_in_bounds);
-            }
         }
     }
 }
@@ -280,6 +286,7 @@ impl Document {
             .paras
             .iter()
             .filter_map(|p| p.section.as_ref()?.headers.as_ref())
+            .chain(self.section.headers.as_ref())
             .flat_map(|h| h.iter());
         let stories = [&self.main, &self.notes, &self.annotations]
             .into_iter()
@@ -343,6 +350,48 @@ mod tests {
         assert_eq!(doc.fonts[0].chars().count(), MAX_NAME);
         assert!(doc.fonts[0].chars().all(|c| c == 'é'));
         assert_eq!(doc.styles.styles[0].name.len(), MAX_NAME);
+    }
+
+    /// Found by fuzzing: the last section's own headers were never brought
+    /// into range, so an override on unstyled text there survived opening
+    /// and was dropped only by the next .qwp save.
+    #[test]
+    fn the_last_sections_own_headers_are_kept_in_range_and_counted() {
+        let mut doc = Document::new();
+        let mut header = crate::text::from_plain_text("Header").main;
+        header.paras[0].format_range(0, 6, &mut |c| c.direct_format = 1 << 3);
+        doc.section.headers = Some(std::sync::Arc::new(vec![header; 6]));
+        let before = doc.size().paragraphs;
+        doc.keep_in_bounds();
+        let headers = doc.section.headers.as_ref().unwrap();
+        assert_eq!(headers[0].paras[0].chp_of_char(0).direct_format, 0);
+        assert_eq!(before, 1 + 6 + doc.headers.len() + 2);
+    }
+
+    /// A format change's earlier format follows the same rule as the text:
+    /// overrides mean nothing without a character style.
+    #[test]
+    fn a_format_changes_earlier_format_drops_overrides_without_a_style() {
+        let old = CharProps {
+            direct_format: 4,
+            ..Default::default()
+        };
+        let rev = crate::revision::intern(crate::revision::Revision {
+            formatted: Some((Default::default(), old)),
+            ..Default::default()
+        });
+        let mut c = CharProps {
+            rev,
+            ..Default::default()
+        };
+        c.keep_in_bounds();
+        let old = crate::revision::get(c.rev)
+            .unwrap()
+            .formatted
+            .as_ref()
+            .unwrap()
+            .1;
+        assert_eq!(old.direct_format, 0);
     }
 
     #[test]

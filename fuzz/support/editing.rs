@@ -98,6 +98,27 @@ pub fn exercise(data: &[u8]) {
                     ..doc.main.paras[start.para].chp_at(start.offset)
                 };
                 match action {
+                    0 | 1 if op[5] >= 0x80 => {
+                        // Typing in a symbol font: its codes as typed letters,
+                        // high bytes (95 is a control character in Unicode)
+                        // and Word's private-use F0xx form. DOCX and RTF must
+                        // bring back the same codes in the same font.
+                        let font = ["Wingdings", "Symbol", "Zapf Dingbats", "Webdings"]
+                            [usize::from(op[5]) % 4];
+                        let text = [
+                            "J",
+                            "\u{FE}\u{E0}",
+                            "\u{95}\u{A8}",
+                            "\u{F04A}",
+                            "aJ\u{F0FE}",
+                        ][usize::from(op[5] >> 2) % 5];
+                        let chp = CharProps {
+                            font: doc.font_id(font),
+                            ..chp
+                        };
+                        let at = doc.insert_plain(MAIN, start, text, chp);
+                        selection = Selection::caret(at);
+                    }
                     0 | 1 => {
                         let text =
                             ["a", "é", "\u{1f980}", "\n", "one\ntwo", " "][usize::from(op[5]) % 6];

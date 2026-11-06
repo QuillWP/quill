@@ -112,3 +112,19 @@ fn semantic_oracle_detects_lost_comment_text_and_author() {
     );
     round_trip::assert_same(&doc, &back);
 }
+
+/// Inputs the rtf target found, shrunk: hand overrides with no character
+/// style in a format change's earlier format, and in the last section's own
+/// header. Opening must leave nothing that a .qwp save would change.
+#[test]
+fn rtf_found_by_fuzzing_saves_as_qwp_unchanged() {
+    for input in [
+        &br"{\rtf\quillchardirect4\oldcprops"[..],
+        br"{\rtf\sect
+e\header\quillchardirect2a",
+    ] {
+        let mut doc = quill_formats::rtf::read(input).unwrap();
+        doc.keep_in_bounds();
+        round_trip::check_imported(&doc);
+    }
+}

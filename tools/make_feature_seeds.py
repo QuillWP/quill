@@ -5,7 +5,8 @@ The steps run in order, each with its own option, so a slow one can be redone
 alone:
 
   --sources      RTF sources: border and shading colors, cropped and adjacent
-                 pictures, bullets, line numbers by section, links and views.
+                 pictures, bullets, line numbers by section, links and views,
+                 and symbol fonts (Wingdings, Webdings, Symbol, Zapf Dingbats).
   --quill        Quill's own documents (cargo example feature_seeds): character
                  styles in every story, linked headings, contents lists, built
                  on these sources and the fixtures of 2026-10-31 and 2026-11-01.
@@ -137,18 +138,53 @@ def lists_lines_links():
     return "".join(out)
 
 
+# Symbol fonts as Word writes them: \fcharset2, so each byte is the font's
+# own code (\'95 in Wingdings is not a bullet).
+SYMBOL_HEADER = HEADER.replace(
+    r"{\f3 Symbol;}}",
+    r"{\f3 Symbol;}{\f4\fcharset2 Wingdings;}{\f5\fcharset2 Webdings;}"
+    r"{\f6\fcharset2 Zapf Dingbats;}{\f7\fcharset2 Symbol;}{\f8\fcharset2 Wingdings 2;}}",
+)
+
+
+def symbols():
+    """Symbols each way Word writes them: font bytes, Word's private-use F0xx
+    codes, SYMBOL fields, a Wingdings bullet, and symbols in a header and a
+    footnote, mixed with ordinary text and formatting."""
+    out = [r"{\header\pard\plain\s0 " + text("Header ") + r"{\f4 J}\par}"]
+    out.append(para(text("Symbol fonts"), 1))
+    out.append(para(text("Wingdings bytes: ") + r"{\f4 JKL\'fe\'e0\'95\'a8}" + text(" end.")))
+    out.append(para(text("Private-use codes: ") + r"{\f4 \u-4022?\u-3842?}{\f8 \u-3998?}"))
+    out.append(para(text("Fields: ")
+                    + r'{\field{\*\fldinst SYMBOL 74 \\f "Wingdings" \\s 14}{\fldrslt\f4\fs28 J}}'
+                    + text(" and ")
+                    + r'{\field{\*\fldinst SYMBOL 168 \\f "Symbol"}{\fldrslt\f7 \'a8}}'))
+    out.append(para(text("Symbol: ") + r"{\f7 abgp\'b7\'ae}" + text("  Zapf Dingbats: ")
+                    + r"{\f6 abcn4}" + text("  Webdings: ") + r"{\f5 abc\'a4}"))
+    out.append(para(text("Formatted: ") + r"{\f4\b\i\fs36\cf1 JKL}" + text(" and ")
+                    + r"{\f4\ul\up6 \'fe}"))
+    bullet = r"{\pntext\f4\'a7\tab}{\*\pn\pnlvlblt\pnf4\pnindent360{\pntxtb\'a7}}\fi-360\li720"
+    for i in range(2):
+        out.append(para(text("Wingdings bullet %d" % i), 0, bullet))
+    out.append(para(text("A note") + r"{\super\chftn}{\footnote\pard\plain\s0 {\super\chftn}"
+                    + text(" Note with ") + r"{\f4 J}\par}" + text(" after it.")))
+    return "".join(out)
+
+
 SOURCES = {
     "fs-borders-shading": borders_shading,
     "fs-pictures": pictures,
     "fs-lists-lines-links": lists_lines_links,
+    "fs-symbols": symbols,
 }
+HEADERS = {"fs-symbols": SYMBOL_HEADER}
 
 
 def make_sources():
     (OUT / "sources").mkdir(parents=True, exist_ok=True)
     for name, build in SOURCES.items():
         path = OUT / "sources" / (name + ".rtf")
-        path.write_text(HEADER + build() + "}", encoding="ascii")
+        path.write_text(HEADERS.get(name, HEADER) + build() + "}", encoding="ascii")
         print(path)
 
 

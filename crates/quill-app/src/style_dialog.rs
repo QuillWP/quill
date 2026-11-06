@@ -537,11 +537,21 @@ fn describe_component(
     {
         parts.push(format!("Color: {name}"));
     }
+    if chp.script != bc.script {
+        parts.push(
+            match chp.script {
+                quill_core::Script::None => "Not Superscript/Subscript",
+                quill_core::Script::Super => "Superscript",
+                quill_core::Script::Sub => "Subscript",
+            }
+            .into(),
+        );
+    }
     if chp.position != bc.position {
         parts.push(match chp.position {
             0 => "Normal Position".into(),
-            p if p > 0 => format!("Superscript {}", units::points(p)),
-            p => format!("Subscript {}", units::points(-p)),
+            p if p > 0 => format!("Raised {}", units::points(p)),
+            p => format!("Lowered {}", units::points(-p)),
         });
     }
     if chp.spacing != bc.spacing {

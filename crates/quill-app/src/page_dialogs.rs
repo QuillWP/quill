@@ -14,7 +14,7 @@ const FOOTNOTE_POSITIONS: [(&str, FootnotePosition); 4] = [
 
 pub fn document(view: &DocView) -> Dialog {
     let p = &view.doc.props;
-    let mut d = Dialog::new("Document Setup", 501.0, 185.0);
+    let mut d = Dialog::new("Document Setup", 501.0, 255.0);
     d.group("Margins", 10.0, 7.0, 359.0, 87.0);
     d.text("Left:", 15.0, 25.0);
     d.field("left", &units::length(p.margin_left), 70.0, 22.0, 69.0);
@@ -82,6 +82,20 @@ pub fn document(view: &DocView) -> Dialog {
     d.text("Default Tab Stops:", 237.0, 156.0);
     d.field("deftab", &units::length(p.default_tab), 358.0, 154.0, 67.0);
 
+    // How this document draws its superscripts and subscripts.
+    let sc = p.scripts;
+    d.group("Superscript and Subscript", 10.0, 182.0, 359.0, 64.0);
+    d.text("Superscript: up", 15.0, 202.0);
+    d.field("raise", &sc.raise.to_string(), 125.0, 199.0, 40.0);
+    d.text("%, at", 169.0, 202.0);
+    d.field("supsize", &sc.super_size.to_string(), 210.0, 199.0, 40.0);
+    d.text("% of the size", 254.0, 202.0);
+    d.text("Subscript: down", 15.0, 226.0);
+    d.field("drop", &sc.drop.to_string(), 125.0, 223.0, 40.0);
+    d.text("%, at", 169.0, 226.0);
+    d.field("subsize", &sc.sub_size.to_string(), 210.0, 223.0, 40.0);
+    d.text("% of the size", 254.0, 226.0);
+
     d.button("ok", "OK", 382.0, 16.0, 101.0, true);
     d.button("cancel", "Cancel", 382.0, 42.0, 101.0, false);
     d.button("usedefault", "Use As Default", 382.0, 66.0, 101.0, false);
@@ -111,6 +125,23 @@ fn read_document(d: &Dialog, base: &DocumentProps) -> Option<DocumentProps> {
     p.print_hidden = d.is_on("hidden");
     p.even_odd_headers = d.is_on("evenodd");
     p.default_tab = len("deftab", base.default_tab)?;
+    // A percentage left as shown keeps its value; one out of range is
+    // brought within it.
+    let pct = |id: &str| -> Option<u16> {
+        d.field_text(id)
+            .trim()
+            .trim_end_matches('%')
+            .trim()
+            .parse()
+            .ok()
+    };
+    p.scripts = quill_core::ScriptSizes {
+        raise: pct("raise")?,
+        super_size: pct("supsize")?,
+        drop: pct("drop")?,
+        sub_size: pct("subsize")?,
+    }
+    .clamped();
     // Text needs some room between the margins.
     if p.default_tab <= 0 || p.text_width() < 720 {
         return None;
@@ -484,6 +515,23 @@ mod tests {
         let d = document(&v);
         assert_eq!(d.field_text("left"), "1.5 in");
         assert_eq!(read_document(&d, &v.doc.props), Some(v.doc.props.clone()));
+    }
+
+    #[test]
+    fn document_dialog_sets_the_document_s_superscript_sizes() {
+        let mut v = view();
+        let mut d = document(&v);
+        assert_eq!(d.field_text("supsize"), "67");
+        d.set_field("supsize", "100%");
+        d.set_field("raise", "500");
+        assert!(apply_document(&d, &mut v));
+        let sc = v.doc.props.scripts;
+        assert_eq!(
+            (sc.raise, sc.super_size, sc.drop, sc.sub_size),
+            (100, 100, 17, 67)
+        );
+        d.set_field("drop", "lots");
+        assert!(!apply_document(&d, &mut v));
     }
 
     #[test]

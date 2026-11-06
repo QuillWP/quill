@@ -393,6 +393,42 @@ impl Document {
         Some(at)
     }
 
+    /// Remove the marks of the replies to annotations `gone`, whose marks
+    /// an edit just took from the text (deleted by hand, say), and the
+    /// replies under those. A reply cannot stand without what it answers;
+    /// Delete Annotation takes them together too. Called from that edit,
+    /// so one Undo brings the whole thread back. Replies a file arrived
+    /// with no annotation for are left alone.
+    pub(crate) fn drop_orphan_replies(&mut self, mut gone: std::collections::HashSet<u32>) {
+        loop {
+            let orphan = |id: u32| {
+                self.annotation_info
+                    .get(&id)
+                    .and_then(|i| i.parent)
+                    .is_some_and(|p| gone.contains(&p))
+            };
+            let mut found = None;
+            'paras: for (i, p) in self.main.paras.iter().enumerate() {
+                if !p.text.contains(chars::ANNOTATION) {
+                    continue;
+                }
+                for (off, c) in p.text.char_indices() {
+                    if c == chars::ANNOTATION && orphan(p.chp_of_char(off).object) {
+                        found = Some(Position::new(i, off));
+                        break 'paras;
+                    }
+                }
+            }
+            let Some(m) = found else {
+                break;
+            };
+            gone.insert(self.main.paras[m.para].chp_of_char(m.offset).object);
+            let mut p = self.main.paras[m.para].clone();
+            p.remove(m.offset, m.offset + chars::ANNOTATION.len_utf8());
+            self.splice(StoryId::Main, m.para, 1, vec![p]);
+        }
+    }
+
     /// The annotation a thread of replies starts with.
     pub fn thread_start(&self, mut id: u32) -> u32 {
         for _ in 0..64 {
@@ -644,6 +680,47 @@ mod tests {
         assert_eq!(d.main.paras[0], before);
         assert_eq!(annotation_ids(&d.annotations.paras), [other, a, reply]);
     }
+    #[test]
+    fn deleting_an_annotation_s_mark_by_hand_takes_its_replies() {
+        let mut d = doc();
+        let sel = crate::Selection::default();
+        d.begin("Annotation", sel);
+        let a = d.insert_annotation(
+            Position::new(0, 4),
+            CharProps::default(),
+            AnnotationInfo::default(),
+        );
+        let reply = d.insert_reply(a, AnnotationInfo::default()).unwrap();
+        d.insert_reply(reply, AnnotationInfo::default()).unwrap();
+        let other = d.insert_annotation(
+            Position::new(0, 0),
+            CharProps::default(),
+            AnnotationInfo::default(),
+        );
+        d.commit(sel);
+        let before = d.main.clone();
+        let notes = d.annotations.clone();
+        // Delete only the first annotation's own mark, as the Delete key does.
+        let at = d.annotation_mark(a).unwrap();
+        d.begin("Clear", sel);
+        let mut p = d.main.paras[at.para].clone();
+        p.remove(at.offset, at.offset + chars::ANNOTATION.len_utf8());
+        d.splice(StoryId::Main, at.para, 1, vec![p]);
+        d.commit(sel);
+        assert_eq!(annotation_ids(&d.main.paras), [other]);
+        assert_eq!(annotation_ids(&d.annotations.paras), [other]);
+        d.undo();
+        assert_eq!(d.main, before);
+        assert_eq!(d.annotations, notes);
+        // A reply that arrived without its annotation stays when some other
+        // annotation is deleted.
+        d.annotation_info.get_mut(&reply).unwrap().parent = Some(999);
+        d.begin("Delete Annotation", sel);
+        d.delete_annotation(other);
+        d.commit(sel);
+        assert!(annotation_ids(&d.main.paras).contains(&reply));
+    }
+
     #[test]
     fn delete_annotation_removes_deep_threads_even_with_tracking_on() {
         let mut d = doc();

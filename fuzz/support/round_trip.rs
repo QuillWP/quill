@@ -10,14 +10,52 @@ pub fn check_imported(doc: &Document) {
     let native = quill_formats::native::read(&quill_formats::native::write(doc, 0))
         .expect("Quill must reopen its own native save");
     assert_same_named(doc, &native, "native");
-    quill_formats::docx::read(&quill_formats::docx::write(doc, 0))
+    let docx = quill_formats::docx::read(&quill_formats::docx::write(doc, 0))
         .expect("Quill must reopen its own DOCX export");
-    quill_formats::rtf::read(&quill_formats::rtf::write(doc))
+    let rtf = quill_formats::rtf::read(&quill_formats::rtf::write(doc))
         .expect("Quill must reopen its own RTF export");
+    // Whatever else an exchange format drops, a symbol from Word keeps its
+    // code and its font, or a check box becomes a letter.
+    let symbols = symbol_chars(doc);
+    assert_eq!(symbols, symbol_chars(&docx), "DOCX symbols");
+    assert_eq!(symbols, symbol_chars(&rtf), "RTF symbols");
     quill_formats::html::read_file(&quill_formats::html::write(doc))
         .expect("Quill must reopen its own HTML save");
     quill_formats::odt_read::read(&quill_formats::odt::write(doc, 0))
         .expect("Quill must reopen its own ODT save");
+}
+
+/// The characters set in symbol fonts in the main text, in order, with
+/// their font's name.
+fn symbol_chars(doc: &Document) -> Vec<(char, String)> {
+    let mut out = Vec::new();
+    for para in &doc.main.paras {
+        for (a, b, c) in para.run_bounds() {
+            let font = doc.font_name(c.font);
+            if !matches!(
+                font,
+                "Wingdings"
+                    | "Wingdings 2"
+                    | "Wingdings 3"
+                    | "Webdings"
+                    | "Symbol"
+                    | "Zapf Dingbats"
+            ) {
+                continue;
+            }
+            // Stray control characters (\u{1} or DEL from a damaged file)
+            // have no place in XML or RTF text; the writers drop them,
+            // symbol or not. Quill's own field, note and picture marks are
+            // not symbols either.
+            let kept = para.text[a..b].chars().filter(|&ch| {
+                (!ch.is_ascii_control() || matches!(ch, '\t' | '\u{B}' | '\u{C}'))
+                    && !('\u{E000}'..='\u{E004}').contains(&ch)
+                    && ch != '\u{FFFC}'
+            });
+            out.extend(kept.map(|ch| (ch, font.to_string())));
+        }
+    }
+    out
 }
 
 #[allow(dead_code)]

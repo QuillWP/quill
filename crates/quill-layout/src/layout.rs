@@ -46,6 +46,8 @@ pub struct LayoutOptions {
     /// How large the comments pane's own text is drawn compared with its
     /// nominal size, to hold it steady as the document's zoom changes.
     pub comment_scale: f32,
+    /// How the document draws superscripts and subscripts.
+    pub scripts: quill_core::ScriptSizes,
 }
 
 /// An annotation mark's width and the size of the initials in it, in
@@ -81,6 +83,7 @@ impl Default for LayoutOptions {
             objects: Default::default(),
             wrap: Vec::new(),
             comment_scale: 1.0,
+            scripts: quill_core::ScriptSizes::default(),
         }
     }
 }
@@ -828,7 +831,7 @@ fn measure(
 ) -> Vec<Item> {
     let mut items = Vec::with_capacity(para.text.len());
     for (start, end, chp) in para.run_bounds() {
-        let mut shown = shown(*chp, opts.show_changes);
+        let mut shown = opts.scripts.shown(shown(*chp, opts.show_changes));
         // Text about an annotation that is gone isn't shaded.
         if shown.comment != 0 && !opts.annotation_labels.contains_key(&shown.comment) {
             shown.comment = 0;

@@ -10,6 +10,8 @@ pub(super) struct ApplicationPreferences {
 impl ApplicationPreferences {
     pub(super) fn new(font_names: &[String], font_families: &[FontFamilyInfo]) -> Self {
         let mut state = WinState::new(DocView::new(Document::new(), String::new()));
+        // Colors' boxes edit with the system Colors panel, as in a window.
+        state.on_screen = true;
         state.open_dialog(
             DialogId::Preferences,
             &Env {
@@ -54,6 +56,15 @@ impl ApplicationPreferences {
         }
         if let (Some(native), Some(dialog)) = (&mut self.native, top) {
             native.sync_from_model(dialog);
+        }
+        // A press outside the color pop-out put it away: forget it.
+        if let Some(native) = &mut self.native
+            && native.popover_dismissed()
+        {
+            if let Some((_, d)) = self.state.dialogs.last_mut() {
+                d.popout = None;
+            }
+            self.state.color_pop = None;
         }
     }
 

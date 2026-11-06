@@ -15,12 +15,11 @@ use crate::icon;
 use quill_core::CharProps;
 use quill_core::props::{Align, LineSpacing, ParaProps, TabAlign, TabStop, Twips};
 
-/// How much larger than the original's the formatting and paragraph toolbars
-/// are drawn (`formatting_toolbar_scale` in the settings file), so their
-/// 16-point icons can come out nearer the standard toolbar's 18. The ruler
+/// The formatting and paragraph toolbars use the same 16-point controls as
+/// the rest of the interface. Interface Size scales them together. The ruler
 /// is not zoomed, so its inches stay in step with the text.
 fn zoom() -> f32 {
-    crate::settings::with(|s| s.formatting_toolbar_scale) as f32 / 100.0
+    1.0
 }
 
 /// The look every toolbar and the ruler share, from the settings file.
@@ -392,8 +391,8 @@ pub fn draw_formatting_toolbar(
                 s.chp.underline != quill_core::Underline::None,
                 true,
             ),
-            Hit::Superscript => (SUPERSCRIPT, s.chp.position > 0, true),
-            Hit::Subscript => (SUBSCRIPT, s.chp.position < 0, true),
+            Hit::Superscript => (SUPERSCRIPT, s.chp.script == quill_core::Script::Super, true),
+            Hit::Subscript => (SUBSCRIPT, s.chp.script == quill_core::Script::Sub, true),
             Hit::Tool(name) => {
                 tool_button(c, label, r, name, hot);
                 continue;

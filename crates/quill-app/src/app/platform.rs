@@ -66,8 +66,14 @@ impl App {
         if let Some(preferences) = &mut self.preferences
             && preferences.owns(panel)
         {
+            let old_scale = crate::settings::with(|s| s.interface_scale);
             let clip = self.clipboard.get_or_insert_with(Clipboard::new);
             preferences.action(id, choice, clip);
+            if crate::settings::with(|s| s.interface_scale) != old_scale {
+                for (_, w) in &self.windows {
+                    w.window.request_redraw();
+                }
+            }
             return;
         }
         let Some(i) = self.windows.iter().position(|(_, w)| {
@@ -78,6 +84,7 @@ impl App {
             return;
         };
         let clip = self.clipboard.get_or_insert_with(Clipboard::new);
+        let old_scale = crate::settings::with(|s| s.interface_scale);
         let w = &mut self.windows[i].1;
         let Some(native) = w.dialog.as_ref() else {
             return;
@@ -130,6 +137,14 @@ impl App {
         let outcome = crate::mac_dialog::NativeDialog::outcome(dialog, id);
         w.st.dialog_outcome(outcome, clip);
         w.window.request_redraw();
+        let scale_changed = crate::settings::with(|s| s.interface_scale) != old_scale;
+        if scale_changed {
+            for (j, (_, w)) in self.windows.iter().enumerate() {
+                if j != i {
+                    w.window.request_redraw();
+                }
+            }
+        }
     }
 
     pub(super) fn native_shortcut(&mut self, panel: usize, spec: String) {

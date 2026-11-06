@@ -25,9 +25,29 @@ pub fn is_odt(bytes: &[u8]) -> bool {
         })
 }
 
+thread_local! {
+    /// The superscript and subscript sizes of the document being written,
+    /// which ODT holds on each style rather than once.
+    static SCRIPTS: std::cell::Cell<quill_core::ScriptSizes> =
+        std::cell::Cell::new(quill_core::ScriptSizes::default());
+}
+
+/// ODT's text-position: how far up (or down, negative) in percent of the
+/// size, and how big. A superscript or subscript says how big it is drawn;
+/// a shift set by hand keeps the full size.
+fn text_position(c: &CharProps) -> String {
+    let by_hand = c.position as f64 * 100. / (c.size.max(1) as f64 * 10.);
+    let s = SCRIPTS.with(|s| s.get());
+    match c.script {
+        quill_core::Script::None => format!("{by_hand}% 100%"),
+        quill_core::Script::Super => format!("{}% {}%", by_hand + s.raise as f64, s.super_size),
+        quill_core::Script::Sub => format!("{}% {}%", by_hand - s.drop as f64, s.sub_size),
+    }
+}
+
 fn text_props(c: &CharProps, base: Option<&CharProps>) -> String {
     let full = format!(
-        r##"<style:text-properties style:font-name="f{}" fo:font-size="{}pt" fo:font-weight="{}" fo:font-style="{}" fo:color="#{:06x}" fo:font-variant="{}" fo:text-transform="{}" fo:letter-spacing="{}pt" text:display="{}" style:text-outline="{}" fo:text-shadow="{}" style:text-position="{}% 100%" style:text-underline-style="{}" style:text-underline-type="{}" style:text-underline-mode="{}" style:text-line-through-style="{}"/>"##,
+        r##"<style:text-properties style:font-name="f{}" fo:font-size="{}pt" fo:font-weight="{}" fo:font-style="{}" fo:color="#{:06x}" fo:font-variant="{}" fo:text-transform="{}" fo:letter-spacing="{}pt" text:display="{}" style:text-outline="{}" fo:text-shadow="{}" style:text-position="{}" style:text-underline-style="{}" style:text-underline-type="{}" style:text-underline-mode="{}" style:text-line-through-style="{}"/>"##,
         c.font,
         points(c.size as i32 * 10),
         if c.bold { "bold" } else { "normal" },
@@ -39,16 +59,18 @@ fn text_props(c: &CharProps, base: Option<&CharProps>) -> String {
         if c.hidden { "none" } else { "true" },
         c.outline,
         if c.shadow { "1pt 1pt #808080" } else { "none" },
-        c.position as f64 * 100. / (c.size.max(1) as f64 * 10.),
+        text_position(c),
         match c.underline {
             Underline::None => "none",
             Underline::Dotted => "dotted",
             _ => "solid",
         },
-        if c.underline == Underline::Double {
-            "double"
-        } else {
-            "single"
+        // LibreOffice underlines text whose type is "single" even when the
+        // style says "none", so no underline is no type either.
+        match c.underline {
+            Underline::None => "none",
+            Underline::Double => "double",
+            _ => "single",
         },
         if c.underline == Underline::Word {
             "skip-white-space"
@@ -258,6 +280,10 @@ impl Writer<'_> {
                 if style.format.mask & (1 << 12) != 0 {
                     base.position = run.chp.position.wrapping_add(1);
                 }
+                // A different position, so the run says its own.
+                if style.format.mask & (1 << 14) != 0 {
+                    base.position = run.chp.position.wrapping_add(1);
+                }
             }
             let _ = write!(
                 self.automatic,
@@ -379,16 +405,33 @@ impl Writer<'_> {
                         out,
                         r#"<table:table table:name="{name}"><table:table-column table:number-columns-repeated="{columns}"/>"#
                     );
-                    for row in rows {
+                    let text_width = self.doc.props.text_width();
+                    let all: Vec<_> = rows
+                        .iter()
+                        .map(|r| quill_core::table::row_props(paras, r, text_width))
+                        .collect();
+                    let merged = quill_core::table::merges(&all, text_width);
+                    for (r, row) in rows.into_iter().enumerate() {
                         out.push_str("<table:table-row>");
-                        let props =
-                            quill_core::table::row_props(paras, &row, self.doc.props.text_width());
+                        let props = &all[r];
                         let n = row.cells.len();
                         for (i, (a, b)) in row.cells.into_iter().enumerate() {
+                            // A cell under the top of a vertical merge is
+                            // covered by it.
+                            let spanned = match merged[r][i] {
+                                quill_core::table::Merged::Under => {
+                                    out.push_str("<table:covered-table-cell/>");
+                                    continue;
+                                }
+                                quill_core::table::Merged::Top(n) => {
+                                    format!(" table:number-rows-spanned=\"{n}\"")
+                                }
+                                quill_core::table::Merged::No => String::new(),
+                            };
                             let style = self.cell_style(&props.cells[i]);
                             let _ = write!(
                                 out,
-                                "<table:table-cell table:style-name=\"{style}\" office:value-type=\"string\">"
+                                "<table:table-cell table:style-name=\"{style}\"{spanned} office:value-type=\"string\">"
                             );
                             self.story_at(&paras[a..=b], level + 1, out);
                             out.push_str("</table:table-cell>");
@@ -406,6 +449,7 @@ impl Writer<'_> {
 }
 
 pub fn write(doc: &Document, now: u64) -> Vec<u8> {
+    SCRIPTS.with(|s| s.set(doc.props.scripts));
     let mut writer = Writer {
         doc,
         automatic: String::new(),
@@ -493,4 +537,28 @@ pub fn write(doc: &Document, now: u64) -> Vec<u8> {
     manifest.push_str("</manifest:manifest>");
     zip.add("META-INF/manifest.xml", manifest.as_bytes());
     zip.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn text_without_underline_names_no_underline_type() {
+        // LibreOffice underlines text whose type is "single", whatever
+        // the style says.
+        let out = super::text_props(&Default::default(), None);
+        assert!(
+            out.contains(r#"style:text-underline-style="none""#),
+            "{out}"
+        );
+        assert!(out.contains(r#"style:text-underline-type="none""#), "{out}");
+        let under = quill_core::CharProps {
+            underline: quill_core::props::Underline::Single,
+            ..Default::default()
+        };
+        let out = super::text_props(&under, None);
+        assert!(
+            out.contains(r#"style:text-underline-type="single""#),
+            "{out}"
+        );
+    }
 }

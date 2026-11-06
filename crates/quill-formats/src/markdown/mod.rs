@@ -470,7 +470,10 @@ fn main() {}
     #[test]
     fn a_document_from_markdown_loses_nothing() {
         let (doc, _) = read(SAMPLE, None);
-        assert_eq!(losses(&doc), Vec::<&str>::new());
+        assert_eq!(
+            losses(&doc, &quill_core::DocumentProps::default()),
+            Vec::<&str>::new()
+        );
     }
 
     #[test]
@@ -490,7 +493,7 @@ fn main() {}
         doc.main.paras = vec![quill_core::Paragraph::with_text("Styled", chp, pap)];
         doc.props.page_width = 11906;
         doc.summary.author = "Someone".into();
-        let found = losses(&doc);
+        let found = losses(&doc, &quill_core::DocumentProps::default());
         for expected in [
             loss::FONTS,
             loss::COLORS,
@@ -522,7 +525,7 @@ fn main() {}
             n.chp,
             n.pap.clone(),
         )];
-        let found = losses(&doc);
+        let found = losses(&doc, &quill_core::DocumentProps::default());
         assert!(found.contains(&loss::FRAMES), "{found:?}");
         assert!(found.contains(&loss::BREAKS), "{found:?}");
         assert!(found.contains(&loss::HEADERS), "{found:?}");

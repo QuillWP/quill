@@ -350,14 +350,17 @@ pub(super) fn draw_row(
                 y += 1.0;
             }
         };
-        let (left, right) = (
-            row.cells.first().map_or(0.0, |c| c.2),
-            row.cells.last().map_or(0.0, |c| c.3),
-        );
+        let left = row.cells.first().map_or(0.0, |c| c.2);
         // Each row draws its own top and bottom, so rows of different
-        // widths are closed off.
-        hline(c, ox + left, ox + right, top);
-        hline(c, ox + left, ox + right, bottom);
+        // widths are closed off; none between cells merged down.
+        for (k, &(_, _, x0, x1)) in row.cells.iter().enumerate() {
+            if !row.joined_above.get(k).copied().unwrap_or(false) {
+                hline(c, ox + x0, ox + x1, top);
+            }
+            if !row.joined_below.get(k).copied().unwrap_or(false) {
+                hline(c, ox + x0, ox + x1, bottom);
+            }
+        }
         vline(c, ox + left);
         for &(_, _, _, x1) in &row.cells {
             vline(c, ox + x1);
@@ -365,15 +368,19 @@ pub(super) fn draw_row(
     }
     for (k, &(_, _, x0, x1)) in row.cells.iter().enumerate() {
         let b = &row.props.cells[k].borders;
-        hline_styled(c, b.top.style, ox + x0, ox + x1, top, b.top.color.0);
-        hline_styled(
-            c,
-            b.bottom.style,
-            ox + x0,
-            ox + x1,
-            bottom,
-            b.bottom.color.0,
-        );
+        if !row.joined_above.get(k).copied().unwrap_or(false) {
+            hline_styled(c, b.top.style, ox + x0, ox + x1, top, b.top.color.0);
+        }
+        if !row.joined_below.get(k).copied().unwrap_or(false) {
+            hline_styled(
+                c,
+                b.bottom.style,
+                ox + x0,
+                ox + x1,
+                bottom,
+                b.bottom.color.0,
+            );
+        }
         vline_styled(c, b.left.style, ox + x0, top, bottom, b.left.color.0);
         vline_styled(c, b.right.style, ox + x1, top, bottom, b.right.color.0);
     }
@@ -730,8 +737,19 @@ impl DocView {
                 (b.top, b.top + b.height)
             }
         };
+        // From the top row of any vertical merge reaching into view: its
+        // text, in its top cell, may run down past that row.
+        let mut first = self.block_at(top);
+        while first > 0
+            && self.blocks[first - 1]
+                .row
+                .as_ref()
+                .is_some_and(|r| r.joined_below.iter().any(|&j| j))
+        {
+            first -= 1;
+        }
         let blocks = || {
-            self.blocks[self.block_at(top)..]
+            self.blocks[first..]
                 .iter()
                 .take_while(move |b| b.top <= bottom)
         };

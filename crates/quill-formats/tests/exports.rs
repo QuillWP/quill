@@ -272,3 +272,69 @@ fn links_export_to_html_and_odt_and_read_back() {
     assert_eq!(c.underline, Underline::Single);
     assert_eq!(p.chp_of_char(9).link, 0);
 }
+
+#[test]
+fn symbol_font_codes_survive_every_format_that_keeps_fonts() {
+    // What Word gives Quill for a smiley, a ticked box and code 95 in
+    // Wingdings: the codes, in the symbol font.
+    let mut doc = Document::new();
+    let chp = CharProps {
+        font: doc.font_id("Wingdings"),
+        ..Default::default()
+    };
+    doc.main.paras[0] = Paragraph::with_text("J\u{FE}\u{95}", chp, ParaProps::default());
+    let dir = std::env::temp_dir().join(format!("quill-symbol-tests-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, format) in [
+        ("s.qwp", Format::Quill),
+        ("s.docx", Format::Docx),
+        ("s.rtf", Format::Rtf),
+        ("s.odt", Format::Odt),
+        ("s.html", Format::Html),
+    ] {
+        let path = dir.join(name);
+        quill_formats::save(&doc, &path, format).unwrap();
+        let back = quill_formats::load(&path).unwrap();
+        let p = &back.main.paras[0];
+        // HTML cannot hold code 95 itself, so it keeps Word's private-use
+        // form, which draws the same symbol.
+        let want = match format {
+            Format::Html => "J\u{FE}\u{F095}",
+            _ => "J\u{FE}\u{95}",
+        };
+        assert_eq!(p.text, want, "{name}");
+        assert_eq!(back.font_name(p.chp_of_char(0).font), "Wingdings", "{name}");
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_wide_page_is_marked_landscape_for_word() {
+    // Word reads orientation from its landscape flags, not from the sizes,
+    // and calls a wide page without them portrait.
+    let mut doc = Document::new();
+    doc.props.page_width = 11906;
+    doc.props.page_height = 8391;
+    let dir = std::env::temp_dir().join(format!("quill-landscape-tests-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, format) in [("l.docx", Format::Docx), ("l.rtf", Format::Rtf)] {
+        let path = dir.join(name);
+        quill_formats::save(&doc, &path, format).unwrap();
+        let back = quill_formats::load(&path).unwrap();
+        assert_eq!(
+            (back.props.page_width, back.props.page_height),
+            (11906, 8391),
+            "{name}"
+        );
+    }
+    let rtf = std::fs::read_to_string(dir.join("l.rtf")).unwrap();
+    assert!(rtf.contains("\\paperw11906\\paperh8391\\landscape"));
+    assert!(rtf.contains("\\lndscpsxn"));
+    // A tall page carries neither flag.
+    doc.props.page_width = 8391;
+    doc.props.page_height = 11906;
+    quill_formats::save(&doc, &dir.join("t.rtf"), Format::Rtf).unwrap();
+    let tall = std::fs::read_to_string(dir.join("t.rtf")).unwrap();
+    assert!(!tall.contains("landscape") && !tall.contains("lndscpsxn"));
+    let _ = std::fs::remove_dir_all(dir);
+}

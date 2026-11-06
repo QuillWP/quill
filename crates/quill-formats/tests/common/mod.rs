@@ -97,8 +97,24 @@ pub fn describe(doc: &Document) -> BTreeMap<String, String> {
         } else {
             String::new()
         };
+        // A formatting change keeps the old look, whose font and character
+        // style are numbers a reader assigns afresh; compare their names.
         let revision = quill_core::revision::get(c.rev)
-            .map(|r| format!(" revision={r:?}"))
+            .map(|r| {
+                let mut r = (*r).clone();
+                let old = r.formatted.as_mut().map(|(_, old)| {
+                    let names = (
+                        doc.font_name(old.font).to_string(),
+                        doc.styles
+                            .character(old.character_style)
+                            .map_or(String::new(), |s| s.name.clone()),
+                    );
+                    old.font = 0;
+                    old.character_style = 0;
+                    names
+                });
+                format!(" revision={r:?} old_names={old:?}")
+            })
             .unwrap_or_default();
         format!(
             "{plain:?} character_style={character_style:?} font={} {object}{link}{comment}{revision}",

@@ -137,9 +137,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let files = args[1..]
-        .iter()
-        .filter(|a| !a.starts_with('-'))
+    let files = documents(&args[1..])
         .map(std::path::PathBuf::from)
         .collect();
     let proxy = event_loop.create_proxy();
@@ -173,10 +171,37 @@ enum Options {
     Unknown(String),
 }
 
-/// Read the options. `--snapshot` takes the rest of the line as its own, and
-/// older Macs pass `-psn_...` to an app started from the Finder.
+/// A macOS user default given for this run only, such as `-AppleLocale
+/// de_DE`, which Cocoa reads itself. A test copy uses these to start in
+/// another region without changing the account's settings.
+fn is_default_option(arg: &str) -> bool {
+    arg.starts_with("-Apple") || arg.starts_with("-NS")
+}
+
+/// The documents named on the command line: everything that is not an
+/// option, or the value of a user default.
+fn documents(args: &[String]) -> impl Iterator<Item = &String> {
+    let mut value = false;
+    args.iter().filter(move |a| {
+        let take = !value && !a.starts_with('-');
+        value = !value && is_default_option(a);
+        take
+    })
+}
+
+/// Read the options. `--snapshot` takes the rest of the line as its own,
+/// older Macs pass `-psn_...` to an app started from the Finder, and
+/// `-Apple...` and `-NS...` options set user defaults for this run.
 fn check_options(args: &[String]) -> Options {
+    let mut value = false;
     for arg in args {
+        if std::mem::take(&mut value) {
+            continue;
+        }
+        if is_default_option(arg) {
+            value = true;
+            continue;
+        }
         match arg.as_str() {
             "--snapshot" => break,
             "--version" => return Options::Version,
@@ -247,10 +272,30 @@ mod tests {
         assert_eq!(check(&["--help"]), Options::Help);
         assert_eq!(check(&["a.qwp", "-h"]), Options::Help);
         assert_eq!(check(&["--nope"]), Options::Unknown("--nope".into()));
+        assert_eq!(check(&["-AppleLocale", "de_DE", "a.qwp"]), Options::Run);
+        // A default's value is not read as an option.
+        assert_eq!(check(&["-NSFoo", "-h"]), Options::Run);
         // The snapshot's own options are its business.
         assert_eq!(
             check(&["--snapshot", "o.png", "--size", "9x9"]),
             Options::Run
         );
+    }
+
+    #[test]
+    fn user_defaults_and_their_values_are_not_documents() {
+        let args: Vec<String> = [
+            "-AppleLocale",
+            "de_DE",
+            "a.qwp",
+            "-AppleMetricUnits",
+            "1",
+            "b.rtf",
+        ]
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+        let names: Vec<&String> = documents(&args).collect();
+        assert_eq!(names, ["a.qwp", "b.rtf"]);
     }
 }

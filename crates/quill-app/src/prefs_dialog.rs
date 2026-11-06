@@ -29,6 +29,15 @@ const COLOR_IDS: [&str; settings::MAX_NAMED_COLORS] = [
 const COLOR_NAMES: [&str; settings::MAX_NAMED_COLORS] = [
     "cname0", "cname1", "cname2", "cname3", "cname4", "cname5", "cname6", "cname7",
 ];
+/// The box beside each color that opens the palette, and its Clear button.
+const COLOR_BOXES: [&str; settings::MAX_NAMED_COLORS] = [
+    "cbox0", "cbox1", "cbox2", "cbox3", "cbox4", "cbox5", "cbox6", "cbox7",
+];
+const COLOR_CLEAR: [&str; settings::MAX_NAMED_COLORS] = [
+    "cclear0", "cclear1", "cclear2", "cclear3", "cclear4", "cclear5", "cclear6", "cclear7",
+];
+/// What an empty row shows instead of an HTML code.
+const NO_COLOR: &str = "None";
 /// Item ids for the ten font folder slots.
 const FOLDER_ON: [&str; 10] = [
     "fon0", "fon1", "fon2", "fon3", "fon4", "fon5", "fon6", "fon7", "fon8", "fon9",
@@ -52,6 +61,21 @@ const AUTOSAVE: [(&str, u32); 6] = [
 ];
 /// How large the toolbars, ruler and dialogs are drawn, in percent.
 const INTERFACE_SIZES: [u16; 5] = [90, 100, 110, 125, 150];
+/// The zooms Preferences > View offers for opening documents.
+const DOCUMENT_ZOOMS: [u16; 9] = [50, 75, 90, 100, 110, 125, 150, 175, 200];
+
+/// The zooms to offer, with `now` among them if it is not one of the
+/// usual ones (the toolbar can leave any zoom), and which is `now`.
+fn zoom_choices(now: f64) -> (Vec<u16>, usize) {
+    let now = now.round().clamp(10.0, 800.0) as u16;
+    let mut zooms = DOCUMENT_ZOOMS.to_vec();
+    if !zooms.contains(&now) {
+        zooms.push(now);
+        zooms.sort_unstable();
+    }
+    let at = zooms.iter().position(|z| *z == now).unwrap_or(0);
+    (zooms, at)
+}
 const SIZES: [&str; 11] = [
     "9", "10", "12", "14", "18", "24", "36", "48", "60", "72", "96",
 ];
@@ -164,6 +188,10 @@ pub fn preferences_with(panel: usize, fonts: &[String], s: &settings::Settings) 
                 .position(|v| *v == s.default_view)
                 .unwrap_or(0);
             d.popup("defaultview", &views, at, 90.0, 154.0, 140.0);
+            d.text("Zoom:", 246.0, 157.0);
+            let (zooms, at) = zoom_choices(s.document_zoom);
+            let names: Vec<String> = zooms.iter().map(|z| format!("{z}%")).collect();
+            d.popup_owned("defaultzoom", names, at, 290.0, 154.0, 80.0);
             d.check(
                 "formatting",
                 "With Formatting Toolbar On",
@@ -187,6 +215,13 @@ pub fn preferences_with(panel: usize, fonts: &[String], s: &settings::Settings) 
                 269.0,
                 s.recent_files,
             );
+            d.text("Interface Size:", 16.0, 303.0);
+            let names: Vec<String> = INTERFACE_SIZES.iter().map(|z| format!("{z}%")).collect();
+            let at = INTERFACE_SIZES
+                .iter()
+                .position(|z| *z == s.interface_scale)
+                .unwrap_or(1);
+            d.popup_owned("ui_size", names, at, 110.0, 300.0, 90.0);
         }
         2 => {
             d.check("rtf", "Always Interpret RTF", 13.0, 45.0, s.interpret_rtf);
@@ -298,18 +333,18 @@ pub fn preferences_with(panel: usize, fonts: &[String], s: &settings::Settings) 
                 40.0,
             );
             d.text("palette, and pointing at one shows its name.", 11.0, 56.0);
-            d.text("HTML Code", 11.0, 80.0);
-            d.text("Name", 110.0, 80.0);
+            d.text("Color", 11.0, 80.0);
+            d.text("Name", 136.0, 80.0);
             for row in 0..settings::MAX_NAMED_COLORS {
                 let y = 98.0 + 25.0 * row as f32;
-                let (hex, name) = s
-                    .named_colors
-                    .get(row)
-                    .map_or((String::new(), ""), |(c, n)| {
-                        (crate::palette::hex(quill_core::props::Rgb(*c)), n.as_str())
-                    });
-                d.field(COLOR_IDS[row], &hex, 11.0, y, 88.0);
-                d.field(COLOR_NAMES[row], name, 110.0, y, 250.0);
+                let (color, name) = s.named_colors.get(row).map_or((None, ""), |(c, n)| {
+                    (Some(quill_core::props::Rgb(*c)), n.as_str())
+                });
+                d.swatch_button(COLOR_BOXES[row], 11.0, y, 44.0, 22.0, 0xFFFFFF);
+                d.text_as(COLOR_IDS[row], NO_COLOR, 62.0, y + 4.0);
+                show_color(&mut d, COLOR_BOXES[row], color);
+                d.field(COLOR_NAMES[row], name, 136.0, y, 226.0);
+                d.button(COLOR_CLEAR[row], "Clear", 370.0, y, 60.0, false);
             }
         }
         ADVANCED_PANEL => {
@@ -366,13 +401,6 @@ pub fn preferences_with(panel: usize, fonts: &[String], s: &settings::Settings) 
                 412.0,
                 s.smart_quotes,
             );
-            d.text("Interface Size:", 180.0, 412.0);
-            let names: Vec<String> = INTERFACE_SIZES.iter().map(|z| format!("{z}%")).collect();
-            let at = INTERFACE_SIZES
-                .iter()
-                .position(|z| *z == s.interface_scale)
-                .unwrap_or(1);
-            d.popup_owned("ui_size", names, at, 280.0, 409.0, 90.0);
             d.text("Documents in Open Recent (1-50):", 11.0, 386.0);
             d.field(
                 "recent_count",
@@ -400,6 +428,23 @@ pub fn preferences_with(panel: usize, fonts: &[String], s: &settings::Settings) 
                 .position(|z| crate::bars::format_size(s.size) == *z)
                 .unwrap_or(2);
             d.popup("sizes", &SIZES, at, 350.0, 61.0, 18.0);
+            let sc = s.document.scripts;
+            d.group("Superscript and Subscript", 11.0, 100.0, 420.0, 92.0);
+            d.text("Superscript: raised", 16.0, 124.0);
+            d.field("raise", &sc.raise.to_string(), 150.0, 121.0, 40.0);
+            d.text("% of the size,", 194.0, 124.0);
+            d.field("supsize", &sc.super_size.to_string(), 290.0, 121.0, 40.0);
+            d.text("% as big", 334.0, 124.0);
+            d.text("Subscript: lowered", 16.0, 152.0);
+            d.field("drop", &sc.drop.to_string(), 150.0, 149.0, 40.0);
+            d.text("% of the size,", 194.0, 152.0);
+            d.field("subsize", &sc.sub_size.to_string(), 290.0, 149.0, 40.0);
+            d.text("% as big", 334.0, 152.0);
+            d.text(
+                "For new documents. Format > Document changes the current one.",
+                16.0,
+                176.0,
+            );
             d.focus("size");
         }
     }
@@ -524,6 +569,17 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
             s.open_with_formatting_toolbar = on("formatting");
             s.open_with_paragraph_toolbar = on("paragraph");
             s.recent_files = on("recent");
+            if id == "ui_size" {
+                s.interface_scale = INTERFACE_SIZES[d.selected("ui_size").min(4)];
+            }
+            // Only a choice made here changes it: the list rounds an odd zoom
+            // left by the toolbar to the nearest whole percent.
+            if id == "defaultzoom" {
+                let (zooms, _) = zoom_choices(s.document_zoom);
+                if let Some(z) = zooms.get(d.selected("defaultzoom")) {
+                    s.document_zoom = *z as f64;
+                }
+            }
         }
         2 => {
             s.interpret_rtf = on("rtf");
@@ -558,7 +614,7 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
                 .iter()
                 .zip(COLOR_NAMES)
                 .filter_map(|(hex, name)| {
-                    let c = crate::palette::parse_hex(&d.field_text(hex))?;
+                    let c = crate::palette::parse_hex(d.item_label(hex))?;
                     Some((c.0, d.field_text(name).trim().to_string()))
                 })
                 .collect();
@@ -573,9 +629,6 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
                 s.font_folder_levels = levels;
             }
             s.smart_quotes = on("smart");
-            if id == "ui_size" {
-                s.interface_scale = INTERFACE_SIZES[d.selected("ui_size").min(4)];
-            }
             if id == "autosave"
                 && let Some(&(_, secs)) = AUTOSAVE.get(d.selected("autosave"))
             {
@@ -597,9 +650,55 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
                 if let Some(z) = size.filter(|z| (1.0..=1638.0).contains(z)) {
                     s.size = (z * 2.0).round() as u16;
                 }
+                // A field left as it was, or not a number, keeps its value.
+                let pct = |id: &str, old: u16, range: std::ops::RangeInclusive<u16>| {
+                    d.field_text(id)
+                        .trim()
+                        .trim_end_matches('%')
+                        .parse::<u16>()
+                        .map_or(old, |n| n.clamp(*range.start(), *range.end()))
+                };
+                let sc = &mut s.document.scripts;
+                use quill_core::ScriptSizes as Sizes;
+                sc.raise = pct("raise", sc.raise, Sizes::OFFSETS);
+                sc.super_size = pct("supsize", sc.super_size, Sizes::SIZES);
+                sc.drop = pct("drop", sc.drop, Sizes::OFFSETS);
+                sc.sub_size = pct("subsize", sc.sub_size, Sizes::SIZES);
             }
         }
     }
+}
+
+/// The row of Colors whose box `id` is.
+pub fn color_box(id: &str) -> Option<usize> {
+    COLOR_BOXES.iter().position(|b| *b == id)
+}
+
+/// The color a row of Colors has, by its box's id.
+pub fn box_color(d: &Dialog, id: &str) -> Option<quill_core::props::Rgb> {
+    let row = color_box(id)?;
+    crate::palette::parse_hex(d.item_label(COLOR_IDS[row]))
+}
+
+/// Show `color` in the row of box `id`: the box and the HTML code, or an
+/// empty box and "None".
+pub fn show_color(d: &mut Dialog, id: &str, color: Option<quill_core::props::Rgb>) {
+    let Some(row) = color_box(id) else {
+        return;
+    };
+    d.set_swatch(COLOR_BOXES[row], color.map_or(0xFFFFFF, |c| c.0));
+    let text = color.map_or(NO_COLOR.to_string(), crate::palette::hex);
+    d.set_label(COLOR_IDS[row], &text);
+}
+
+/// A row's Clear button: no color and no name.
+pub fn clear_color(d: &mut Dialog, id: &str) -> bool {
+    let Some(row) = COLOR_CLEAR.iter().position(|b| *b == id) else {
+        return false;
+    };
+    show_color(d, COLOR_BOXES[row], None);
+    d.set_field(COLOR_NAMES[row], "");
+    true
 }
 
 /// Apply only settings edited in Preferences, preserving unrelated changes made elsewhere.
@@ -673,13 +772,23 @@ mod tests {
     #[test]
     fn the_colors_panel_saves_a_named_color() {
         let mut d = preferences(COLORS_PANEL, &[]);
-        d.set_field("color0", "#FF0000");
+        assert_eq!(d.item_label("color0"), "None");
+        show_color(&mut d, "cbox0", Some(quill_core::props::Rgb(0xFF0000)));
         d.set_field("cname0", "Company Color");
-        d.set_field("color1", "not a color");
+        // A name with no color is not saved.
+        d.set_field("cname1", "Nothing yet");
+        show_color(&mut d, "cbox2", Some(quill_core::props::Rgb(0x00FF00)));
+        d.set_field("cname2", "Gone");
+        assert!(clear_color(&mut d, "cclear2"));
+        assert_eq!(d.item_label("color2"), "None");
+        assert_eq!(d.field_text("cname2"), "");
         changed(COLORS_PANEL, &mut d, "cname0");
         let saved = settings::with(|s| s.named_colors.clone());
+        let again = preferences(COLORS_PANEL, &[]);
         settings::update(|s| s.named_colors.clear());
         assert_eq!(saved, [(0xFF0000, "Company Color".to_string())]);
+        assert_eq!(again.item_label("color0"), "#FF0000");
+        assert_eq!(again.swatch_rgb("cbox0"), Some(0xFF0000));
     }
 
     #[test]
@@ -800,6 +909,16 @@ mod tests {
     }
 
     #[test]
+    fn interface_size_is_a_live_view_preference() {
+        let mut d = preferences(1, &[]);
+        assert_eq!(d.selected("ui_size"), 1);
+        d.set_selected("ui_size", 3);
+        changed(1, &mut d, "ui_size");
+        assert_eq!(settings::get().interface_scale, 125);
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
     fn recent_files_is_a_live_view_preference() {
         let mut d = preferences(1, &[]);
         d.set_on("recent", false);
@@ -807,6 +926,46 @@ mod tests {
         assert!(!settings::get().recent_files);
         settings::update(|s| *s = settings::Settings::default());
     }
+    #[test]
+    fn superscript_and_subscript_amounts_are_set_in_default_font() {
+        settings::update(|s| *s = settings::Settings::default());
+        let mut d = preferences(DEFAULT_FONT_PANEL, &["Georgia".into()]);
+        assert_eq!(d.field_text("raise"), "33");
+        d.set_field("raise", "25");
+        d.set_field("supsize", "100%");
+        d.set_field("subsize", "nonsense");
+        changed(DEFAULT_FONT_PANEL, &mut d, "raise");
+        let sc = settings::get().document.scripts;
+        assert_eq!(
+            (sc.raise, sc.super_size, sc.drop, sc.sub_size),
+            (25, 100, 17, 67)
+        );
+        let back = settings::Settings::from_text(&settings::get().to_text());
+        assert_eq!(back.document.scripts, sc);
+        // New documents take them.
+        assert_eq!(settings::get().new_document().props.scripts, sc);
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
+    fn default_zoom_is_chosen_in_the_view_panel() {
+        settings::update(|s| *s = settings::Settings::default());
+        settings::update(|s| s.document_zoom = 133.0);
+        let mut d = preferences(1, &[]);
+        // An odd zoom from the toolbar is listed so it shows as it is.
+        let (zooms, at) = zoom_choices(133.0);
+        assert_eq!(zooms[at], 133);
+        assert_eq!(d.selected("defaultzoom"), at);
+        let z125 = zooms.iter().position(|z| *z == 125).unwrap();
+        d.set_selected("defaultzoom", z125);
+        changed(1, &mut d, "defaultzoom");
+        assert_eq!(settings::get().document_zoom, 125.0);
+        // Another change in the panel leaves it alone.
+        changed(1, &mut d, "hidden");
+        assert_eq!(settings::get().document_zoom, 125.0);
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
     #[test]
     fn default_paper_is_persistent_and_only_affects_new_documents() {
         settings::update(|s| *s = settings::Settings::default());

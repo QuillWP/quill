@@ -239,6 +239,8 @@ pub enum Target {
     Replace(usize),
     /// Added to the custom colors.
     Add,
+    /// In place of this color, deleted from the document.
+    Instead(Rgb),
 }
 
 /// What the Edit button, or a double-click on `slot`, starts from, and
@@ -292,7 +294,8 @@ const CUS_IDS: [&str; SLOTS] = [
 
 /// The pop-out beside a color control: the standard colors, the custom
 /// ones under them, and an Edit… button, the color now chosen marked.
-pub fn popout(st: &PaletteState, anchor: &'static str) -> Popout {
+/// `delete` adds a Delete button for the document's own colors.
+pub fn popout(st: &PaletteState, anchor: &'static str, delete: bool) -> Popout {
     const PAD: f32 = 8.0;
     let row = PITCH * SLOTS as f32 - (PITCH - BOX);
     let mut items = Vec::new();
@@ -309,7 +312,8 @@ pub fn popout(st: &PaletteState, anchor: &'static str) -> Popout {
                 rgb: st.color_at(slot).map(|c| c.0),
                 selected: st.selected == Some(slot),
                 label: "",
-                tip: st.color_at(slot).and_then(name_of),
+                tip: st.color_at(slot).map(tip),
+                enabled: true,
             });
         }
     }
@@ -321,7 +325,19 @@ pub fn popout(st: &PaletteState, anchor: &'static str) -> Popout {
         selected: false,
         label: "Edit Color…",
         tip: None,
+        enabled: true,
     });
+    if delete {
+        items.push(PopItem {
+            id: "delete_color",
+            rect: crate::canvas::Rect::new(PAD + 92.0, y, 64.0, 22.0),
+            rgb: None,
+            selected: false,
+            label: "Delete",
+            tip: Some("Delete a color this document uses".to_string()),
+            enabled: deletable(st).is_some(),
+        });
+    }
     Popout {
         anchor,
         size: (row + 2.0 * PAD, y + 22.0 + PAD),
@@ -386,6 +402,44 @@ fn custom_colors(doc: &Document) -> Vec<Rgb> {
     out
 }
 
+/// What pointing at a box shows: the color's name, or its HTML code.
+pub fn tip(c: Rgb) -> String {
+    name_of(c)
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| hex(c))
+}
+
+/// The color Delete would remove: a custom one chosen in the pop-out that
+/// is the document's own, not one saved in Preferences for every document.
+pub fn deletable(st: &PaletteState) -> Option<Rgb> {
+    let Some(Slot::Custom(i)) = st.selected else {
+        return None;
+    };
+    let c = *st.custom.get(i)?;
+    let saved = crate::settings::with(|s| s.named_colors.iter().any(|(rgb, _)| *rgb == c.0));
+    (!saved).then_some(c)
+}
+
+/// Whether any text in `doc` is in color `c`.
+pub fn uses(doc: &Document, c: Rgb) -> bool {
+    std::iter::once(&doc.main)
+        .chain(doc.headers.iter())
+        .chain([&doc.notes, &doc.annotations])
+        .flat_map(|s| &s.paras)
+        .any(|p| p.runs.iter().any(|r| r.len > 0 && r.chp.color == c))
+}
+
+/// Take color `c` out of the custom row, and out of the edits waiting
+/// for their dialog's OK.
+pub fn forget(st: &mut PaletteState, c: Rgb) {
+    st.custom.retain(|x| *x != c);
+    drop_edits_of(c);
+    if st.current == c {
+        st.current = Rgb::BLACK;
+    }
+    st.selected = st.slot_of(st.current);
+}
+
 /// The name saved for a color in Preferences, if it has one.
 pub fn name_of(c: Rgb) -> Option<String> {
     crate::settings::with(|s| {
@@ -405,6 +459,11 @@ pub fn hold_edit(target: Target, new: Rgb) {
 /// applied is in the document's text now, and shows from there.
 pub fn drop_edits() {
     PENDING.with_borrow_mut(Vec::clear);
+}
+
+/// Forget the waiting edits that made color `c`.
+pub fn drop_edits_of(c: Rgb) {
+    PENDING.with_borrow_mut(|pending| pending.retain(|(_, x)| *x != c));
 }
 
 /// Put an edited color where the edit said.

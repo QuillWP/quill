@@ -94,7 +94,7 @@ pub fn describe(cmd: Cmd) -> String {
         DeleteRows => "Deletes the rows holding the selected cells.",
         DeleteColumns => "Deletes the columns holding the selected cells.",
         DeleteCells => "Deletes the selected cells, moving the rest of each row left.",
-        MergeCells => "Merges the selected cells of each row into one.",
+        MergeCells => "Merges the selected cells into one, across and down.",
         SplitCell => "Splits each selected cell in two.",
         ReplaceFonts => {
             "Chooses installed fonts for the fonts this document uses that are missing."

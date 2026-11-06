@@ -44,8 +44,9 @@ fn blank(story: &quill_core::Story) -> bool {
 }
 
 /// Everything in `doc` that Markdown cannot carry, once each, in the order
-/// the warning lists them.
-pub fn losses(doc: &Document) -> Vec<&'static str> {
+/// the warning lists them. `paper` is the page a Markdown file opens on,
+/// the person's default paper, so keeping that is no loss.
+pub fn losses(doc: &Document, paper: &quill_core::DocumentProps) -> Vec<&'static str> {
     let mut found = Vec::new();
     if !doc.styles.characters.is_empty() {
         note(&mut found, CHARACTER_STYLES);
@@ -67,7 +68,7 @@ pub fn losses(doc: &Document) -> Vec<&'static str> {
         note(&mut found, HEADERS);
     }
     let page = doc.props.clone();
-    let normal = quill_core::DocumentProps::default();
+    let normal = paper;
     let section_differs = |s: &quill_core::SectionProps| {
         s.columns > 1
             || s.line_numbers != quill_core::LineNumbering::Off

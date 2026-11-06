@@ -32,7 +32,8 @@ pub use para::{Mark, Paragraph, Run};
 pub use picture::{Crop, ImageFormat, Object, Picture};
 pub use props::{
     Align, CellProps, CharProps, Frame, FrameH, FrameRel, FrameV, LineSpacing, ParaProps, Rgb,
-    RowHeight, RowProps, TABLE_GAP, TabAlign, TabLeader, TabStop, Twips, Underline,
+    RowHeight, RowProps, Script, ScriptSizes, TABLE_GAP, TabAlign, TabLeader, TabStop, Twips,
+    Underline, VMerge,
 };
 pub use story::{Position, Selection, Story};
 pub use styles::{Style, StyleSheet};

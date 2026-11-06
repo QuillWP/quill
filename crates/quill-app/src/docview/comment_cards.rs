@@ -11,6 +11,9 @@ use crate::canvas::round_rect;
 /// Size of a comment's text in the pane, in points at the window's own
 /// scale; the document's zoom does not change it.
 pub(super) const COMMENT_SIZE: f32 = 10.0;
+/// A font number no document uses, standing for the system's interface
+/// font when the pane lays out a comment.
+pub(super) const INTERFACE_FONT: u16 = u16::MAX;
 /// Room left between one comment's box and the next, in points.
 pub(super) const CARD_GAP: f32 = 12.0;
 /// How far a box reaches above and below its text.

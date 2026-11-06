@@ -8,7 +8,7 @@ use crate::xml::{Element, Node};
 use quill_core::para::{Mark, Paragraph, chars};
 use quill_core::props::{
     Align, BorderLine, BorderStyle, Borders, CellProps, CharProps, LineSpacing, ParaProps, Rgb,
-    RowHeight, RowProps, TABLE_GAP, Underline,
+    RowHeight, RowProps, TABLE_GAP, Underline, VMerge,
 };
 use quill_core::{Document, Object};
 
@@ -325,11 +325,20 @@ fn css(doc: &mut Document, frame: &mut Frame, style: &str) {
             "font-variant" | "font-variant-caps" => c.small_caps = lower == "small-caps",
             "text-transform" => c.all_caps = lower == "uppercase",
             "letter-spacing" => c.spacing = twips().unwrap_or(0),
-            "vertical-align" => {
-                c.position = match lower.as_str() {
-                    "super" => c.size as i32 * 3,
-                    "sub" => -(c.size as i32 * 3),
-                    _ => twips().unwrap_or(0),
+            "vertical-align" => match lower.as_str() {
+                "super" => c.script = quill_core::Script::Super,
+                "sub" => c.script = quill_core::Script::Sub,
+                "baseline" => {
+                    c.script = quill_core::Script::None;
+                    c.position = 0;
+                }
+                _ => c.position = twips().unwrap_or(0),
+            },
+            // The text's own size under a superscript or subscript Quill
+            // wrote, drawn smaller.
+            "--quill-size" => {
+                if let Some(t) = twips() {
+                    c.size = (t / 10).clamp(2, 3276) as u16;
                 }
             }
             "background-color" => {
@@ -952,8 +961,8 @@ impl<'a> Reader<'a> {
                 f.chp.underline = Underline::Single;
             }
             "s" | "strike" | "del" => f.chp.strike = true,
-            "sup" => f.chp.position = size as i32 * 3,
-            "sub" => f.chp.position = -(size as i32 * 3),
+            "sup" => f.chp.script = quill_core::Script::Super,
+            "sub" => f.chp.script = quill_core::Script::Sub,
             "small" => f.chp.size = (size * 5 / 6).max(2),
             "big" => f.chp.size = size * 6 / 5,
             "code" | "tt" | "kbd" | "samp" | "pre" => {
@@ -1390,13 +1399,28 @@ impl<'a> Reader<'a> {
             ..Default::default()
         };
         self.path.push(e);
+        // Cells with rowspan still covering columns below: by column, the
+        // rows left, the columns wide and their settings.
+        let mut down: Vec<Option<(usize, usize, CellProps)>> = Vec::new();
         for row in rows {
             self.path.push(row);
             let rf = self.frame_for(row, f);
             let mut cells: Vec<CellProps> = Vec::new();
             let mut row_chp = f.chp;
             self.tables += 1;
+            let mut col = 0;
+            let level = self.tables as u8;
             for cell in cells_of(row) {
+                continue_down(
+                    &mut down, &mut col, out, &mut cells, &rf.pap, row_chp, level,
+                );
+                let at = col;
+                col += span(cell);
+                let rows_spanned = cell
+                    .attr("rowspan")
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .clamp(1, MAX_ROWS_SPANNED);
                 let full = cells.len() >= MAX_COLUMNS;
                 if full {
                     // Past the most cells a row can have, the text joins
@@ -1453,7 +1477,29 @@ impl<'a> Reader<'a> {
                     shading: 0,
                     shading_color: cf.pap.shading_color,
                     valign: Default::default(),
+                    vmerge: if rows_spanned > 1 {
+                        VMerge::Restart
+                    } else {
+                        VMerge::None
+                    },
                 });
+                if rows_spanned > 1 {
+                    if down.len() < at + 1 {
+                        down.resize(at + 1, None);
+                    }
+                    let props = cells.last().cloned().unwrap_or_default();
+                    down[at] = Some((rows_spanned - 1, span(cell), props));
+                }
+            }
+            // Spans still coming down at the end of the row.
+            while col < down.len() {
+                let before = col;
+                continue_down(
+                    &mut down, &mut col, out, &mut cells, &rf.pap, row_chp, level,
+                );
+                if col == before {
+                    col += 1;
+                }
             }
             self.tables -= 1;
             self.path.pop();
@@ -1479,6 +1525,36 @@ impl<'a> Reader<'a> {
 
 /// The most cells a row can have, as in the other readers.
 const MAX_COLUMNS: usize = 255;
+/// The most rows a cell with rowspan is read as covering.
+const MAX_ROWS_SPANNED: usize = 10_000;
+
+/// Under cells with rowspan from rows above, starting at column `col`:
+/// empty cells continuing them, as Quill and Word keep a vertical merge.
+fn continue_down(
+    down: &mut [Option<(usize, usize, CellProps)>],
+    col: &mut usize,
+    out: &mut Vec<Paragraph>,
+    cells: &mut Vec<CellProps>,
+    pap: &ParaProps,
+    chp: CharProps,
+    level: u8,
+) {
+    while let Some(Some((left, cols, props))) = down.get(*col).cloned() {
+        if cells.len() >= MAX_COLUMNS {
+            return;
+        }
+        let mut p = Paragraph::new(pap.clone(), chp);
+        p.pap.set_level(level);
+        p.mark = Mark::CellEnd;
+        out.push(p);
+        cells.push(CellProps {
+            vmerge: VMerge::Continue,
+            ..props.clone()
+        });
+        down[*col] = (left > 1).then_some((left - 1, cols, props));
+        *col += cols;
+    }
+}
 
 fn block(tag: &str) -> bool {
     matches!(

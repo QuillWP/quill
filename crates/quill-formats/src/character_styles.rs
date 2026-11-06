@@ -13,7 +13,7 @@ pub fn encode(format: CharacterFormat) -> String {
         quill_core::Underline::Dotted => 4,
     };
     format!(
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         format.mask,
         c.size,
         u8::from(c.bold),
@@ -27,7 +27,12 @@ pub fn encode(format: CharacterFormat) -> String {
         u8::from(c.hidden),
         c.color.0,
         c.position,
-        c.spacing
+        c.spacing,
+        match c.script {
+            quill_core::Script::None => 0,
+            quill_core::Script::Super => 1,
+            quill_core::Script::Sub => 2,
+        }
     )
 }
 
@@ -40,7 +45,8 @@ pub fn decode(text: &str, font: u16) -> Option<CharacterFormat> {
         .map(str::parse)
         .collect::<Result<_, _>>()
         .ok()?;
-    if values.len() != 14
+    // A 15th value, superscript or subscript, is newer.
+    if !(14..=15).contains(&values.len())
         || [2, 3, 5, 6, 7, 8, 9, 10]
             .iter()
             .any(|&i| !(0..=1).contains(&values[i]))
@@ -69,6 +75,11 @@ pub fn decode(text: &str, font: u16) -> Option<CharacterFormat> {
         color: quill_core::Rgb(u32::try_from(values[11]).ok()? & 0xFF_FFFF),
         position: i32::try_from(values[12]).ok()?,
         spacing: i32::try_from(values[13]).ok()?,
+        script: match values.get(14) {
+            Some(1) => quill_core::Script::Super,
+            Some(2) => quill_core::Script::Sub,
+            _ => quill_core::Script::None,
+        },
         ..Default::default()
     };
     Some(CharacterFormat::new(props, u16::try_from(values[0]).ok()?))

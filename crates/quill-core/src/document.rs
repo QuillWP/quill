@@ -256,6 +256,8 @@ pub struct DocumentProps {
     /// The view the document was saved in, to open it in again. None for
     /// a new document, or a file that does not say.
     pub view: Option<SavedView>,
+    /// How superscripts and subscripts are drawn (Format > Document).
+    pub scripts: crate::props::ScriptSizes,
 }
 
 /// A view a document can be saved in.
@@ -264,6 +266,23 @@ pub enum SavedView {
     Normal,
     Outline,
     PageLayout,
+}
+
+impl DocumentProps {
+    /// Take the paper and margins from `from`: for a file whose format has
+    /// no page of its own, which opens on the person's default paper.
+    pub fn take_paper(&mut self, from: &DocumentProps) {
+        self.page_width = from.page_width;
+        self.page_height = from.page_height;
+        self.margin_left = from.margin_left;
+        self.margin_right = from.margin_right;
+        self.margin_top = from.margin_top;
+        self.margin_bottom = from.margin_bottom;
+        self.top_exact = from.top_exact;
+        self.bottom_exact = from.bottom_exact;
+        self.gutter = from.gutter;
+        self.mirror_margins = from.mirror_margins;
+    }
 }
 
 impl Default for DocumentProps {
@@ -291,6 +310,7 @@ impl Default for DocumentProps {
             track_changes: false,
             live_toc: None,
             view: None,
+            scripts: crate::props::ScriptSizes::default(),
         }
     }
 }
@@ -552,6 +572,9 @@ pub struct Document {
     history: History,
     changes: Vec<Change>,
     saved_state: u64,
+    /// Removing replies whose annotation went, so the removal's own edits
+    /// do not start another round.
+    pruning: bool,
 }
 
 impl Default for Document {
@@ -612,6 +635,7 @@ impl Document {
             history: History::default(),
             changes: Vec::new(),
             saved_state: 0,
+            pruning: false,
         }
     }
 
@@ -1293,6 +1317,7 @@ impl Document {
         };
         let s = self.story_mut(story);
         let old: Vec<Paragraph> = s.paras.splice(first..first + remove, new).collect();
+        let removed_annotations = crate::notes::annotation_ids(&old);
         self.changes.push(Change {
             story,
             first,
@@ -1331,8 +1356,24 @@ impl Document {
             step.records.push(rec);
         }
         // References came or went: bring the notes into line.
+        let annotations = changed_kinds.contains(&crate::notes::NoteKind::Annotation);
         for kind in changed_kinds {
             self.reconcile(kind);
+        }
+        if annotations && !self.pruning {
+            let present: std::collections::HashSet<u32> =
+                crate::notes::annotation_ids(&self.main.paras)
+                    .into_iter()
+                    .collect();
+            let gone: std::collections::HashSet<u32> = removed_annotations
+                .into_iter()
+                .filter(|id| !present.contains(id))
+                .collect();
+            if !gone.is_empty() {
+                self.pruning = true;
+                self.drop_orphan_replies(gone);
+                self.pruning = false;
+            }
         }
     }
 
@@ -1819,6 +1860,7 @@ impl Document {
             history: History::default(),
             changes: Vec::new(),
             saved_state: 0,
+            pruning: false,
         };
         map_story(&mut out.main, &map);
         map_story(&mut out.notes, &map);
@@ -2289,15 +2331,35 @@ impl Document {
     /// since a section sharing one with the section before would otherwise
     /// be given its own copy.
     pub fn replace_font(&mut self, from: &[u16], to: u16) {
-        let fix = |c: &mut CharProps| {
+        self.change_everywhere(0, |c| {
             if from.contains(&c.font) {
                 c.font = to;
             }
-        };
+        });
+    }
+
+    /// Text and styles in color `from` take color `to`, as Replace Fonts
+    /// does for fonts: call it with a step open.
+    pub fn replace_color(&mut self, from: crate::props::Rgb, to: crate::props::Rgb) {
+        self.change_everywhere(11, |c| {
+            if c.color == from {
+                c.color = to;
+            }
+        });
+    }
+
+    /// Run `fix` over every style, the character styles that set field
+    /// `bit`, and all the text, for Replace Fonts and Delete Color.
+    fn change_everywhere(&mut self, bit: u16, fix: impl Fn(&mut CharProps)) {
         self.record_sheet();
-        self.styles.styles.iter_mut().for_each(|s| fix(&mut s.chp));
+        for s in &mut self.styles.styles {
+            fix(&mut s.chp);
+            // A linked style's own formatting comes back when it is
+            // unlinked, so it changes too.
+            fix(&mut s.own_chp);
+        }
         for s in &mut self.styles.characters {
-            if s.format.mask & 1 != 0 {
+            if s.format.mask & (1 << bit) != 0 {
                 fix(&mut s.format.props);
             }
         }
@@ -2306,7 +2368,7 @@ impl Document {
             let end = Position::new(last, self.story(story).paras[last].len());
             // The definitions changed above, so a styled run still follows
             // its style: this is not formatting by hand.
-            self.change_chars(story, Position::new(0, 0), end, false, fix);
+            self.change_chars(story, Position::new(0, 0), end, false, &fix);
         }
         for story in &mut self.headers {
             for p in &mut story.paras {

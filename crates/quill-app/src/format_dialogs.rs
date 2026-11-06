@@ -11,7 +11,7 @@ use crate::dialog::{Dialog, units};
 use crate::docview::DocView;
 use crate::page_dialogs;
 use quill_core::props::{
-    CharProps, LineSpacing, ParaProps, Rgb, TabAlign, TabLeader, TabStop, Twips, Underline,
+    CharProps, LineSpacing, ParaProps, Rgb, Script, TabAlign, TabLeader, TabStop, Twips, Underline,
     WORD_COLORS,
 };
 
@@ -107,6 +107,9 @@ pub enum Alert {
     Info,
     /// Find reached the end: OK goes on from the other end.
     ContinueSearch(Box<crate::find_dialog::Search>),
+    /// Delete a color text uses: OK makes that text black, Choose Color…
+    /// asks for another.
+    DeleteColor(quill_core::props::Rgb),
 }
 
 /// Use As Default in the Document or Section dialog: make the dialog's
@@ -381,6 +384,7 @@ fn build_character(
             0,
             quill_layout::FontFamilyInfo {
                 name: current.clone(),
+                draws_name: false,
                 variants: vec![quill_layout::FontVariant {
                     bold: false,
                     italic: false,
@@ -433,14 +437,37 @@ fn build_character(
     }
 
     d.group("Position", 150.0, 104.0, 222.0, 74.0);
-    d.radio("pos_normal", "Normal", 158.0, 122.0, 1, c.position == 0);
-    d.radio("pos_super", "Superscript", 158.0, 140.0, 1, c.position > 0);
-    d.radio("pos_sub", "Subscript", 158.0, 158.0, 1, c.position < 0);
-    d.text("By:", 296.0, 122.0);
+    d.radio(
+        "pos_normal",
+        "Normal",
+        158.0,
+        122.0,
+        1,
+        c.script == Script::None,
+    );
+    d.radio(
+        "pos_super",
+        "Superscript",
+        158.0,
+        140.0,
+        1,
+        c.script == Script::Super,
+    );
+    d.radio(
+        "pos_sub",
+        "Subscript",
+        158.0,
+        158.0,
+        1,
+        c.script == Script::Sub,
+    );
+    // A shift set by hand, apart from the superscript or subscript, which
+    // the document's settings size: up, or down when negative.
+    d.text("Raised By:", 290.0, 122.0);
     let by = if c.position == 0 {
         String::new()
     } else {
-        units::points(c.position.abs())
+        units::points(c.position)
     };
     d.field("pos_by", &by, 296.0, 140.0, 66.0);
 
@@ -572,10 +599,16 @@ pub fn read_character(d: &Dialog, base: &CharProps, view: &mut DocView) -> Optio
     c.all_caps = d.is_on("allcaps");
     c.hidden = d.is_on("hidden");
     let by = |id| units::parse(&d.field_text(id), "pt").map(|t| t.abs());
-    c.position = match d.radio_on(1) {
-        "pos_super" => by("pos_by")?,
-        "pos_sub" => -by("pos_by")?,
-        _ => 0,
+    c.script = match d.radio_on(1) {
+        "pos_super" => Script::Super,
+        "pos_sub" => Script::Sub,
+        _ => Script::None,
+    };
+    let raised = d.field_text("pos_by");
+    c.position = if raised.trim().is_empty() {
+        0
+    } else {
+        units::parse(&raised, "pt")?
     };
     c.spacing = match d.radio_on(2) {
         "sp_cond" => -by("sp_by")?,
@@ -744,7 +777,7 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
                 }
                 changed!(
                     font, size, bold, italic, underline, strike, outline, shadow, small_caps,
-                    all_caps, hidden, color, position, spacing
+                    all_caps, hidden, color, position, spacing, script
                 );
             });
             true

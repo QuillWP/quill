@@ -242,6 +242,21 @@ impl DocView {
         if d.started {
             let sel = self.sel;
             self.finish_edit(sel);
+            // Dragging the last border out can take the table past its
+            // room: ask, as Insert Table does, and put it back if not.
+            if d.kind == BorderKind::Column
+                && let Some((end, _, _)) = d.rows.first()
+            {
+                let first = table::row_at(&self.doc.main.paras, *end).map_or(*end, |r| r.first);
+                let before = d.rows.iter().map(|(_, p, _)| p.width()).max().unwrap_or(0);
+                let after = crate::table_dialogs::widest_after(self, first, &[]);
+                if !crate::table_dialogs::confirm_wider(self, first, before, after, "Keep") {
+                    if let Some(sel) = self.doc.undo() {
+                        self.sel = sel;
+                    }
+                    self.invalidate_layout();
+                }
+            }
         }
         true
     }

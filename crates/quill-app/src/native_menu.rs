@@ -222,6 +222,23 @@ fn no_system_full_screen_item() {
     }
 }
 
+/// Native tooltips, such as the color palette's names, wait about a
+/// second by default. Show them after the same rest as Quill's own toolbar
+/// tips. Registered, not saved, so a delay set for the whole Mac still wins.
+fn quick_tooltips() {
+    use objc2_06::runtime::AnyObject;
+    use objc2_06::{class, msg_send};
+    unsafe {
+        let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
+        let key = NSString::from_str("NSInitialToolTipDelay");
+        let millis = crate::app::TIP_DELAY.as_millis() as isize;
+        let value: *mut AnyObject = msg_send![class!(NSNumber), numberWithInteger: millis];
+        let wanted: *mut AnyObject =
+            msg_send![class!(NSDictionary), dictionaryWithObject: value, forKey: &*key];
+        let _: () = msg_send![defaults, registerDefaults: wanted];
+    }
+}
+
 fn keep_autofill_out() {
     use block2::RcBlock;
     use objc2_06::runtime::AnyObject;
@@ -411,6 +428,7 @@ impl NativeMenu {
         }
         keep_autofill_out();
         no_system_full_screen_item();
+        quick_tooltips();
         bar.init_for_nsapp();
         self._bar = bar;
         self.items = items;

@@ -100,7 +100,10 @@ impl Out {
     /// Write `text`, spacing out relations such as = and ≤ in the main
     /// line (not in scripts, where the space would look loose).
     fn text(&mut self, text: &str, chp: CharProps) {
-        if chp.position != 0 || !text.chars().any(relation) {
+        if chp.position != 0
+            || chp.script != quill_core::Script::None
+            || !text.chars().any(relation)
+        {
             return self.push(text, chp);
         }
         let mut spaced = String::new();
@@ -522,9 +525,17 @@ impl Out {
     }
 }
 
-/// Raised for a superscript: a third of the size up, two thirds as big,
-/// as Quill reads Word's superscripts.
+/// Raised for a superscript: marked as one, drawn by the document's
+/// amounts. A script inside a script, which one mark cannot say, is moved
+/// and made smaller again by hand: a third of its size up, two thirds as
+/// big.
 fn raise(c: CharProps) -> CharProps {
+    if c.script == quill_core::Script::None {
+        return CharProps {
+            script: quill_core::Script::Super,
+            ..c
+        };
+    }
     CharProps {
         position: c.position + crate::superscript_rise(c.size),
         size: (c.size * 2).div_ceil(3).max(8),
@@ -533,6 +544,12 @@ fn raise(c: CharProps) -> CharProps {
 }
 
 fn lower(c: CharProps) -> CharProps {
+    if c.script == quill_core::Script::None {
+        return CharProps {
+            script: quill_core::Script::Sub,
+            ..c
+        };
+    }
     CharProps {
         position: c.position - crate::subscript_drop(c.size),
         size: (c.size * 2).div_ceil(3).max(8),
@@ -650,7 +667,7 @@ mod tests {
         // The 2 of b² is raised and smaller; x is italic, = is not.
         let two = p.text.find("b2").unwrap() + 1;
         let c = p.chp_of_char(two);
-        assert!(c.position > 0 && c.size < 24);
+        assert_eq!(c.script, quill_core::Script::Super);
         assert!(p.chp_of_char(0).italic);
         assert!(!p.chp_of_char(2).italic);
     }

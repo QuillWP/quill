@@ -355,13 +355,20 @@ fn read_any(path: &Path, interpret_rtf: bool) -> Result<(Document, report::Impor
     if Format::from_path(path) == Some(Format::Markdown) && looks_like_text(&bytes) {
         let text = decode_text(bytes);
         too_large(path, quill_core::limits::Size::of_text(&text))?;
-        return Ok(markdown::read(&text, path.parent()));
+        let (doc, mut report) = markdown::read(&text, path.parent());
+        report.no_page = true;
+        return Ok((doc, report));
     }
     if odt_read::is_flat(&bytes) {
         return odt_read::read_flat_reported(&bytes).map_err(|e| document_error(path, "ODT", e));
     }
     if html_read::is_html(&bytes) || Format::from_path(path) == Some(Format::Html) {
-        return html_read::read_file(&bytes).map_err(|e| document_error(path, "HTML", e));
+        return html_read::read_file(&bytes)
+            .map(|(doc, mut report)| {
+                report.no_page = true;
+                (doc, report)
+            })
+            .map_err(|e| document_error(path, "HTML", e));
     }
     if Format::from_path(path) == Some(Format::Odt) {
         return Err(format!(
@@ -376,7 +383,11 @@ fn read_any(path: &Path, interpret_rtf: bool) -> Result<(Document, report::Impor
             name()
         ));
     }
-    plain_text(path, bytes).map(plain)
+    plain_text(path, bytes).map(|doc| {
+        let (doc, mut report) = plain(doc);
+        report.no_page = true;
+        (doc, report)
+    })
 }
 
 /// How far superscript text of `size` half-points is raised: a third of
@@ -995,6 +1006,120 @@ mod tests {
                 save(&doc, &path, format).unwrap();
                 assert_eq!(load(&path).unwrap().props.view, Some(view), "{format:?}");
             }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_formats_without_a_page_say_so() {
+        let dir = std::env::temp_dir().join(format!("quill-paper-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut doc = quill_core::Document::new();
+        doc.insert_text(StoryId::Main, Position::new(0, 0), "Hi", Default::default());
+        for (format, no_page) in [
+            (Format::Quill, false),
+            (Format::Docx, false),
+            (Format::Rtf, false),
+            (Format::Odt, false),
+            (Format::Html, true),
+            (Format::Markdown, true),
+            (Format::Text, true),
+        ] {
+            let path = dir.join(format!("a.{}", format.extensions()[0]));
+            save(&doc, &path, format).unwrap();
+            let (_, report) = load_reported(&path, true).unwrap();
+            assert_eq!(report.no_page, no_page, "{format:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn superscripts_and_shifts_by_hand_survive_every_format() {
+        use quill_core::Script;
+        let mut doc = quill_core::text::from_plain_text("E=mc2 and H2O and up");
+        let at = |d: &Document, i: usize| d.main.paras[0].chp_of_char(i);
+        let p = &mut doc.main.paras[0];
+        p.format_range(4, 5, &mut |c| c.script = Script::Super);
+        p.format_range(11, 12, &mut |c| c.script = Script::Sub);
+        p.format_range(18, 20, &mut |c| c.position = 60);
+        doc.props.scripts.super_size = 80;
+        let dir = std::env::temp_dir().join(format!("quill-scripts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for format in [
+            Format::Quill,
+            Format::Docx,
+            Format::Rtf,
+            Format::Odt,
+            Format::Html,
+            Format::Markdown,
+        ] {
+            let path = dir.join(format!("a.{}", format.extensions()[0]));
+            save(&doc, &path, format).unwrap();
+            let back = load(&path).unwrap();
+            assert_eq!(at(&back, 4).script, Script::Super, "{format:?}");
+            assert_eq!(at(&back, 11).script, Script::Sub, "{format:?}");
+            // The text keeps its own size; only drawing makes it smaller.
+            assert_eq!(at(&back, 4).size, at(&back, 0).size, "{format:?}");
+            assert_eq!(at(&back, 0).script, Script::None, "{format:?}");
+            if format != Format::Markdown {
+                assert_eq!(at(&back, 18).position, 60, "{format:?}");
+                assert_eq!(at(&back, 18).script, Script::None, "{format:?}");
+            }
+            if format == Format::Quill {
+                assert_eq!(back.props.scripts, doc.props.scripts);
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn vertical_merges_survive_every_format() {
+        use quill_core::VMerge;
+        let mut doc = quill_core::text::from_plain_text("a\tb\n\tc\n\td\ne\tf");
+        doc.convert_to_table(
+            StoryId::Main,
+            0,
+            3,
+            quill_core::table::Convert::Tabs,
+            |_| 2000,
+        );
+        let rows = quill_core::table::table_rows(&doc.main.paras, 0);
+        doc.merge_cells_down(StoryId::Main, &rows[..3], &[0, 0, 0], 8640);
+        let tw = doc.props.text_width();
+        let states = |d: &Document| -> Vec<Vec<VMerge>> {
+            quill_core::table::table_rows(&d.main.paras, 0)
+                .iter()
+                .map(|r| {
+                    quill_core::table::row_props(&d.main.paras, r, tw)
+                        .cells
+                        .iter()
+                        .map(|c| c.vmerge)
+                        .collect()
+                })
+                .collect()
+        };
+        let want = states(&doc);
+        assert_eq!(want[0][0], VMerge::Restart);
+        assert_eq!(want[2][0], VMerge::Continue);
+        let dir = std::env::temp_dir().join(format!("quill-vmerge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for format in [
+            Format::Quill,
+            Format::Docx,
+            Format::Rtf,
+            Format::Odt,
+            Format::Html,
+        ] {
+            let path = dir.join(format!("a.{}", format.extensions()[0]));
+            save(&doc, &path, format).unwrap();
+            let back = load(&path).unwrap();
+            assert_eq!(states(&back), want, "{format:?}");
+            let top = quill_core::table::row_at(&back.main.paras, 0).unwrap();
+            assert!(
+                back.main.paras[top.cells[0].1].text.is_empty()
+                    || back.main.paras[top.cells[0].0].text == "a",
+                "{format:?}"
+            );
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1623,6 +1748,91 @@ mod tests {
             assert_eq!(back.main.paras[0].pap.frame, Some(drop));
             assert_eq!(back.main.paras[1].pap.frame, None);
             assert_eq!(back.main.paras[2].pap.frame, Some(placed));
+        }
+    }
+
+    #[test]
+    fn imported_drop_caps_ignore_horizontal_frame_position_only() {
+        use quill_core::{FrameH, FrameRel, FrameV};
+        // The cap's frame controls come from the same producer as ordinary
+        // frames, but its horizontal position belongs to the following text.
+        for (kind, rtf_kind, is_drop) in
+            [("drop", 1, true), ("margin", 2, true), ("none", 0, false)]
+        {
+            let body = format!(
+                r#"<w:p><w:pPr><w:framePr w:dropCap="{kind}" w:lines="3" w:hAnchor="page" w:xAlign="center" w:vAnchor="text" w:hSpace="40"/></w:pPr><w:r><w:rPr><w:b/><w:sz w:val="96"/></w:rPr><w:t>W</w:t></w:r></w:p><w:p><w:r><w:t>rapped text</w:t></w:r></w:p>"#
+            );
+            let docx = super::docx::tests_read_body(&body);
+            // Check both control orders: normalization must wait until all
+            // paragraph properties have been read.
+            for drop_first in [false, true] {
+                let drop = if is_drop {
+                    format!(r"\dropcapli3\dropcapt{rtf_kind}")
+                } else {
+                    String::new()
+                };
+                let position = r"\phpg\posxc\pvpara\dxfrtext40";
+                let controls = if drop_first {
+                    format!("{drop}{position}")
+                } else {
+                    format!("{position}{drop}")
+                };
+                let rtf =
+                    format!(r"{{\rtf1\pard{controls}{{\b\fs96 W}}\par\pard rapped text\par}}");
+                let rtf = super::rtf::read(rtf.as_bytes()).unwrap();
+                for doc in [&docx, &rtf] {
+                    let cap = &doc.main.paras[0];
+                    assert_eq!(cap.text, "W");
+                    assert!(cap.chp_of_char(0).bold);
+                    assert_eq!(cap.chp_of_char(0).size, 96);
+                    let f = cap.pap.frame.unwrap();
+                    assert_eq!(
+                        f.h,
+                        if is_drop {
+                            FrameH::Left
+                        } else {
+                            FrameH::Center
+                        }
+                    );
+                    assert_eq!(
+                        f.h_rel,
+                        if is_drop {
+                            FrameRel::Column
+                        } else {
+                            FrameRel::Page
+                        }
+                    );
+                    assert_eq!(f.v, FrameV::InLine);
+                    assert_eq!(f.width, None);
+                    assert_eq!(f.from_text, 40);
+                    assert_eq!(f.drop_lines, if is_drop { 3 } else { 0 });
+                    assert_eq!(f.in_margin, kind == "margin");
+                    assert_eq!(doc.main.paras[1].text, "rapped text");
+                    assert_eq!(doc.main.paras[1].pap.frame, None);
+                    let native = super::native::read(&super::native::write(doc, 0)).unwrap();
+                    let saved_docx = super::docx::read(&super::docx::write(&native, 0)).unwrap();
+                    let saved_rtf = super::rtf::read(&super::rtf::write(&native)).unwrap();
+                    for back in [
+                        super::rtf::read(&super::rtf::write(&saved_docx)).unwrap(),
+                        super::docx::read(&super::docx::write(&saved_rtf, 0)).unwrap(),
+                        native,
+                        saved_docx,
+                        saved_rtf,
+                    ] {
+                        // An inline frame's vertical anchor is unused and
+                        // DOCX canonicalizes it to Margin.
+                        let back_frame = back.main.paras[0].pap.frame.unwrap();
+                        assert_eq!(
+                            back_frame,
+                            quill_core::Frame {
+                                v_rel: back_frame.v_rel,
+                                ..f
+                            }
+                        );
+                        assert_eq!(back.main.paras[0].chp_of_char(0), cap.chp_of_char(0));
+                    }
+                }
+            }
         }
     }
 

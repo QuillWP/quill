@@ -26,7 +26,10 @@ impl App {
             return;
         }
         if source {
-            let lost = quill_formats::markdown::losses(&view.doc);
+            let lost = quill_formats::markdown::losses(
+                &view.doc,
+                &crate::settings::with(|s| s.document.clone()),
+            );
             if !lost.is_empty()
                 && !ask(
                     "Show this document as Markdown?",

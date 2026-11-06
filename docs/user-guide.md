@@ -279,7 +279,7 @@ continue updating the live contents.
 A document opens in the view it was saved in; Preferences > View > In View is for new
 documents. The Custom row of the color palette holds the colors saved in Preferences >
 Colors, for every document, and then the colors this document uses. Pointing at a saved
-color shows its name. Preferences > Advanced has Interface Size and Smart Quotes.
+color shows its name. Preferences > View has Interface Size, and Advanced has Smart Quotes.
 
 Windows and Linux keep Settings in File and About Quill in the rightmost Help menu.
 Their menu labels use the host UI font; macOS retains its application menu and native menus.

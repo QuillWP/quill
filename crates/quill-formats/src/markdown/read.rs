@@ -1329,9 +1329,9 @@ impl Reader {
             c.underline = Underline::Single;
         }
         if f.sup {
-            c.position = c.size as i32 * 3;
+            c.script = quill_core::Script::Super;
         } else if f.sub {
-            c.position = -(c.size as i32 * 3);
+            c.script = quill_core::Script::Sub;
         }
         if f.link != 0 {
             c.link = f.link;

@@ -31,7 +31,7 @@ fn main() {
         };
         n += 1;
         let r = std::panic::catch_unwind(|| {
-            let lost = quill_formats::markdown::losses(&doc);
+            let lost = quill_formats::markdown::losses(&doc, &quill_core::DocumentProps::default());
             let a = quill_formats::markdown::write(&doc);
             let (d2, _) = quill_formats::markdown::read(&a, None);
             let b = quill_formats::markdown::write(&d2);

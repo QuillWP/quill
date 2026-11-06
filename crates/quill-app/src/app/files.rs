@@ -57,7 +57,11 @@ impl App {
                         ) =>
                 {
                     match quill_formats::load_as_text(path) {
-                        Ok(doc) => (doc, Default::default()),
+                        Ok(doc) => {
+                            let mut report = quill_formats::report::ImportReport::default();
+                            report.no_page = true;
+                            (doc, report)
+                        }
                         Err(e) => {
                             alert(
                                 &format!(
@@ -78,6 +82,9 @@ impl App {
                     continue;
                 }
             };
+            if report.no_page {
+                crate::settings::with(|s| doc.props.take_paper(&s.document));
+            }
             crate::image::prepare_document_previews(&mut doc);
             self.ensure_fonts();
             crate::font_names::use_family_names(&mut doc);
@@ -321,7 +328,10 @@ impl App {
         }
         if format == Format::Markdown && !w.st.main_view().in_markdown_source() {
             let view = w.st.main_view_mut();
-            let lost = quill_formats::markdown::losses(&view.doc);
+            let lost = quill_formats::markdown::losses(
+                &view.doc,
+                &crate::settings::with(|s| s.document.clone()),
+            );
             let unwarned = lost.iter().any(|l| !view.md_warned.contains(l));
             if (chosen && !lost.is_empty()) || unwarned {
                 let answer = super::message_box(

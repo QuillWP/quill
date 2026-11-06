@@ -5,7 +5,7 @@
 use crate::document::{Document, Fragment, StoryId};
 use crate::para::{Mark, chars};
 use crate::props::{
-    Align, CharProps, FontId, LineSpacing, ParaProps, Rgb, StyleId, Twips, Underline,
+    Align, CharProps, FontId, LineSpacing, ParaProps, Rgb, Script, StyleId, Twips, Underline,
 };
 use crate::story::{Position, Story};
 
@@ -53,6 +53,7 @@ spec!(
         color: Rgb,
         position: Twips,
         spacing: Twips,
+        script: Script,
     }
 );
 
@@ -114,15 +115,22 @@ impl CharSpec {
                 .to_string(),
             );
         }
-        if let Some(p) = self.position {
+        if let Some(s) = self.script {
             out.push(
-                match p.signum() {
-                    1 => "Superscript",
-                    -1 => "Subscript",
-                    _ => "Not Superscript/Subscript",
+                match s {
+                    Script::Super => "Superscript",
+                    Script::Sub => "Subscript",
+                    Script::None => "Not Superscript/Subscript",
                 }
                 .to_string(),
             );
+        }
+        if let Some(p) = self.position {
+            out.push(match p.signum() {
+                1 => format!("Raised {} Point", p as f32 / 20.0),
+                -1 => format!("Lowered {} Point", -p as f32 / 20.0),
+                _ => "Not Raised/Lowered".to_string(),
+            });
         }
         if let Some(s) = self.spacing {
             out.push(

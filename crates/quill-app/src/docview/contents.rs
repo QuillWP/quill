@@ -144,6 +144,14 @@ impl DocView {
         let Some(end) = self.doc.existing_toc() else {
             return;
         };
+        // Lines added to or removed from an editable one cannot be matched
+        // to headings, so Update throws them away: say so first.
+        if self.doc.props.live_toc.is_none() {
+            let o = self.options_of_toc(end);
+            if self.doc.toc_entries(&o).len() != end + 1 && !confirm_toc_update() {
+                return;
+            }
+        }
         self.doc.begin("Table of Contents", self.sel);
         let (o, told) = match self.doc.props.live_toc {
             Some(o) => (o, None),
@@ -155,7 +163,29 @@ impl DocView {
         self.insert_toc(o);
         self.status = told;
     }
+}
 
+/// Ask before Update discards lines added to or removed from an editable
+/// table of contents. True to go ahead.
+fn confirm_toc_update() -> bool {
+    #[cfg(not(test))]
+    return crate::app::ask(
+        "The table of contents must match the headings in your document.",
+        "Updating will discard added or removed lines. To change a heading, edit it in the \
+         document first.",
+        "Update",
+    );
+    #[cfg(test)]
+    TOC_UPDATE_ANSWER.with(|a| a.get())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What the Update question answers in tests.
+    static TOC_UPDATE_ANSWER: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+impl DocView {
     /// The settings an editable table of contents was made with, which it
     /// no longer holds, as its lines show them: the levels of its styles,
     /// and page numbers if a line has a tab.
@@ -571,6 +601,38 @@ mod tests {
         // One Undo puts the heading back.
         v.doc.undo();
         assert!(texts(&v).contains(&"First".to_string()));
+    }
+
+    #[test]
+    fn update_asks_before_discarding_an_added_line() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut doc = quill_core::text::from_plain_text("First\nBody\nSecond");
+        let h1 = doc.styles.find("heading 1").unwrap();
+        doc.apply_style(MAIN, 0, 0, h1);
+        doc.apply_style(MAIN, 2, 2, h1);
+        doc.forget_history();
+        let mut v = DocView::new(doc, "T".into());
+        v.update_layout(&mut fonts);
+        v.insert_toc(TocOptions::default());
+        v.update_layout(&mut fonts);
+        v.make_toc_editable();
+        // A line added by hand inside the contents.
+        v.doc.begin("t", v.sel);
+        v.doc.split_paragraph(MAIN, Position::new(0, 2));
+        let sel = v.sel;
+        v.doc.commit(sel);
+        let before = v.doc.main.clone();
+        TOC_UPDATE_ANSWER.with(|a| a.set(false));
+        v.update_toc();
+        assert_eq!(v.doc.main, before);
+        assert!(v.doc.props.live_toc.is_none());
+        TOC_UPDATE_ANSWER.with(|a| a.set(true));
+        v.update_toc();
+        v.update_layout(&mut fonts);
+        assert!(v.doc.props.live_toc.is_some());
+        assert_eq!(v.doc.existing_toc(), Some(1));
     }
 
     #[test]

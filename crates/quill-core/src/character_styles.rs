@@ -26,11 +26,12 @@ macro_rules! fields {
         $apply!(color, 11);
         $apply!(position, 12);
         $apply!(spacing, 13);
+        $apply!(script, 14);
     };
 }
 
 impl CharacterFormat {
-    pub const ALL: u16 = (1 << 14) - 1;
+    pub const ALL: u16 = (1 << 15) - 1;
 
     pub fn difference(a: CharProps, b: CharProps) -> u16 {
         let mut mask = 0;
@@ -740,6 +741,57 @@ mod tests {
         for story in [MAIN, StoryId::Header] {
             assert_eq!(d.story(story).paras[0].chp_of_char(0).font, later);
         }
+    }
+
+    #[test]
+    fn replacing_a_color_changes_text_styles_and_linked_styles_and_undoes() {
+        let (old, new) = (Rgb(0x336699), Rgb::BLACK);
+        let mut d = crate::text::from_plain_text("Plain Styled\nHeading");
+        let id = d
+            .add_character_style(
+                "Brand",
+                CharacterFormat::new(
+                    CharProps {
+                        color: old,
+                        ..Default::default()
+                    },
+                    1 << 11,
+                ),
+            )
+            .unwrap();
+        d.format_chars(MAIN, Position::new(0, 0), Position::new(0, 5), |c| {
+            c.color = old
+        });
+        d.apply_character_style(MAIN, Position::new(0, 6), Position::new(0, 12), id);
+        let heading = d.styles.find("heading 1").unwrap();
+        d.apply_style(MAIN, 1, 1, heading);
+        let (pap, mut own) = (d.styles.get(heading).pap.clone(), d.styles.get(heading).chp);
+        own.color = old;
+        d.redefine_style_linked(MAIN, heading, pap, own, id);
+        d.commit(Selection::default());
+        let before = d.main.clone();
+
+        d.begin("Delete Color", Selection::default());
+        d.replace_color(old, new);
+        d.commit(Selection::default());
+        for (para, at) in [(0, 0), (0, 6), (1, 0)] {
+            assert_eq!(d.main.paras[para].chp_of_char(at).color, new);
+            assert_eq!(d.main.paras[para].chp_of_char(at).direct_format, 0);
+        }
+        assert_eq!(d.styles.character(id).unwrap().format.props.color, new);
+        assert_eq!(d.styles.get(heading).own().color, new);
+        // Unlinking brings back the style's own formatting, which changed too.
+        let (pap, own) = (
+            d.styles.get(heading).pap.clone(),
+            d.styles.get(heading).own(),
+        );
+        d.redefine_style_linked(MAIN, heading, pap, own, 0);
+        assert_eq!(d.styles.get(heading).chp.color, new);
+        d.undo();
+        d.undo();
+        assert_eq!(d.main, before);
+        assert_eq!(d.styles.character(id).unwrap().format.props.color, old);
+        assert_eq!(d.styles.get(heading).own().color, old);
     }
 
     #[test]

@@ -79,6 +79,11 @@ pub struct CharProps {
     pub color: Rgb,
     /// Raise (positive) or lower (negative) the baseline, in twips.
     pub position: Twips,
+    /// Superscript or subscript, as Word keeps them: `size` stays the
+    /// text's own, and the document's `ScriptSizes` say how far it moves
+    /// and how small it is drawn. Apart from `position`, which is an exact
+    /// shift set by hand.
+    pub script: Script,
     /// Expand (positive) or condense (negative) letter spacing, in twips.
     pub spacing: Twips,
     /// Non-zero when the run is an embedded object (picture, field,
@@ -114,6 +119,7 @@ impl Default for CharProps {
             hidden: false,
             color: Rgb::BLACK,
             position: 0,
+            script: Script::None,
             spacing: 0,
             object: 0,
             link: 0,
@@ -142,7 +148,74 @@ impl CharProps {
         self.all_caps = false;
         self.hidden = false;
         self.position = 0;
+        self.script = Script::None;
         self.spacing = 0;
+    }
+}
+
+/// Superscript or subscript (Format > Superscript, Subscript).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Script {
+    #[default]
+    None,
+    Super,
+    Sub,
+}
+
+/// How a document draws superscripts and subscripts, in percent of the
+/// text's size: how far each moves and how big it is drawn. Kept in the
+/// document, so it looks the same on every Mac; Preferences gives new
+/// documents theirs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ScriptSizes {
+    pub raise: u16,
+    pub super_size: u16,
+    pub drop: u16,
+    pub sub_size: u16,
+}
+
+impl Default for ScriptSizes {
+    /// A third of the size up, a sixth down, both two thirds as big:
+    /// close to how Word draws them.
+    fn default() -> Self {
+        ScriptSizes {
+            raise: 33,
+            super_size: 67,
+            drop: 17,
+            sub_size: 67,
+        }
+    }
+}
+
+impl ScriptSizes {
+    pub const OFFSETS: std::ops::RangeInclusive<u16> = 1..=100;
+    pub const SIZES: std::ops::RangeInclusive<u16> = 10..=100;
+
+    /// Within the ranges the settings allow.
+    pub fn clamped(self) -> ScriptSizes {
+        let o = |v: u16| v.clamp(*Self::OFFSETS.start(), *Self::OFFSETS.end());
+        let z = |v: u16| v.clamp(*Self::SIZES.start(), *Self::SIZES.end());
+        ScriptSizes {
+            raise: o(self.raise),
+            super_size: z(self.super_size),
+            drop: o(self.drop),
+            sub_size: z(self.sub_size),
+        }
+    }
+
+    /// `c` as it is drawn: a superscript or subscript moved and made
+    /// smaller by these amounts, on top of any shift set by hand. In whole
+    /// half-points, as Word and RTF measure them.
+    pub fn shown(self, mut c: CharProps) -> CharProps {
+        let (offset, pct, sign) = match c.script {
+            Script::None => return c,
+            Script::Super => (self.raise, self.super_size, 1),
+            Script::Sub => (self.drop, self.sub_size, -1),
+        };
+        let size = c.size as i32;
+        c.position += sign * ((size * offset as i32 + 50) / 100) * 10;
+        c.size = ((size * pct as i32 + 50) / 100).max(2) as u16;
+        c
     }
 }
 
@@ -260,6 +333,22 @@ pub struct CellProps {
     pub shading_color: Option<Rgb>,
     /// Where the cell's text sits when the row is taller than it.
     pub valign: VAlign,
+    /// Whether the cell is merged with the ones above or below it.
+    pub vmerge: VMerge,
+}
+
+/// A cell's part in a vertical merge, as Word keeps it (`w:vMerge`): the
+/// top cell holds the text, and each cell under it in the same column
+/// continues it, staying in its own row but empty. A continuing cell with
+/// no merge above it is an ordinary cell.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum VMerge {
+    #[default]
+    None,
+    /// The top cell of a merge.
+    Restart,
+    /// Part of the merge started above.
+    Continue,
 }
 
 /// A cell's vertical alignment (Format > Table Cells).

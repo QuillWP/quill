@@ -23,6 +23,10 @@ pub struct FontVariant {
 pub struct FontFamilyInfo {
     pub name: String,
     pub variants: Vec<FontVariant>,
+    /// The family's name reads as words in its own face. False for symbol
+    /// fonts and fonts with no Latin letters, whose names a menu shows in
+    /// ordinary text.
+    pub draws_name: bool,
 }
 
 /// A loaded face plus the styling we have to fake because the family has
@@ -40,6 +44,10 @@ struct FaceSource {
     index: u32,
     weight: u16,
     italic: bool,
+    /// 0 for a family's plain faces, more for condensed or decorative ones
+    /// (Hoefler Text's Ornaments, Iowan Old Style's Titling), so a face of
+    /// the same weight that draws ordinary text is chosen first.
+    oddity: u8,
     /// The face's PostScript name, such as "HelveticaNeue-Bold". Empty
     /// for faces given by hand.
     postscript: String,
@@ -129,11 +137,19 @@ impl Catalog {
             {
                 continue;
             }
+            let style = face_style(
+                name,
+                &face.post_script_name,
+                face.weight.0,
+                face.style != fontdb::Style::Normal,
+                face.stretch != fontdb::Stretch::Normal,
+            );
             self.families[fam].faces.push(FaceSource {
                 path: path.clone(),
                 index: face.index,
-                weight: face.weight.0,
-                italic: face.style != fontdb::Style::Normal,
+                weight: style.weight,
+                italic: style.italic,
+                oddity: style.oddity,
                 postscript: face.post_script_name.clone(),
             });
         }
@@ -149,6 +165,7 @@ impl Catalog {
                 index: *index,
                 weight: *weight,
                 italic: *italic,
+                oddity: 0,
                 postscript: String::new(),
             };
             match catalog.families.iter_mut().find(|f| f.name == *name) {
@@ -200,6 +217,105 @@ impl Catalog {
         self.families
             .iter()
             .find(|f| f.name.eq_ignore_ascii_case(name))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FaceStyle {
+    weight: u16,
+    italic: bool,
+    oddity: u8,
+}
+
+/// A face's weight, slant and how unusual it is, from what the font file
+/// says and from the style words in its PostScript name. Many of Apple's
+/// older fonts give every face the regular weight and an upright slant
+/// ("Courier-Bold" says 400), so their bold faces would pass for regular
+/// ones; the name tells them apart.
+fn face_style(
+    family: &str,
+    postscript: &str,
+    weight: u16,
+    italic: bool,
+    stretched: bool,
+) -> FaceStyle {
+    let squeezed: String = family.chars().filter(|c| c.is_alphanumeric()).collect();
+    let suffix = match postscript.get(..squeezed.len()) {
+        Some(head) if !squeezed.is_empty() && head.eq_ignore_ascii_case(&squeezed) => {
+            &postscript[squeezed.len()..]
+        }
+        _ => postscript.rsplit_once('-').map_or("", |(_, s)| s),
+    };
+    // "BoldOblique" is two words, "Outline6Dot" three and "PSBoldMT" three:
+    // a run of capitals is one word, less the last when lower case follows.
+    let chars: Vec<char> = suffix.chars().filter(|c| c.is_alphanumeric()).collect();
+    let mut words: Vec<String> = Vec::new();
+    for (i, &c) in chars.iter().enumerate() {
+        let starts = match i.checked_sub(1).map(|p| chars[p]) {
+            None => true,
+            Some(prev) if c.is_ascii_digit() != prev.is_ascii_digit() => true,
+            Some(prev) if c.is_uppercase() && !prev.is_uppercase() => true,
+            Some(_) => c.is_uppercase() && chars.get(i + 1).is_some_and(|n| n.is_lowercase()),
+        };
+        if starts {
+            words.push(String::new());
+        }
+        words.last_mut().unwrap().extend(c.to_lowercase());
+    }
+    let mut named_weight = None;
+    let mut named_italic = false;
+    let mut odd = false;
+    let mut prefix = "";
+    for w in &words {
+        let w = w.as_str();
+        let value = match (prefix, w) {
+            ("semi" | "demi", "bold") => Some(600),
+            ("extra" | "ultra", "bold") => Some(800),
+            ("extra" | "ultra", "light") => Some(200),
+            (_, "thin" | "hairline") => Some(100),
+            (_, "ultralight" | "extralight") => Some(200),
+            (_, "light") => Some(300),
+            (_, "medium") => Some(500),
+            (_, "semibold" | "demibold" | "demi") => Some(600),
+            (_, "bold") => Some(700),
+            (_, "extrabold" | "ultrabold") => Some(800),
+            (_, "black" | "heavy") => Some(900),
+            _ => None,
+        };
+        if value.is_some() {
+            named_weight = value;
+        } else if matches!(w, "italic" | "it" | "oblique" | "inclined" | "slanted") {
+            named_italic = true;
+        } else if !matches!(
+            w,
+            "regular"
+                | "roman"
+                | "plain"
+                | "normal"
+                | "book"
+                | "semi"
+                | "demi"
+                | "extra"
+                | "ultra"
+                | "mt"
+                | "ps"
+                | "std"
+                | "pro"
+        ) {
+            odd = true;
+        }
+        prefix = w;
+    }
+    FaceStyle {
+        // Trust a weight the file gives; read the name only when it gives
+        // the default.
+        weight: if weight == 400 {
+            named_weight.unwrap_or(400)
+        } else {
+            weight
+        },
+        italic: italic || named_italic,
+        oddity: u8::from(odd) + 2 * u8::from(stretched),
     }
 }
 
@@ -434,6 +550,140 @@ pub struct LoadedFace {
     /// Distance below the baseline, in font units (positive).
     pub descent: f32,
     pub line_gap: f32,
+    /// For a symbol font, the glyph for each one-byte code: Wingdings'
+    /// pictures, or Zapf Dingbats' and Symbol's in their old Mac table.
+    /// Word stores a symbol as the letter it is typed with ("J" in
+    /// Wingdings is a smiley), so these codes draw the symbol, not a
+    /// letter borrowed from another font. 0 where the font has nothing.
+    symbols: Option<Box<[u16; 256]>>,
+}
+
+impl LoadedFace {
+    /// The glyph for `c` in this face; 0 if it has none.
+    pub fn glyph_id(&self, c: char) -> GlyphId {
+        if let Some(map) = &self.symbols {
+            let code = c as u32;
+            // Word writes symbols as F0xx too, Unicode's private use area.
+            let byte = match code {
+                0x20..=0xFF => Some(code),
+                0xF020..=0xF0FF => Some(code - 0xF000),
+                _ => None,
+            };
+            if let Some(g) = byte.map(|b| map[b as usize]).filter(|&g| g != 0) {
+                return GlyphId(g);
+            }
+        }
+        self.font.glyph_id(c)
+    }
+}
+
+/// The one-byte codes of a symbol font, or None for an ordinary one. A
+/// font is a symbol font when it says so (a Windows symbol table, as in
+/// Wingdings and Webdings), or when its Unicode table draws no plain
+/// letters but its old Mac table does: Apple's Zapf Dingbats and Symbol,
+/// whose letters are dingbats and Greek.
+fn symbol_codes(data: &[u8], index: u32) -> Option<Box<[u16; 256]>> {
+    let face = ttf_parser::Face::parse(data, index).ok()?;
+    let tables: Vec<_> = face.tables().cmap?.subtables.into_iter().collect();
+    let windows = tables
+        .iter()
+        .find(|t| t.platform_id == ttf_parser::PlatformId::Windows && t.encoding_id == 0);
+    let mac = tables
+        .iter()
+        .find(|t| t.platform_id == ttf_parser::PlatformId::Macintosh && t.encoding_id == 0);
+    // A font that draws plain letters through Unicode is a text font,
+    // whatever other tables it carries.
+    if ('a'..='z').any(|c| face.glyph_index(c).is_some_and(|g| g.0 != 0)) {
+        return None;
+    }
+    let lookup: Box<dyn Fn(u32) -> Option<ttf_parser::GlyphId>> = match (windows, mac) {
+        (Some(w), _) => Box::new(move |b| w.glyph_index(0xF000 + b).or_else(|| w.glyph_index(b))),
+        (None, Some(m)) => {
+            let letters = ('a'..='z')
+                .filter(|&c| m.glyph_index(c as u32).is_some_and(|g| g.0 != 0))
+                .count();
+            if letters < 13 {
+                return None;
+            }
+            Box::new(move |b| m.glyph_index(b))
+        }
+        (None, None) => return None,
+    };
+    let mut map = Box::new([0u16; 256]);
+    for b in 0x20..=0xFFu32 {
+        map[b as usize] = lookup(b).map_or(0, |g| g.0);
+    }
+    Some(map)
+}
+
+/// Whether the face at `index` in the font file at `path` draws `name`
+/// as words: whether its Unicode table has every letter of the name. A
+/// symbol font does not: Wingdings, Webdings and Word's Symbol map their
+/// pictures only through a Windows symbol table, and Apple's Zapf Dingbats
+/// and Symbol only through an old Mac one. Nor do Arabic, Hebrew or other
+/// fonts named in letters they do not have. (The OS/2 character sets were
+/// tried first and are no guide: Courier has no OS/2 table, and STIX
+/// General draws text but claims the Symbol set.) So a name never comes
+/// out as pictures, boxes or stand-in letters. Only the table directory
+/// and cmap are read, not the whole file.
+fn draws_name(path: &std::path::Path, index: u32, name: &str) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut read = |at: u64, len: usize| -> Option<Vec<u8>> {
+        // A cmap bigger than this is no ordinary font's.
+        if len > 16 << 20 {
+            return None;
+        }
+        let mut buf = vec![0; len];
+        file.seek(SeekFrom::Start(at)).ok()?;
+        file.read_exact(&mut buf).ok()?;
+        Some(buf)
+    };
+    let u32_at = |b: &[u8], i: usize| -> Option<u32> {
+        Some(u32::from_be_bytes(b.get(i..i + 4)?.try_into().ok()?))
+    };
+    let Some(head) = read(0, 12) else {
+        return false;
+    };
+    // A collection lists where each face's table directory starts.
+    let start = if &head[..4] == b"ttcf" {
+        match read(12 + 4 * index as u64, 4).and_then(|b| u32_at(&b, 0)) {
+            Some(at) => at as u64,
+            None => return false,
+        }
+    } else {
+        0
+    };
+    let Some(dir) = read(start, 12) else {
+        return false;
+    };
+    let tables = u16::from_be_bytes([dir[4], dir[5]]) as usize;
+    let Some(records) = read(start + 12, tables.min(512) * 16) else {
+        return false;
+    };
+    let Some(cmap) = records
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .find(|r| &r[..4] == b"cmap")
+        .and_then(|r| Some((u32_at(r, 8)? as u64, u32_at(r, 12)? as usize)))
+    else {
+        return false;
+    };
+    let Some(cmap) = read(cmap.0, cmap.1) else {
+        return false;
+    };
+    let Some(cmap) = ttf_parser::cmap::Table::parse(&cmap) else {
+        return false;
+    };
+    name.chars().filter(|c| !c.is_whitespace()).all(|c| {
+        cmap.subtables
+            .into_iter()
+            .filter(|t| t.is_unicode())
+            .any(|t| t.glyph_index(c as u32).is_some_and(|g| g.0 != 0))
+    })
 }
 
 /// Vertical metrics of a face at a size, in points.
@@ -532,9 +782,16 @@ impl Fonts {
                         variants.push(FontVariant { bold, italic });
                     }
                 }
+                // The plain face is the one a menu shows the name in.
+                let face = f
+                    .faces
+                    .iter()
+                    .min_by_key(|face| (face.italic, face.oddity, face.weight.abs_diff(400)));
                 FontFamilyInfo {
                     name: f.name.clone(),
                     variants,
+                    draws_name: face
+                        .is_some_and(|face| draws_name(&face.path, face.index, &f.name)),
                 }
             })
             .collect()
@@ -628,7 +885,7 @@ impl Fonts {
             .min_by_key(|f| {
                 let w = (f.weight as i32 - want).unsigned_abs();
                 let i = if f.italic == italic { 0 } else { 10_000 };
-                w + i
+                (w + i, f.oddity)
             })
             .expect("families have faces");
         let mut real_bold = best.weight >= 600;
@@ -695,6 +952,7 @@ impl Fonts {
             descent: -font.descent_unscaled(),
             line_gap: font.line_gap_unscaled(),
             units_per_em,
+            symbols: symbol_codes(data, src.index),
             font,
         };
         self.faces.push(face);
@@ -706,15 +964,12 @@ impl Fonts {
     /// The glyph for `c` in `key`, or in a fallback font when `key`'s face
     /// lacks it. Returns the face actually used.
     pub fn glyph(&mut self, key: FaceKey, c: char) -> (FaceKey, GlyphId) {
-        let id = self
-            .faces
-            .get(key.face as usize)
-            .map(|f| f.font.glyph_id(c));
+        let id = self.faces.get(key.face as usize).map(|f| f.glyph_id(c));
         match id {
             Some(id) if id.0 != 0 => (key, id),
             _ => {
                 for face in self.fallbacks() {
-                    let g = self.faces[face as usize].font.glyph_id(c);
+                    let g = self.faces[face as usize].glyph_id(c);
                     if g.0 != 0 {
                         return (FaceKey { face, ..key }, g);
                     }
@@ -741,7 +996,7 @@ impl Fonts {
     pub fn glyph_in(&self, key: FaceKey, c: char) -> GlyphId {
         self.faces
             .get(key.face as usize)
-            .map_or(GlyphId(0), |f| f.font.glyph_id(c))
+            .map_or(GlyphId(0), |f| f.glyph_id(c))
     }
 
     /// Advance width of a glyph at `size` points, in points.
@@ -931,6 +1186,147 @@ mod tests {
             ]
         );
         assert_eq!(families[1].variants.len(), 1);
+    }
+
+    #[test]
+    fn face_names_supply_styles_the_file_leaves_out() {
+        let style = |family, ps, weight, italic, stretched| {
+            let s = face_style(family, ps, weight, italic, stretched);
+            (s.weight, s.italic, s.oddity)
+        };
+        // Apple's Courier says 400 and upright for every face.
+        assert_eq!(
+            style("Courier", "Courier", 400, false, false),
+            (400, false, 0)
+        );
+        assert_eq!(
+            style("Courier", "Courier-Bold", 400, false, false),
+            (700, false, 0)
+        );
+        assert_eq!(
+            style("Courier", "Courier-BoldOblique", 400, false, false),
+            (700, true, 0)
+        );
+        assert_eq!(
+            style("Raanana", "RaananaBold", 400, false, false),
+            (700, false, 0)
+        );
+        assert_eq!(
+            style("Avenir Next", "AvenirNext-DemiBold", 400, false, false),
+            (600, false, 0)
+        );
+        assert_eq!(
+            style(
+                "Times New Roman",
+                "TimesNewRomanPS-BoldItalicMT",
+                700,
+                true,
+                false
+            ),
+            (700, true, 0)
+        );
+        // A weight the file does give is kept.
+        assert_eq!(
+            style("Futura", "Futura-Medium", 500, false, false),
+            (500, false, 0)
+        );
+        // Decorative and condensed faces come after plain ones.
+        assert_eq!(
+            style("Hoefler Text", "HoeflerText-Ornaments", 400, false, false).2,
+            1
+        );
+        assert_eq!(
+            style(
+                "Apple Braille",
+                "AppleBraille-Outline6Dot",
+                400,
+                false,
+                false
+            )
+            .2,
+            1
+        );
+        assert_eq!(
+            style("Futura", "Futura-CondensedMedium", 500, false, true).2,
+            3
+        );
+        assert_eq!(
+            style("Hoefler Text", "HoeflerText-Regular", 400, false, false).2,
+            0
+        );
+    }
+
+    #[test]
+    fn a_plain_face_wins_over_a_decorative_one_of_the_same_weight() {
+        let fonts = Catalog::scan_system();
+        let Some(hoefler) = fonts.find("Hoefler Text") else {
+            return; // not installed here
+        };
+        let mut fonts = Fonts::new(fonts.clone());
+        let key = fonts.resolve("Hoefler Text", false, false);
+        let face = fonts.face(key.face);
+        assert_ne!(face.font.glyph_id('a').0, 0, "{hoefler:?}");
+        let courier = fonts.resolve("Courier", true, false);
+        if fonts.has_family("Courier") {
+            assert!(!courier.fake_bold, "Courier's own bold face is used");
+        }
+    }
+
+    #[test]
+    fn symbol_and_non_latin_fonts_do_not_draw_their_names() {
+        let fonts = Fonts::new(Catalog::scan_system());
+        let info = fonts.family_info();
+        let draws = |name: &str| info.iter().find(|f| f.name == name).map(|f| f.draws_name);
+
+        for (name, expected) in [
+            ("Helvetica", true),
+            ("Georgia", true),
+            ("Times New Roman", true),
+            ("Courier", true),
+            ("STIXGeneral", true),
+            ("Arial Hebrew", false),
+            ("Wingdings", false),
+            ("Webdings", false),
+            ("Zapf Dingbats", false),
+            ("Symbol", false),
+        ] {
+            if let Some(d) = draws(name) {
+                assert_eq!(d, expected, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn symbol_fonts_draw_their_symbols_for_typed_letters() {
+        let mut fonts = system();
+        for (family, real_name) in [
+            ("Wingdings", "Wingdings"),
+            ("Zapf Dingbats", "ZapfDingbats"),
+            ("Symbol", "Symbol"),
+        ] {
+            if !fonts.has_family(family) {
+                continue;
+            }
+            let key = fonts.resolve(family, false, false);
+            assert!(fonts.face(key.face).name.starts_with(real_name));
+            let j = fonts.glyph_in(key, 'J');
+            assert_ne!(j.0, 0, "{family} draws J");
+            // Word's private-use form of the same code draws the same.
+            assert_eq!(fonts.glyph_in(key, '\u{F04A}'), j, "{family}");
+            // The symbol comes from the font itself, not a fallback.
+            assert_eq!(fonts.glyph(key, 'J'), (key, j));
+        }
+        if fonts.has_family("Symbol") {
+            // Apple's Symbol keeps its Unicode Greek as well.
+            let key = fonts.resolve("Symbol", false, false);
+            assert_eq!(fonts.glyph_in(key, 'a'), fonts.glyph_in(key, 'α'));
+        }
+        // Ordinary fonts are unchanged.
+        if fonts.has_family("Times") {
+            let key = fonts.resolve("Times", false, false);
+            assert!(fonts.face(key.face).symbols.is_none());
+            assert_eq!(fonts.glyph_in(key, '\u{F04A}').0, 0);
+        }
     }
 
     #[test]

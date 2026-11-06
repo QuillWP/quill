@@ -376,6 +376,14 @@ fn rpr_values(doc: &Document, c: &CharProps, base: &CharProps, force: u16) -> St
         };
         let _ = write!(o, r#"<w:u w:val="{u}"/>"#);
     }
+    if c.script != base.script || force & (1 << 14) != 0 {
+        let v = match c.script {
+            quill_core::Script::None => "baseline",
+            quill_core::Script::Super => "superscript",
+            quill_core::Script::Sub => "subscript",
+        };
+        let _ = write!(o, r#"<w:vertAlign w:val="{v}"/>"#);
+    }
     o
 }
 
@@ -937,9 +945,15 @@ fn section_props(doc: &Document, section: usize, sec: &SectionProps, out: &mut S
     }
     let _ = write!(
         out,
-        r#"<w:type w:val="{kind}"/><w:pgSz w:w="{}" w:h="{}"/><w:pgMar w:top="{top}" w:right="{}" w:bottom="{bottom}" w:left="{}" w:header="{}" w:footer="{}" w:gutter="{}"/>"#,
+        r#"<w:type w:val="{kind}"/><w:pgSz w:w="{}" w:h="{}"{}/><w:pgMar w:top="{top}" w:right="{}" w:bottom="{bottom}" w:left="{}" w:header="{}" w:footer="{}" w:gutter="{}"/>"#,
         p.page_width,
         p.page_height,
+        // Word takes the orientation from this, not from the sizes.
+        if p.page_width > p.page_height {
+            r#" w:orient="landscape""#
+        } else {
+            ""
+        },
         p.margin_right,
         p.margin_left,
         sec.header_from_top,
@@ -1301,7 +1315,9 @@ fn table(doc: &Document, ids: &[String], paras: &[Paragraph], outer: u8, out: &m
         let _ = write!(out, r#"<w:gridCol w:w="{}"/>"#, w[1] - w[0]);
     }
     out.push_str("</w:tblGrid>");
-    for (row, props) in &rows {
+    let all: Vec<_> = rows.iter().map(|(_, p)| p.clone()).collect();
+    let merged = quill_core::table::merges(&all, text_width);
+    for (ri, (row, props)) in rows.iter().enumerate() {
         let lefts = props.lefts(text_width);
         out.push_str("<w:tr>");
         // A centered or right-aligned row keeps its indent for when it is
@@ -1364,6 +1380,11 @@ fn table(doc: &Document, ids: &[String], paras: &[Paragraph], outer: u8, out: &m
             );
             if span > 1 {
                 let _ = write!(out, r#"<w:gridSpan w:val="{span}"/>"#);
+            }
+            match merged[ri][k] {
+                quill_core::table::Merged::No => {}
+                quill_core::table::Merged::Top(_) => out.push_str(r#"<w:vMerge w:val="restart"/>"#),
+                quill_core::table::Merged::Under => out.push_str("<w:vMerge/>"),
             }
             if !cell.borders.is_none() {
                 out.push_str("<w:tcBorders>");

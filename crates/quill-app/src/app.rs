@@ -213,7 +213,8 @@ pub struct WinState {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     on_screen: bool,
     /// The color palette popped out beside a dialog's color, while it is.
-    color_pop: Option<crate::palette::PaletteState>,
+    /// The color pop-out's state, and the color box it came out of.
+    color_pop: Option<(&'static str, crate::palette::PaletteState)>,
     pub show_toolbar: bool,
     toolbar_press: Option<usize>,
     /// The toolbar button under the pointer.
@@ -259,19 +260,16 @@ pub struct WinState {
     last_split_click: Option<Instant>,
 }
 
-/// Interface scale: about 22/16, the step from the original's 16-pixel buttons
-/// to the 22-point controls of today's Mac, rounded so each interface
-/// pixel is a whole number of screen pixels and bitmaps stay crisp.
-///
-/// Rounding leaves a 100% Windows or Linux display at 1x, smaller than the
-/// system's own menus, so there the interface is a steady 1.25x instead.
-/// Icons are vector and text is rasterized at size, so neither blurs.
-///
-/// `interface_scale` in the settings file scales either one, for trying
-/// out sizes without a rebuild.
-pub fn ui_scale(display_scale: f32) -> f32 {
+/// Interface scale. At 100% (`interface_scale`) the 1992 app's 16-point
+/// controls are drawn at 1.2375, about 20 points tall: a little under a
+/// Mac's own 22 (Pages) and the original's 26, which looked best next to the
+/// document. Points, not pixels, so a Retina display shows the same size
+/// as any other; icons are vector and text is drawn at size, so the uneven
+/// pixel scale does not blur them. Windows and Linux use 1.25, nearer
+/// their own menus.
+pub fn ui_scale(_display_scale: f32) -> f32 {
     let base = if cfg!(target_os = "macos") {
-        (1.375 * display_scale).round().max(1.0) / display_scale
+        1.2375
     } else {
         1.25
     };
@@ -1326,8 +1324,18 @@ impl WinState {
             return false;
         }
         if advance {
-            self.view.scroll_sideways(dx.clamp(-48.0, 48.0));
-            self.view.scroll_by(dy.clamp(-48.0, 48.0));
+            // Faster the further past the edge, but never a crawl: a window
+            // that reaches the bottom of the screen leaves the pointer only
+            // a point or two below it.
+            let step = |d: f32| {
+                if d == 0.0 {
+                    0.0
+                } else {
+                    d.signum() * (d.abs() + 10.0).min(80.0)
+                }
+            };
+            self.view.scroll_sideways(step(dx));
+            self.view.scroll_by(step(dy));
             self.view.mouse_drag(
                 x.clamp(area.x, area.right() - 1.0),
                 y.clamp(area.y, area.bottom() - 1.0),
@@ -1368,7 +1376,7 @@ impl WinState {
 }
 
 /// How long the pointer rests on a control before its tooltip shows.
-const TIP_DELAY: Duration = Duration::from_millis(600);
+pub(crate) const TIP_DELAY: Duration = Duration::from_millis(600);
 
 /// A tooltip waiting to show, or showing.
 struct Tip {
@@ -1449,9 +1457,12 @@ pub enum UserEvent {
     /// A choice from the system menu bar, by item id.
     #[cfg(target_os = "macos")]
     Menu(String),
-    /// Documents to open: from the Finder on the Mac.
+    /// The Finder sent documents to open, waiting in `mac_open::take`.
     #[cfg(target_os = "macos")]
-    OpenFiles(Vec<PathBuf>),
+    OpenFiles,
+    /// Quit from outside Quill (the Dock, logging out) with work unsaved.
+    #[cfg(target_os = "macos")]
+    Quit,
     /// Text the Mac sent without a key press (Emoji & Symbols, dictation),
     /// to type into the window in front.
     #[cfg(target_os = "macos")]
@@ -3311,6 +3322,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         let mut files = std::mem::take(&mut self.pending);
+        // Documents the Finder started Quill to open arrive before this.
+        #[cfg(target_os = "macos")]
+        files.extend(crate::mac_open::take());
         if !self.reopened {
             // Until Quit sets it again, a restart is taken as a crash.
             let quit_cleanly = crate::settings::with(|s| s.quit_cleanly);
@@ -3334,7 +3348,9 @@ impl ApplicationHandler<UserEvent> for App {
             #[cfg(target_os = "macos")]
             UserEvent::Menu(id) => self.menu_choice(el, &id),
             #[cfg(target_os = "macos")]
-            UserEvent::OpenFiles(paths) => self.open_files(el, &paths),
+            UserEvent::OpenFiles => self.open_files(el, &crate::mac_open::take()),
+            #[cfg(target_os = "macos")]
+            UserEvent::Quit => self.menu_action(el, Action::Cmd(Cmd::Quit)),
             #[cfg(target_os = "macos")]
             UserEvent::InsertText(text) => {
                 if let Some(id) = self
@@ -3747,6 +3763,12 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        crate::mac_open::set_unsaved(
+            self.windows
+                .iter()
+                .any(|(_, w)| w.recovery.is_some() || w.st.main_view().doc.is_modified()),
+        );
         // Holding a scroll arrow or track keeps scrolling; otherwise wake for the
         // caret's blink and sleep the rest of the time.
         let holding = self.windows.iter_mut().any(|(_, w)| {
@@ -5313,6 +5335,195 @@ mod tests {
         assert!(!pop.items.iter().any(|i| i.rgb == Some(0x102030)));
     }
 
+    use quill_core::Rgb;
+
+    /// A window on "Blue words, plain", its first word in #336699 and the
+    /// Character dialog open with its color button.
+    fn blue_words() -> WinState {
+        let mut doc = quill_core::text::from_plain_text("Blue words, plain");
+        doc.format_chars(
+            quill_core::StoryId::Main,
+            Position::new(0, 0),
+            Position::new(0, 4),
+            |c| c.color = Rgb(0x336699),
+        );
+        doc.forget_history();
+        let mut state = WinState::new(DocView::new(doc, "Doc".into()));
+        let (character, which) = format_dialogs::build_character_with_button(&state.view);
+        state.dialogs.push((which, character));
+        state
+    }
+
+    fn pop_item(state: &WinState, id: &str) -> crate::dialog::PopItem {
+        let pop = state.dialogs.last().unwrap().1.popout.clone().expect("out");
+        pop.items.into_iter().find(|i| i.id == id).expect(id)
+    }
+
+    #[test]
+    fn deleting_a_color_the_document_uses_asks_and_makes_its_text_black() {
+        let mut state = blue_words();
+        let mut clip = Clipboard::without_system();
+        let blue = |s: &WinState| s.view.doc.main.paras[0].chp_of_char(0).color;
+        state.dialog_outcome(Outcome::Button("color"), &mut clip);
+        // Pointing at a box shows its HTML code when it has no name.
+        assert_eq!(pop_item(&state, "cus0").rgb, Some(0x336699));
+        assert_eq!(pop_item(&state, "cus0").tip.as_deref(), Some("#336699"));
+        assert_eq!(pop_item(&state, "std5").tip.as_deref(), Some("#FF0000"));
+        // Delete is for the document's own colors: the text's is one.
+        assert!(pop_item(&state, "cus0").selected);
+        assert!(pop_item(&state, "delete_color").enabled);
+        let pick = |state: &mut WinState, id| {
+            state.dialog_outcome(
+                Outcome::Swatch { id, double: false },
+                &mut Clipboard::without_system(),
+            )
+        };
+        pick(&mut state, "std5");
+        assert!(!pop_item(&state, "delete_color").enabled);
+        pick(&mut state, "cus0");
+        assert!(pop_item(&state, "delete_color").enabled);
+
+        state.dialog_outcome(Outcome::Button("delete_color"), &mut clip);
+        assert_eq!(state.dialogs.len(), 2);
+        assert!(matches!(
+            state.dialogs[1].0,
+            Which::Alert(format_dialogs::Alert::DeleteColor(Rgb(0x336699)))
+        ));
+        // Cancel changes nothing.
+        state.dialog_outcome(Outcome::Cancel, &mut clip);
+        assert_eq!(blue(&state), Rgb(0x336699));
+        assert!(!state.view.doc.is_modified());
+
+        state.dialog_outcome(Outcome::Button("color"), &mut clip);
+        pick(&mut state, "cus0");
+        state.dialog_outcome(Outcome::Button("delete_color"), &mut clip);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.dialogs.len(), 1);
+        assert_eq!(blue(&state), Rgb::BLACK);
+        assert_eq!(state.view.doc.undo_label(), Some("Delete Color"));
+        // The palette is back, without the color; the dialog shows black.
+        assert_eq!(pop_item(&state, "cus0").rgb, None);
+        assert_eq!(state.dialogs[0].1.swatch_rgb("color"), Some(0));
+        assert_eq!(state.dialogs[0].1.item_label("color_hex"), "#000000");
+        state.view.doc.undo();
+        assert_eq!(blue(&state), Rgb(0x336699));
+    }
+
+    #[test]
+    fn deleting_a_color_can_choose_its_replacement() {
+        let mut state = blue_words();
+        let mut clip = Clipboard::without_system();
+        state.dialog_outcome(Outcome::Button("color"), &mut clip);
+        state.dialog_outcome(
+            Outcome::Swatch {
+                id: "cus0",
+                double: false,
+            },
+            &mut clip,
+        );
+        state.dialog_outcome(Outcome::Button("delete_color"), &mut clip);
+        state.dialog_outcome(Outcome::Button("choose"), &mut clip);
+        assert!(matches!(state.dialogs[1].0, Which::EditColor(_)));
+        state.dialogs[1].1.set_field("hex", "#AA2200");
+        state.dialog_outcome(Outcome::Changed("hex"), &mut clip);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.dialogs.len(), 1);
+        assert_eq!(
+            state.view.doc.main.paras[0].chp_of_char(0).color,
+            Rgb(0xAA2200)
+        );
+        assert_eq!(
+            state.view.doc.main.paras[0].chp_of_char(6).color,
+            Rgb::BLACK
+        );
+        assert_eq!(pop_item(&state, "cus0").rgb, Some(0xAA2200));
+    }
+
+    #[test]
+    fn deleting_an_unused_or_saved_color() {
+        let mut state = blue_words();
+        let mut clip = Clipboard::without_system();
+        crate::settings::update(|s| s.named_colors = vec![(0x336699, "Brand".into())]);
+        state.dialog_outcome(Outcome::Button("color"), &mut clip);
+        // A color saved in Preferences is for every document: no Delete.
+        assert_eq!(pop_item(&state, "cus0").tip.as_deref(), Some("Brand"));
+        state.dialog_outcome(
+            Outcome::Swatch {
+                id: "cus0",
+                double: false,
+            },
+            &mut clip,
+        );
+        assert!(!pop_item(&state, "delete_color").enabled);
+        crate::settings::update(|s| s.named_colors.clear());
+
+        // A color made with Edit Color but not used yet goes at once.
+        state.dialog_outcome(
+            Outcome::Swatch {
+                id: "std0",
+                double: false,
+            },
+            &mut clip,
+        );
+        state.dialog_outcome(Outcome::Button("edit"), &mut clip);
+        state.dialogs[1].1.set_field("hex", "#123456");
+        state.dialog_outcome(Outcome::Changed("hex"), &mut clip);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        state.dialog_outcome(Outcome::Button("color"), &mut clip);
+        assert_eq!(pop_item(&state, "cus0").rgb, Some(0x123456));
+        assert!(pop_item(&state, "cus0").selected);
+        state.dialog_outcome(Outcome::Button("delete_color"), &mut clip);
+        assert_eq!(state.dialogs.len(), 1);
+        assert!(!state.view.doc.is_modified());
+        assert_eq!(pop_item(&state, "cus0").rgb, Some(0x336699));
+        crate::palette::drop_edits();
+    }
+
+    #[test]
+    fn preferences_colors_are_chosen_from_the_palette() {
+        let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+        let d = crate::prefs_dialog::preferences(crate::prefs_dialog::COLORS_PANEL, &[]);
+        state.dialogs.push((
+            Which::Preferences {
+                panel: crate::prefs_dialog::COLORS_PANEL,
+                fonts: Vec::new(),
+                original: Box::new(crate::settings::get()),
+                draft: Box::new(crate::settings::get()),
+            },
+            d,
+        ));
+        let mut clip = Clipboard::without_system();
+        state.dialog_outcome(Outcome::Button("cbox1"), &mut clip);
+        let pop = state.dialogs[0].1.popout.clone().unwrap();
+        assert_eq!(pop.anchor, "cbox1");
+        assert!(!pop.items.iter().any(|i| i.id == "delete_color"));
+        state.dialog_outcome(
+            Outcome::Swatch {
+                id: "std5",
+                double: false,
+            },
+            &mut clip,
+        );
+        assert_eq!(state.dialogs[0].1.item_label("color1"), "#FF0000");
+        assert_eq!(state.dialogs[0].1.swatch_rgb("cbox1"), Some(0xFF0000));
+        // Another box: the pop-out moves to it.
+        state.dialog_outcome(Outcome::Button("cbox2"), &mut clip);
+        assert_eq!(state.dialogs[0].1.popout.as_ref().unwrap().anchor, "cbox2");
+        state.dialog_outcome(Outcome::Button("edit"), &mut clip);
+        state.dialogs[1].1.set_field("hex", "#0A0B0C");
+        state.dialog_outcome(Outcome::Changed("hex"), &mut clip);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.dialogs[0].1.item_label("color2"), "#0A0B0C");
+        state.dialogs[0].1.set_field("cname1", "Red");
+        state.dialogs[0].1.set_field("cname2", "Ink");
+        state.dialog_outcome(Outcome::Button("cclear2"), &mut clip);
+        assert_eq!(state.dialogs[0].1.item_label("color2"), "None");
+        state.dialog_outcome(Outcome::Button("save"), &mut clip);
+        let saved = crate::settings::with(|s| s.named_colors.clone());
+        crate::settings::update(|s| s.named_colors.clear());
+        assert_eq!(saved, [(0xFF0000, "Red".to_string())]);
+    }
+
     #[test]
     fn nested_modal_keyboard_actions_close_one_layer_at_a_time() {
         let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
@@ -5531,6 +5742,14 @@ mod tests {
         assert!(state.view.scroll_y >= 190.0);
         assert_eq!(state.view.sel.anchor, anchor);
         assert!(state.view.sel.focus > anchor);
+        // Just past the edge, as at the bottom of the screen, it still moves
+        // at a useful pace.
+        let y = state.view.scroll_y;
+        state.pointer = (a.x + 40.0, a.bottom() + 1.0);
+        for _ in 0..5 {
+            assert!(state.selection_scroll(true));
+        }
+        assert!(state.view.scroll_y >= y + 50.0);
         state.view.mouse_up();
         let y = state.view.scroll_y;
         assert!(!state.selection_scroll(true));

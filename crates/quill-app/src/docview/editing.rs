@@ -14,8 +14,14 @@ impl DocView {
         if text.is_empty() || (self.sel.is_empty() && self.on_row_mark()) {
             return;
         }
+        let heading = self.outline_heading_to_come();
         self.doc.begin_typing(self.sel);
         let at = self.delete_selection();
+        if let Some(h) = heading {
+            self.doc.apply_style(MAIN, 0, 0, h);
+            self.typing_chp = None;
+        }
+        self.outline_start = false;
         let chp = self
             .typing_chp
             .unwrap_or_else(|| self.doc.main.paras[at.para].chp_at(at.offset));
@@ -1017,6 +1023,16 @@ impl DocView {
         self.finish_edit(sel);
     }
 
+    /// Delete Color: text and styles in color `from` take `to`, as one
+    /// undo step.
+    pub fn replace_color(&mut self, from: quill_core::Rgb, to: quill_core::Rgb) {
+        self.doc.begin("Delete Color", self.sel);
+        self.doc.replace_color(from, to);
+        self.typing_chp = None;
+        let sel = self.sel;
+        self.finish_edit(sel);
+    }
+
     pub fn format_chars(&mut self, label: &'static str, f: impl Fn(&mut CharProps)) {
         if self.sel.is_empty() {
             let mut c = self.current_chp();
@@ -1082,10 +1098,18 @@ impl DocView {
             AllCaps => self.format_chars(F, move |c| c.all_caps = !cur.all_caps),
             Hidden => self.format_chars(F, move |c| c.hidden = !cur.hidden),
             Superscript => self.format_chars(F, move |c| {
-                c.position = if cur.position > 0 { 0 } else { 60 }
+                c.script = if cur.script == quill_core::Script::Super {
+                    quill_core::Script::None
+                } else {
+                    quill_core::Script::Super
+                }
             }),
             Subscript => self.format_chars(F, move |c| {
-                c.position = if cur.position < 0 { 0 } else { -40 }
+                c.script = if cur.script == quill_core::Script::Sub {
+                    quill_core::Script::None
+                } else {
+                    quill_core::Script::Sub
+                }
             }),
             PlainText => self.format_chars(F, |c| c.clear_styles()),
             FontSizeUp => self.format_chars(F, |c| c.size = (c.size + 2).min(3200)),

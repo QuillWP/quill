@@ -209,6 +209,31 @@ impl StyleSheet {
         self.styles.get(id as usize).unwrap_or(&self.styles[0])
     }
 
+    /// Base on Normal any style whose chain of based-on styles comes back
+    /// to it, as a damaged file can say (a style based on itself). A
+    /// writer saves only what a style changes from the one it is based
+    /// on, so a style in a loop would lose its formatting. Normal itself
+    /// is based on nothing.
+    pub fn break_based_on_loops(&mut self) {
+        if let Some(normal) = self.styles.first_mut() {
+            normal.based_on = None;
+        }
+        for id in 1..self.styles.len() {
+            let mut seen = vec![false; self.styles.len()];
+            let mut at = id;
+            while let Some(next) = self.styles[at].based_on.map(usize::from) {
+                if next == id || next >= self.styles.len() || seen[next] {
+                    if next == id || next >= self.styles.len() {
+                        self.styles[at].based_on = Some(NORMAL);
+                    }
+                    break;
+                }
+                seen[next] = true;
+                at = next;
+            }
+        }
+    }
+
     /// The character formatting a paragraph style gives its text: `own`, or
     /// character style `character` laid over it.
     pub fn linked_chp(&self, own: CharProps, character: u16) -> CharProps {
@@ -281,6 +306,31 @@ mod tests {
             names.push(n.to_string());
             (names.len() - 1) as u16
         })
+    }
+
+    #[test]
+    fn based_on_loops_are_broken_at_normal() {
+        let mut s = sheet();
+        let n = s.styles.len() as StyleId;
+        for _ in 0..5 {
+            let copy = s.styles[1].clone();
+            s.styles.push(copy);
+        }
+        let (alone, a, b, feeder, fine) = (n, n + 1, n + 2, n + 3, n + 4);
+        s.styles[alone as usize].based_on = Some(alone);
+        s.styles[a as usize].based_on = Some(b);
+        s.styles[b as usize].based_on = Some(a);
+        s.styles[feeder as usize].based_on = Some(a);
+        s.styles[fine as usize].based_on = Some(1);
+        s.styles[0].based_on = Some(1);
+        s.break_based_on_loops();
+        assert_eq!(s.get(alone).based_on, Some(NORMAL));
+        // One link of the loop is cut; the rest keeps its base.
+        assert_eq!(s.get(a).based_on, Some(b));
+        assert_eq!(s.get(b).based_on, Some(NORMAL));
+        assert_eq!(s.get(feeder).based_on, Some(a));
+        assert_eq!(s.get(fine).based_on, Some(1));
+        assert_eq!(s.get(NORMAL).based_on, None);
     }
 
     #[test]

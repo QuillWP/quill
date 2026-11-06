@@ -13,6 +13,9 @@ use quill_core::props::{
 use quill_core::{Document, PageNumberFormat, SectionProps, SectionStart};
 use std::collections::HashMap;
 
+/// \\fcharset2: a symbol font such as Wingdings. Not a code page;
+/// its bytes are kept as they are.
+const SYMBOL_CHARSET: u16 = 2;
 const MAX_GROUP_DEPTH: usize = 256;
 const MAX_CONTROL_WORD: usize = 64;
 const MAX_PARAMETER_ABS: i32 = 10_000_000;
@@ -145,7 +148,7 @@ struct Reader {
     fonts: HashMap<i32, u16>,
     font_name: String,
     font_num: i32,
-    /// Each font's code page, from its \\fcharset.
+    /// Each font's code page, from its \\fcharset, or SYMBOL_CHARSET.
     font_pages: HashMap<i32, u16>,
     /// The document's code page, from \\ansicpg (Windows Latin unless
     /// it says otherwise).
@@ -668,6 +671,11 @@ impl Reader {
         if b < 0x80 {
             return b as char;
         }
+        // A symbol font's bytes are its own codes, kept as they are so the
+        // font draws them: \'95 in Wingdings is not a bullet.
+        if self.font_pages.get(&self.st.font) == Some(&SYMBOL_CHARSET) {
+            return b as char;
+        }
         match self.charset {
             _ if let Some(c) = self
                 .font_pages
@@ -1164,6 +1172,13 @@ impl Reader {
             Paragraph::new(ParaProps::default(), self.st.chp),
         );
         p.pap = pap;
+        if let Some(frame) = p.pap.frame.as_mut().filter(|f| f.drop_lines > 0) {
+            // Word positions a drop cap at the paragraph's first line even
+            // when its RTF frame controls say page-centered. Quill uses
+            // ordinary frame coordinates, so anchor it at the text column.
+            frame.h = quill_core::FrameH::Left;
+            frame.h_rel = quill_core::FrameRel::Column;
+        }
         p.mark = mark;
         p.mark_chp = self.st.chp;
         self.paras.push(p);
@@ -1581,6 +1596,7 @@ impl Reader {
             } else if w == "fcharset" {
                 // The character set a font's bytes are in, as a code page.
                 let page = match v {
+                    2 => SYMBOL_CHARSET,
                     161 => 1253,
                     162 => 1254,
                     163 => 1258,
@@ -1796,9 +1812,9 @@ impl Reader {
             "cf" => self.st.chp.color = self.colors.get(v as usize).copied().unwrap_or(Rgb::BLACK),
             "up" => self.st.chp.position = if p.is_none() { 60 } else { v * 10 },
             "dn" => self.st.chp.position = -(if p.is_none() { 60 } else { v * 10 }),
-            "super" => self.st.chp.position = crate::superscript_rise(self.st.chp.size),
-            "sub" => self.st.chp.position = -crate::subscript_drop(self.st.chp.size),
-            "nosupersub" => self.st.chp.position = 0,
+            "super" => self.st.chp.script = quill_core::Script::Super,
+            "sub" => self.st.chp.script = quill_core::Script::Sub,
+            "nosupersub" => self.st.chp.script = quill_core::Script::None,
             "expndtw" => self.st.chp.spacing = v,
             "expnd" => self.st.chp.spacing = v * 5,
             // Paragraph formatting.
@@ -2028,6 +2044,7 @@ impl Reader {
                 s.next = n;
             }
         }
+        self.doc.styles.break_based_on_loops();
         if self.paras.is_empty() {
             let n = self.doc.styles.get(0);
             self.paras.push(Paragraph::new(n.pap.clone(), n.chp));
@@ -2108,7 +2125,8 @@ fn rtf_character_mask(word: &str) -> u16 {
         "caps" => 1 << 9,
         "v" => 1 << 10,
         "cf" => 1 << 11,
-        "up" | "dn" | "super" | "sub" | "nosupersub" => 1 << 12,
+        "up" | "dn" => 1 << 12,
+        "super" | "sub" | "nosupersub" => 1 << 14,
         "expnd" | "expndtw" => 1 << 13,
         _ => 0,
     }
@@ -2246,6 +2264,8 @@ impl StdRow {
             "clvertalt" => self.cell.valign = quill_core::props::VAlign::Top,
             "clvertalc" => self.cell.valign = quill_core::props::VAlign::Center,
             "clvertalb" => self.cell.valign = quill_core::props::VAlign::Bottom,
+            "clvmgf" => self.cell.vmerge = quill_core::props::VMerge::Restart,
+            "clvmrg" => self.cell.vmerge = quill_core::props::VMerge::Continue,
             "clbrdrt" => self.border = Some(0),
             "clbrdrb" => self.border = Some(1),
             "clbrdrl" => self.border = Some(2),
@@ -2347,8 +2367,9 @@ fn parse_row_data(data: &str) -> Option<RowProps> {
             .map(str::parse)
             .collect::<Result<_, _>>()
             .ok()?;
-        // A 14th number, written only when not Top, is the vertical alignment.
-        if !(13..=14).contains(&v.len()) || v[0] < 0 || !(0..=1000).contains(&v[1]) {
+        // A 14th number, written only when not Top, is the vertical
+        // alignment; a 15th, the vertical merge.
+        if !(13..=15).contains(&v.len()) || v[0] < 0 || !(0..=1000).contains(&v[1]) {
             return None;
         }
         let mut borders = quill_core::props::Borders {
@@ -2386,6 +2407,11 @@ fn parse_row_data(data: &str) -> Option<RowProps> {
                 Some(1) => quill_core::props::VAlign::Center,
                 Some(2) => quill_core::props::VAlign::Bottom,
                 _ => quill_core::props::VAlign::Top,
+            },
+            vmerge: match v.get(14) {
+                Some(1) => quill_core::props::VMerge::Restart,
+                Some(2) => quill_core::props::VMerge::Continue,
+                _ => quill_core::props::VMerge::None,
             },
         });
     }
@@ -2474,6 +2500,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(doc.main.paras[0].text, "\u{410} \u{3C0}");
+    }
+
+    #[test]
+    fn a_style_based_on_itself_keeps_its_font_through_docx() {
+        let doc = read(
+            br"{\rtf1\ansi\deff0{\fonttbl{\f0 Arial;}{\f1 Symbol;}}{\stylesheet{\s0 Normal;}{\s5\sbasedon5\f1 Loop;}}\pard\s5\f1 abc\par}",
+        )
+        .unwrap();
+        let id = doc.main.paras[0].pap.style;
+        assert_eq!(doc.styles.get(id).based_on, Some(0));
+        let back = crate::docx::read(&crate::docx::write(&doc, 0)).unwrap();
+        let st = back.styles.get(back.main.paras[0].pap.style);
+        assert_eq!(
+            (st.name.as_str(), back.font_name(st.chp.font)),
+            ("Loop", "Symbol")
+        );
+    }
+
+    #[test]
+    fn a_symbol_font_s_bytes_stay_its_own_codes() {
+        let doc = read(
+            br"{\rtf1\ansi\deff0{\fonttbl{\f0 Arial;}{\f1\fcharset2 Wingdings;}}\'95{\f1 \'95J}\par}",
+        )
+        .unwrap();
+        // Windows Latin makes \'95 a bullet, but in Wingdings it is code 95.
+        assert_eq!(doc.main.paras[0].text, "\u{2022}\u{95}J");
+        let chp = doc.main.paras[0].chp_of_char('\u{2022}'.len_utf8());
+        assert_eq!(doc.font_name(chp.font), "Wingdings");
     }
 
     #[test]
@@ -2616,7 +2670,7 @@ mod tests {
         let p = &doc.main.paras[0];
         assert_eq!(p.text, "Area A = \u{3C0}r2[(a+b)/2] done");
         let two = p.text.find("r2").unwrap() + 1;
-        assert!(p.chp_of_char(two).position > 0);
+        assert_eq!(p.chp_of_char(two).script, quill_core::Script::Super);
         assert_eq!(report.notes(), [notes::EQUATIONS]);
     }
 

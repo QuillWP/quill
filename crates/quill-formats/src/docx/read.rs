@@ -2,9 +2,8 @@
 //!
 //! The reader keeps what the original can express. Modern extras either map to
 //! the nearest 5.1 feature (list numbering becomes literal numbers and a
-//! tab, as the original's Renumber would leave them; superscript becomes a
-//! raised, smaller font) or are dropped (comments, content controls'
-//! chrome). Text is never dropped on purpose.
+//! tab, as the original's Renumber would leave them) or are dropped (comments,
+//! content controls' chrome). Text is never dropped on purpose.
 
 use crate::report::{self as notes, ImportReport};
 use crate::xml::{self, Element};
@@ -1045,19 +1044,10 @@ impl Reader {
                 _ => {}
             }
         }
-        // The original has no superscript-and-shrink: raise or lower by a third
-        // of the size and make the text two thirds as big, which looks the
-        // same.
         match superscript.as_deref() {
-            Some("superscript") => {
-                c.position = crate::superscript_rise(c.size);
-                c.size = (c.size * 2).div_ceil(3);
-            }
-            Some("subscript") => {
-                c.position = -crate::subscript_drop(c.size);
-                c.size = (c.size * 2).div_ceil(3);
-            }
-            Some("baseline") => c.position = 0,
+            Some("superscript") => c.script = quill_core::Script::Super,
+            Some("subscript") => c.script = quill_core::Script::Sub,
+            Some("baseline") => c.script = quill_core::Script::None,
             _ => {}
         }
         self.rpr_depth -= 1;
@@ -1367,6 +1357,7 @@ impl Reader {
                 st.next = n;
             }
         }
+        self.doc.styles.break_based_on_loops();
     }
 
     fn read_settings(&mut self, e: &Element) {
@@ -1649,6 +1640,13 @@ impl Reader {
                 let mut shading = 0;
                 let mut shading_color = None;
                 let mut valign = quill_core::props::VAlign::Top;
+                // Word's vertical merge: "restart" starts one, and a
+                // vMerge with no value (or "continue") carries it on.
+                let vmerge = match tcpr.and_then(|p| p.child("vMerge")).map(|v| v.attr("val")) {
+                    None => quill_core::props::VMerge::None,
+                    Some(Some("restart")) => quill_core::props::VMerge::Restart,
+                    Some(_) => quill_core::props::VMerge::Continue,
+                };
                 for pr in layers.iter().filter_map(|l| l.child("tcPr")).chain(tcpr) {
                     if let Some(v) = pr.child("vAlign") {
                         valign = match v.attr("val") {
@@ -1670,6 +1668,7 @@ impl Reader {
                     shading,
                     shading_color,
                     valign,
+                    vmerge,
                 });
             }
             let height = tr
@@ -2187,6 +2186,14 @@ impl Reader {
                 "fldChar" => match x.attr("fldCharType") {
                     Some("begin") => {
                         field.depth += 1;
+                        if field.depth == 2 && field.link != 0 && field.showing == 1 {
+                            field.inner.clear();
+                            field.inner_known = None;
+                            field.inner_separated = false;
+                            field.inner_locked = x
+                                .attr("fldLock")
+                                .is_some_and(|v| v == "1" || v == "true" || v == "on");
+                        }
                         if field.depth == 1 {
                             field.instr.clear();
                             field.known = None;
@@ -2215,6 +2222,12 @@ impl Reader {
                             text.push(c);
                             field.placed = true;
                         }
+                        if field.depth == 2 && field.link != 0 && field.showing == 1 {
+                            field.inner_separated = true;
+                            field.inner_known =
+                                known_field(&field.inner).filter(|_| !field.inner_locked);
+                            text.extend(field.inner_known);
+                        }
                         field.showing = field.depth;
                     }
                     Some("end") => {
@@ -2236,6 +2249,12 @@ impl Reader {
                                 chp.link = 0;
                             }
                         }
+                        if field.depth == 2 && field.link != 0 {
+                            if !field.inner_separated {
+                                text.extend(field_kind(&field.inner));
+                            }
+                            field.inner_known = None;
+                        }
                         field.depth = field.depth.saturating_sub(1);
                         field.showing = field.showing.min(field.depth);
                     }
@@ -2244,9 +2263,15 @@ impl Reader {
                 "instrText" | "delInstrText" if field.depth == 1 && field.showing < 1 => {
                     field.instr.push_str(&x.text());
                 }
+                "instrText" | "delInstrText"
+                    if field.depth == 2 && field.showing == 1 && field.link != 0 =>
+                {
+                    field.inner.push_str(&x.text());
+                }
                 _ if field.depth > field.showing => {}
                 // A known field's stored result is replaced by the field.
                 _ if field.known.is_some() && field.depth > 0 => {}
+                _ if field.inner_known.is_some() && field.depth > 1 => {}
                 "t" if self.custom_mark.is_some() => {
                     let id = self.custom_mark.take().unwrap_or(0);
                     if self.reading_note == 0 {
@@ -2413,7 +2438,23 @@ impl Reader {
                         } else {
                             c
                         };
-                        text.extend(char::from_u32(c));
+                        // The symbol is in its own font (w:font), whatever the
+                        // run's font is: "J" in Wingdings is a smiley, in the
+                        // run's font only a J.
+                        match x.attr("font").filter(|f| !f.is_empty()) {
+                            Some(font) => {
+                                let at = p.len();
+                                p.insert(at, &std::mem::take(&mut text), chp);
+                                let font = self.doc.font_id(font);
+                                let at = p.len();
+                                p.insert(
+                                    at,
+                                    &char::from_u32(c).map(String::from).unwrap_or_default(),
+                                    CharProps { font, ..chp },
+                                );
+                            }
+                            None => text.extend(char::from_u32(c)),
+                        }
                     }
                 }
                 _ => {}
@@ -2716,10 +2757,17 @@ fn read_frame(x: &Element) -> quill_core::Frame {
         _ => FrameV::InLine,
     };
     quill_core::Frame {
-        h,
+        // Word marks a drop cap as centered on the page, but positions it
+        // at the paragraph's first line. Quill frames use ordinary frame
+        // coordinates, so keep the cap at the start of its text column.
+        h: if drop.is_some() { FrameH::Left } else { h },
         // ECMA's omitted default is page, but Microsoft Word uses text for
         // both omitted anchors. Follow the producer whose files we read.
-        h_rel: rel(x.attr("hAnchor")),
+        h_rel: if drop.is_some() {
+            FrameRel::Column
+        } else {
+            rel(x.attr("hAnchor"))
+        },
         v,
         v_rel: if v == FrameV::InLine {
             // The anchor is semantically unused for an inline frame; keep
@@ -2806,6 +2854,14 @@ struct FieldState {
     /// The outermost field is a hyperlink: its number, for the runs of
     /// its result.
     link: u32,
+    /// A field directly inside a hyperlink's result (a page number in a
+    /// link, as Word nests them): its instruction, whether it is one Quill
+    /// keeps as its own character, and whether it is locked or has a
+    /// stored result.
+    inner: String,
+    inner_known: Option<char>,
+    inner_locked: bool,
+    inner_separated: bool,
 }
 
 /// The link a HYPERLINK field instruction makes, as Word writes it:
@@ -3208,7 +3264,7 @@ fn character_mask(e: &Element) -> u16 {
             "color" => 1 << 11,
             "position" => 1 << 12,
             "spacing" => 1 << 13,
-            "vertAlign" => (1 << 1) | (1 << 12),
+            "vertAlign" => 1 << 14,
             _ => 0,
         }
     })
@@ -3346,6 +3402,42 @@ mod tests {
         let mut zip = crate::zip::Writer::new(0);
         zip.add("word/document.xml", xml.as_bytes());
         zip.finish()
+    }
+
+    #[test]
+    fn a_page_number_inside_a_link_stays_a_field() {
+        let field = |instr: &str, shown: &str, lock: &str| {
+            format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"{lock}/></w:r><w:r><w:instrText>{instr}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>{shown}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            )
+        };
+        let body = format!(
+            r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> HYPERLINK "https://example.com" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t xml:space="preserve">p </w:t></w:r>{}<w:r><w:t xml:space="preserve"> </w:t></w:r>{}{}<w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t xml:space="preserve"> after</w:t></w:r></w:p>"#,
+            field(" PAGE ", "7", ""),
+            field(" PAGE ", "9", r#" w:fldLock="1""#),
+            field(" AUTHOR ", "Ada", ""),
+        );
+        let doc = read(&docx(&body)).unwrap();
+        let p = &doc.main.paras[0];
+        // The page number is Quill's field; a locked one and one Quill
+        // does not have keep the result Word stored.
+        assert_eq!(p.text, "p \u{E000} 9Ada after");
+        assert_ne!(p.chp_of_char(2).link, 0);
+        assert_ne!(p.chp_of_char("p \u{E000} 9Ad".len()).link, 0);
+        assert_eq!(p.chp_of_char(p.text.len() - 1).link, 0);
+    }
+
+    #[test]
+    fn a_symbol_keeps_its_own_font() {
+        let doc = read(&docx(
+            r#"<w:p><w:r><w:rPr><w:rFonts w:ascii="Arial"/></w:rPr><w:t>ok </w:t><w:sym w:font="Wingdings" w:char="F04A"/><w:t> done</w:t></w:r></w:p>"#,
+        ))
+        .unwrap();
+        let p = &doc.main.paras[0];
+        assert_eq!(p.text, "ok J done");
+        assert_eq!(doc.font_name(p.chp_of_char(0).font), "Arial");
+        assert_eq!(doc.font_name(p.chp_of_char(3).font), "Wingdings");
+        assert_eq!(doc.font_name(p.chp_of_char(5).font), "Arial");
     }
 
     #[test]

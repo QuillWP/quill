@@ -153,20 +153,27 @@ fn font_item(
             family.name.clone(),
             Action::FontVariant(family.name.clone(), false, false),
         )
-        .checked(selected && !chp.bold && !chp.italic)
-        .font(family.name.clone());
+        .checked(selected && !chp.bold && !chp.italic);
+    // A symbol font's name, or one in letters the font lacks, would come
+    // out as pictures or boxes: it is shown in ordinary text.
+    if family.draws_name {
+        item = item.font(family.name.clone());
+    }
     if family.variants.len() > 1 {
         let items = family
             .variants
             .iter()
             .map(|&v| {
-                b.item(
-                    variant_label(v),
-                    Action::FontVariant(family.name.clone(), v.bold, v.italic),
-                )
-                .checked(selected && chp.bold == v.bold && chp.italic == v.italic)
-                .font(family.name.clone())
-                .style(ItemStyle {
+                let item = b
+                    .item(
+                        variant_label(v),
+                        Action::FontVariant(family.name.clone(), v.bold, v.italic),
+                    )
+                    .checked(selected && chp.bold == v.bold && chp.italic == v.italic);
+                if !family.draws_name {
+                    return item;
+                }
+                item.font(family.name.clone()).style(ItemStyle {
                     bold: v.bold,
                     italic: v.italic,
                     ..Default::default()
@@ -609,7 +616,7 @@ fn delete_menu(b: &mut Builder) -> Item {
 /// Whether more than one cell of a row is selected, which Merge Cells needs.
 fn cells_to_merge(v: &DocView) -> bool {
     v.selected_cells()
-        .is_some_and(|block| block.from < block.to)
+        .is_some_and(|block| block.from < block.to || block.rows.len() > 1)
 }
 
 /// Editing actions at the current selection/insertion point.
@@ -1128,6 +1135,7 @@ mod tests {
         ]
         .map(|name| FontFamilyInfo {
             name: name.into(),
+            draws_name: false,
             variants: vec![
                 FontVariant {
                     bold: false,
@@ -1175,6 +1183,7 @@ mod tests {
         let families = vec![
             FontFamilyInfo {
                 name: "Arial".into(),
+                draws_name: true,
                 variants: vec![
                     FontVariant {
                         bold: false,
@@ -1192,6 +1201,7 @@ mod tests {
             },
             FontFamilyInfo {
                 name: "Wingdings".into(),
+                draws_name: false,
                 variants: vec![FontVariant {
                     bold: false,
                     italic: false,
@@ -1224,6 +1234,10 @@ mod tests {
             Action::FontVariant("Arial".into(), false, false)
         );
         assert!(menu.items[1].submenu.is_none());
+        // Arial's name is shown in Arial; Wingdings' in ordinary text.
+        assert_eq!(arial.font.as_deref(), Some("Arial"));
+        assert_eq!(variants.items[1].font.as_deref(), Some("Arial"));
+        assert_eq!(menu.items[1].font, None);
     }
 
     #[test]

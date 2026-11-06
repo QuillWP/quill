@@ -70,6 +70,28 @@ fn character(doc: &Document, c: &CharProps, base: Option<&CharProps>) -> String 
         "vertical-align",
         format!("{}pt", points(c.position))
     );
+    // A superscript or subscript: raised and smaller by the document's
+    // amounts, with the text's own size kept for Quill to read back.
+    if c.script != quill_core::Script::None
+        && base.is_none_or(|b| c.script != b.script || c.size != b.size)
+    {
+        let shown = doc.props.scripts.shown(*c);
+        let _ = write!(
+            out,
+            "vertical-align:{};font-size:{}pt;--quill-size:{}pt;",
+            if c.script == quill_core::Script::Super {
+                "super"
+            } else {
+                "sub"
+            },
+            points(shown.size as i32 * 10),
+            points(c.size as i32 * 10)
+        );
+    } else if c.script == quill_core::Script::None
+        && base.is_some_and(|b| b.script != quill_core::Script::None)
+    {
+        out.push_str("vertical-align:baseline;");
+    }
     prop!(
         shadow,
         "text-shadow",
@@ -167,7 +189,8 @@ fn border_css(line: &BorderLine) -> String {
         BorderStyle::Hairline => "0.25pt solid",
         BorderStyle::Single => "0.5pt solid",
         BorderStyle::Thick => "1.5pt solid",
-        BorderStyle::Double => "1.5pt double",
+        // A browser needs 3 pixels to draw a double line as two.
+        BorderStyle::Double => "2.25pt double",
     };
     if line.color == Rgb::BLACK {
         kind.to_string()
@@ -335,6 +358,12 @@ impl Writer<'_> {
                     chars::FIELD_PAGE => out.push_str("[Page]"),
                     chars::FIELD_DATE => out.push_str("[Date]"),
                     chars::FIELD_TIME => out.push_str("[Time]"),
+                    // Codes 80-9F come from symbol fonts (Wingdings' 95).
+                    // HTML has no room for them as they are, so they go
+                    // in Word's private-use form, which the font draws.
+                    c @ '\u{80}'..='\u{9F}' => {
+                        out.extend(char::from_u32(0xF000 + c as u32));
+                    }
                     c => out.push_str(&escape(&c.to_string())),
                 }
             }
@@ -372,11 +401,23 @@ impl Writer<'_> {
                     } else {
                         out.push_str("<table><tbody>\n");
                     }
-                    for row in rows {
-                        let props =
-                            quill_core::table::row_props(paras, &row, self.doc.props.text_width());
+                    let text_width = self.doc.props.text_width();
+                    let all: Vec<_> = rows
+                        .iter()
+                        .map(|r| quill_core::table::row_props(paras, r, text_width))
+                        .collect();
+                    let merged = quill_core::table::merges(&all, text_width);
+                    for (r, row) in rows.into_iter().enumerate() {
+                        let props = &all[r];
                         out.push_str("<tr>");
                         for (i, (a, b)) in row.cells.iter().copied().enumerate() {
+                            // The top of a vertical merge spans the rows; the
+                            // cells under it are not written.
+                            let rowspan = match merged[r][i] {
+                                quill_core::table::Merged::Under => continue,
+                                quill_core::table::Merged::Top(n) => format!(" rowspan=\"{n}\""),
+                                quill_core::table::Merged::No => String::new(),
+                            };
                             let valign = match props.cells[i].valign {
                                 quill_core::props::VAlign::Top => "",
                                 quill_core::props::VAlign::Center => ";vertical-align:middle",
@@ -393,7 +434,7 @@ impl Writer<'_> {
                             };
                             let _ = write!(
                                 out,
-                                "<td style=\"width:{}pt{valign}{}{padding}\">",
+                                "<td{rowspan} style=\"width:{}pt{valign}{}{padding}\">",
                                 points(props.cells[i].width),
                                 cell_css(&props.cells[i])
                             );

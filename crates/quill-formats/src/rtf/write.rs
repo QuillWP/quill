@@ -5,7 +5,7 @@ use quill_core::document::SavedView;
 use quill_core::para::{Mark, Paragraph, chars};
 use quill_core::props::{
     Align, BorderLine, BorderStyle, CharProps, LineSpacing, ParaProps, Rgb, RowHeight, RowProps,
-    TabAlign, TabLeader, Underline,
+    TabAlign, TabLeader, Underline, VMerge,
 };
 use quill_core::{Document, StoryId};
 use std::fmt::Write as _;
@@ -135,6 +135,18 @@ fn character_values(out: &mut String, c: &CharProps, mask: u16, tables: &Tables)
     if mask & (1 << 13) != 0 {
         let _ = write!(out, "\\expndtw{}", c.spacing);
     }
+    if mask & (1 << 14) != 0 {
+        out.push_str(script_word(c.script));
+    }
+}
+
+/// RTF's word for a superscript, subscript or neither.
+fn script_word(script: quill_core::Script) -> &'static str {
+    match script {
+        quill_core::Script::None => "\\nosupersub",
+        quill_core::Script::Super => "\\super",
+        quill_core::Script::Sub => "\\sub",
+    }
 }
 
 fn run_chp(out: &mut String, doc: &Document, _p: &Paragraph, c: &CharProps, tables: &Tables) {
@@ -224,6 +236,9 @@ fn explicit_chp(out: &mut String, c: &CharProps, tables: &Tables) {
         let _ = write!(out, "\\dn{}", -shift);
     } else {
         let _ = write!(out, "\\up{shift}");
+    }
+    if c.script != quill_core::Script::None {
+        out.push_str(script_word(c.script));
     }
     let _ = write!(out, "\\expndtw{}", c.spacing);
 }
@@ -585,8 +600,9 @@ fn annotation_ref(out: &mut String, doc: &Document, id: u32, tables: &Tables, in
     out.push('}');
 }
 
-/// A section's settings, after `\sectd` resets them.
-fn section(out: &mut String, s: &quill_core::SectionProps) {
+/// A section's settings, after `\sectd` resets them. `landscape` marks a
+/// page wider than it is tall, which Word reads its orientation from.
+fn section(out: &mut String, s: &quill_core::SectionProps, landscape: bool) {
     use quill_core::{PageNumberFormat as F, SectionStart as S};
     out.push_str(match s.start {
         S::NoBreak => "\\sectd\\sbknone",
@@ -619,6 +635,9 @@ fn section(out: &mut String, s: &quill_core::SectionProps) {
             "\\pgnx{}\\pgny{}",
             s.page_number_from_right, s.page_number_from_top
         );
+    }
+    if landscape {
+        out.push_str("\\lndscpsxn");
     }
     if s.different_first_page {
         out.push_str("\\titlepg");
@@ -685,6 +704,11 @@ fn row_definition(out: &mut String, row: &RowProps, tables: &Tables) {
         if cell.shading > 0 {
             let _ = write!(out, "\\clshdng{}", cell.shading as u32 * 10);
         }
+        match cell.vmerge {
+            VMerge::None => {}
+            VMerge::Restart => out.push_str("\\clvmgf"),
+            VMerge::Continue => out.push_str("\\clvmrg"),
+        }
         match cell.valign {
             quill_core::props::VAlign::Top => {}
             quill_core::props::VAlign::Center => out.push_str("\\clvertalc"),
@@ -725,10 +749,23 @@ fn row_definition(out: &mut String, row: &RowProps, tables: &Tables) {
         ] {
             let _ = write!(out, ",{},{}", border_style(line.style), line.space);
         }
-        match cell.valign {
-            quill_core::props::VAlign::Top => {}
-            quill_core::props::VAlign::Center => out.push_str(",1"),
-            quill_core::props::VAlign::Bottom => out.push_str(",2"),
+        // The 14th number, vertical alignment, is left out when Top
+        // unless a 15th, the vertical merge, follows it.
+        let valign = match cell.valign {
+            quill_core::props::VAlign::Top => 0,
+            quill_core::props::VAlign::Center => 1,
+            quill_core::props::VAlign::Bottom => 2,
+        };
+        let vmerge = match cell.vmerge {
+            VMerge::None => 0,
+            VMerge::Restart => 1,
+            VMerge::Continue => 2,
+        };
+        if valign != 0 || vmerge != 0 {
+            let _ = write!(out, ",{valign}");
+        }
+        if vmerge != 0 {
+            let _ = write!(out, ",{vmerge}");
         }
         // Then the lines' colors, when any is not black.
         let b = &cell.borders;
@@ -754,7 +791,7 @@ fn row_start(out: &mut String, doc: &Document, paras: &[Paragraph], i: usize, ta
         && starts_row
         && let Some(row) = quill_core::table::row_at_level(paras, i, 1)
     {
-        let props = quill_core::table::row_props(paras, &row, doc.props.text_width());
+        let props = quill_core::table::row_props_merged(paras, &row, doc.props.text_width());
         row_definition(out, &props, tables);
     }
 }
@@ -766,7 +803,7 @@ fn nested_row(doc: &Document, paras: &[Paragraph], i: usize) -> Option<RowProps>
         return None;
     }
     let row = quill_core::table::row_at_level(paras, i, p.pap.level())?;
-    Some(quill_core::table::row_props(
+    Some(quill_core::table::row_props_merged(
         paras,
         &row,
         doc.props.text_width(),
@@ -975,6 +1012,9 @@ pub fn write(doc: &Document) -> Vec<u8> {
         out.push('}');
     }
     let p = &doc.props;
+    // Word takes the orientation from these flags, not from the sizes, so
+    // without them it calls a wide page portrait.
+    let landscape = p.page_width > p.page_height;
     let top = if p.top_exact {
         -p.margin_top
     } else {
@@ -987,9 +1027,10 @@ pub fn write(doc: &Document) -> Vec<u8> {
     };
     let _ = write!(
         out,
-        "}}\n\\paperw{}\\paperh{}\\margl{}\\margr{}\\margt{top}\\margb{bottom}\\gutter{}\\deftab{}{}{}\n",
+        "}}\n\\paperw{}\\paperh{}{}\\margl{}\\margr{}\\margt{top}\\margb{bottom}\\gutter{}\\deftab{}{}{}\n",
         p.page_width,
         p.page_height,
+        if landscape { "\\landscape" } else { "" },
         p.margin_left,
         p.margin_right,
         p.gutter,
@@ -1032,7 +1073,7 @@ pub fn write(doc: &Document) -> Vec<u8> {
     out.push('\n');
     // Each section's settings come before its text.
     let mut section_index = 0;
-    section(&mut out, doc.section_props_at(0));
+    section(&mut out, doc.section_props_at(0), landscape);
     headers(&mut out, doc, section_index, &tables);
     for (i, para) in doc.main.paras.iter().enumerate() {
         row_start(&mut out, doc, &doc.main.paras, i, &tables);
@@ -1046,7 +1087,7 @@ pub fn write(doc: &Document) -> Vec<u8> {
         );
         if para.mark == Mark::SectionBreak && i + 1 < doc.main.paras.len() {
             section_index += 1;
-            section(&mut out, doc.section_props_at(i + 1));
+            section(&mut out, doc.section_props_at(i + 1), landscape);
             headers(&mut out, doc, section_index, &tables);
         }
     }
