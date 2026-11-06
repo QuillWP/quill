@@ -1,0 +1,9 @@
+[package]
+name = "quill-core"
+description = "Document model and editing engine for Quill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]

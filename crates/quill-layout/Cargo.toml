@@ -1,0 +1,13 @@
+[package]
+name = "quill-layout"
+description = "Fonts and text layout for Quill"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+quill-core.workspace = true
+ab_glyph = { version = "0.2.32", default-features = false, features = ["std", "variable-fonts"] }
+fontdb = { version = "0.24", default-features = false, features = ["std", "fs", "memmap"] }
+ab_glyph_rasterizer = "0.1.10"

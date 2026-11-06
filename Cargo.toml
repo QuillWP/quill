@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+homepage = "https://quillwp.com"
+
+[workspace.dependencies]
+quill-core = { path = "crates/quill-core" }
+quill-layout = { path = "crates/quill-layout" }
+quill-formats = { path = "crates/quill-formats" }
+
+# Small and fast release builds: the footprint is part of the point.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = 3

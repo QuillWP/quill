@@ -1,0 +1,63 @@
+[package]
+name = "quill-app"
+description = "Quill, a small word processor inspired by Lucas's favorite word processor from 1992"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "quill"
+path = "src/main.rs"
+
+[lib]
+name = "quill_app_fuzz"
+path = "src/fuzz_lib.rs"
+
+[features]
+fuzzing = []
+
+[dependencies]
+quill-core.workspace = true
+quill-layout.workspace = true
+quill-formats.workspace = true
+winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
+softbuffer = { version = "0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
+arboard = { version = "3.6", default-features = false }
+ab_glyph_rasterizer = "0.1.10"
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+zune-jpeg = { version = "0.5", default-features = false, features = ["std"] }
+
+# Native Open and Save dialogs. Linux uses GTK, which desktops already
+# have, rather than the portal backend's async runtime.
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+rfd = { version = "0.17", default-features = false }
+
+# The real menu bar at the top of the screen on the Mac.
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = { version = "0.21", default-features = false }
+# Opening documents from the Finder (already used by winit).
+objc2 = "0.5"
+# Small typed wrappers around the AppKit controls Quill places in its
+# existing winit windows. The framework itself remains part of macOS.
+objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSBox", "NSButton", "NSCell", "NSControl", "NSFont", "NSGraphics", "NSPanel", "NSPopUpButton", "NSResponder", "NSScroller", "NSScrollView", "NSSpellChecker", "NSTextField", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSGeometry", "NSNotification", "NSObject", "NSString"] }
+# Match muda's AppKit bindings so native menu titles can use attributed
+# strings. These resolve to muda's existing copies; no framework or font is
+# bundled into Quill.
+objc2-06 = { package = "objc2", version = "0.6" }
+# Blocks for AppKit notifications, matching objc2 0.6.
+block2 = "0.6"
+objc2-app-kit-03 = { package = "objc2-app-kit", version = "0.3.2", default-features = false, features = ["NSAttributedString", "NSDocumentController", "NSFont", "NSFontManager"] }
+objc2-foundation-03 = { package = "objc2-foundation", version = "0.3.2", default-features = false, features = ["NSArray", "NSAttributedString", "NSDictionary", "NSObject", "NSString", "NSURL"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", default-features = false, features = ["Win32_Globalization", "Win32_System_Com", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls", "Win32_UI_Controls_Dialogs", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_Storage_Xps", "Win32_UI_HiDpi", "Win32_UI_Input_KeyboardAndMouse"] }
+
+
+[target.'cfg(not(any(target_os = "macos", windows)))'.dependencies]
+rfd = { version = "0.17", default-features = false, features = ["gtk3"] }
+
+[target.'cfg(unix)'.dependencies]
+# Correct platform declarations for time_t and struct tm.
+libc = "0.2"

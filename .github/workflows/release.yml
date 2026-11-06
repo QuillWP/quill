@@ -1,0 +1,51 @@
+# Tagging a version (git tag v0.1.0 && git push --tags) builds the three
+# packages and attaches them to a draft GitHub release to check and
+# publish by hand (see docs/release.md).
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxkbcommon-dev
+      - name: Package
+        run: python tools/package.py
+      - name: Source package
+        if: runner.os == 'Linux'
+        run: python tools/package.py --source
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quill-${{ runner.os }}
+          path: |
+            dist/*.dmg
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          draft: true
+          files: |
+            dist/*.dmg
+            dist/*.tar.gz
+            dist/*.zip

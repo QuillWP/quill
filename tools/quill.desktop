@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Quill
+Comment=Inspired by Lucas's favorite word processor from 1992
+Exec=quill %f
+Icon=quill
+Terminal=false
+Categories=Office;WordProcessor;
+MimeType=application/x-quillwp;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/rtf;text/plain;

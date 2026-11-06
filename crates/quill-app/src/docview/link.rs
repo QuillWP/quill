@@ -1,0 +1,268 @@
+//! Hyperlinks: finding the link at the cursor, making and changing one
+//! (Insert > Hyperlink), taking links off, and following one.
+
+use super::*;
+use quill_core::Link;
+use quill_core::props::Rgb;
+
+/// The text the Hyperlink dialog works on, and the link it has now.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkTarget {
+    pub start: Position,
+    pub end: Position,
+    /// The text as it is, for the dialog's "Text to link" field.
+    pub text: String,
+    /// The link the text already is (0 for none), whose settings the
+    /// dialog starts from.
+    pub link: u32,
+    /// The color of the linked text.
+    pub color: Rgb,
+}
+
+impl DocView {
+    /// The whole link around the main text position `at`, if there is one.
+    fn link_around(&self, at: Position) -> Option<(Position, Position, u32)> {
+        let (s, e, link) = self.doc.main.paras[at.para].link_range(at.offset)?;
+        Some((Position::new(at.para, s), Position::new(at.para, e), link))
+    }
+
+    /// What the Hyperlink dialog edits: with nothing selected, the link the
+    /// cursor is in (or an empty spot for a new one); otherwise the
+    /// selection, grown to the whole link when it lies inside one.
+    pub fn link_target(&self) -> LinkTarget {
+        let (s, e) = self.sel.range();
+        let around = self
+            .link_around(s)
+            .filter(|&(ls, le, _)| ls <= s && e <= le);
+        let (start, end, link) = match around {
+            Some(found) if s == e || found.0 <= s => found,
+            _ => (s, e, 0),
+        };
+        let text = if start == end {
+            String::new()
+        } else {
+            self.doc.copy(MAIN, start, end).plain_text()
+        };
+        let color = if link != 0 {
+            self.doc.main.paras[start.para]
+                .chp_of_char(start.offset)
+                .color
+        } else {
+            quill_core::link::BROWSER_BLUE
+        };
+        LinkTarget {
+            start,
+            end,
+            text,
+            link,
+            color,
+        }
+    }
+
+    /// Make `target`'s text into `link`, shown in `color` and underlined.
+    /// Text the dialog changed replaces the old; text it left alone keeps
+    /// its own formatting apart from the link's color and underline.
+    pub fn apply_link(&mut self, target: &LinkTarget, text: &str, link: Link, color: Rgb) {
+        let id = quill_core::link::intern(link);
+        self.doc.begin("Hyperlink", self.sel);
+        let (start, mut end) = (target.start, target.end);
+        if text != target.text || start == end {
+            let at = if start == end {
+                start
+            } else {
+                self.delete_range(start, end)
+            };
+            let chp = self.doc.main.paras[at.para].chp_at(at.offset);
+            // Line ends in the field become line breaks, not paragraphs.
+            let text: String = text
+                .chars()
+                .map(|c| if c == '\n' { chars::LINE_BREAK } else { c })
+                .filter(|c| !c.is_control() || *c == chars::LINE_BREAK || *c == '\t')
+                .collect();
+            end = self.doc.insert_text(MAIN, at, &text, chp);
+        }
+        self.doc.set_link(MAIN, start, end, id, color);
+        self.typing_chp = None;
+        self.finish_edit(Selection::caret(end));
+    }
+
+    /// Take the link off `start..end`: its text goes back to the
+    /// paragraph's color with no underline.
+    pub fn remove_link_from(&mut self, start: Position, end: Position) {
+        self.doc.begin("Remove Link", self.sel);
+        self.doc.set_link(MAIN, start, end, 0, Rgb::BLACK);
+        self.typing_chp = None;
+        let sel = self.sel;
+        self.finish_edit(sel);
+    }
+
+    /// Remove Link: the link the cursor is in, or every link the selection
+    /// touches, each one whole.
+    pub fn remove_links(&mut self) {
+        let (mut s, mut e) = self.sel.range();
+        if let Some((ls, _, _)) = self.link_around(s) {
+            s = s.min(ls);
+        }
+        if let Some((_, le, _)) = self.link_around(e) {
+            e = e.max(le);
+        }
+        if s != e {
+            self.remove_link_from(s, e);
+        }
+    }
+
+    /// Whether the cursor is in a link or the selection holds one.
+    pub fn has_link(&self) -> bool {
+        let (s, e) = self.sel.range();
+        if self.link_around(s).is_some() {
+            return true;
+        }
+        let paras = &self.doc.main.paras;
+        (s.para..=e.para).any(|i| {
+            let p = &paras[i];
+            let a = if i == s.para { s.offset } else { 0 };
+            let b = if i == e.para { e.offset } else { p.len() };
+            p.run_bounds()
+                .any(|(rs, re, c)| c.link != 0 && rs < b && re > a)
+        })
+    }
+
+    /// The address of the link at main text position `at`: the character
+    /// there, not the one before it, so a click just past a link misses.
+    pub fn link_url_at(&self, at: Position) -> Option<String> {
+        let p = self.doc.main.paras.get(at.para)?;
+        if at.offset >= p.len() {
+            return None;
+        }
+        let link = p.chp_of_char(at.offset).link;
+        quill_core::link::get(link).map(|l| l.url.clone())
+    }
+}
+
+/// Open `url` in the program the system uses for it: the browser for web
+/// addresses, Mail for mailto: and so on. Only schemes a link should open
+/// are passed on, so a document cannot run a program by linking to it.
+pub fn follow(url: &str) -> bool {
+    let url = url.trim();
+    let scheme = url
+        .split_once(':')
+        .map(|(s, _)| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    let url = if scheme.is_empty() && url.contains('.') && !url.contains(' ') {
+        // "example.com" with no scheme, as people often type.
+        format!("https://{url}")
+    } else if ["http", "https", "mailto", "ftp", "tel"].contains(&scheme.as_str()) {
+        url.to_string()
+    } else {
+        return false;
+    };
+    #[cfg(target_os = "macos")]
+    let opener = std::process::Command::new("/usr/bin/open")
+        .arg(&url)
+        .spawn();
+    #[cfg(target_os = "windows")]
+    let opener = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", &url])
+        .spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let opener = std::process::Command::new("xdg-open").arg(&url).spawn();
+    opener.is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view(text: &str) -> DocView {
+        DocView::new(quill_core::text::from_plain_text(text), "Links".into())
+    }
+
+    #[test]
+    fn make_change_and_remove_a_link() {
+        let mut v = view("Read the manual first");
+        v.sel = Selection::new(Position::new(0, 9), Position::new(0, 15));
+        let t = v.link_target();
+        assert_eq!(t.text, "manual");
+        assert_eq!(t.link, 0);
+        v.apply_link(
+            &t,
+            "manual",
+            Link::new("https://example.com/manual"),
+            quill_core::link::BROWSER_BLUE,
+        );
+        let p = &v.doc.main.paras[0];
+        assert_eq!(p.text, "Read the manual first");
+        let c = p.chp_of_char(10);
+        assert_eq!(quill_core::link::url(c.link), "https://example.com/manual");
+        assert_eq!(c.underline, Underline::Single);
+        assert_eq!(c.color, quill_core::link::BROWSER_BLUE);
+        assert_eq!(p.chp_of_char(8).link, 0);
+        assert_eq!(p.chp_of_char(15).link, 0);
+
+        // The cursor anywhere in it finds the whole link again.
+        v.sel = Selection::caret(Position::new(0, 12));
+        let t = v.link_target();
+        assert_eq!((t.start.offset, t.end.offset), (9, 15));
+        assert_eq!(t.text, "manual");
+        assert_ne!(t.link, 0);
+        assert!(v.has_link());
+
+        // New text replaces the old, still linked.
+        v.apply_link(
+            &t,
+            "guide",
+            Link::new("https://example.com/guide"),
+            quill_core::link::BROWSER_BLUE,
+        );
+        let p = &v.doc.main.paras[0];
+        assert_eq!(p.text, "Read the guide first");
+        assert_eq!(
+            quill_core::link::url(p.chp_of_char(9).link),
+            "https://example.com/guide"
+        );
+        assert_eq!(
+            v.link_url_at(Position::new(0, 9)).as_deref(),
+            Some("https://example.com/guide")
+        );
+        assert_eq!(v.link_url_at(Position::new(0, 14)), None);
+
+        v.sel = Selection::caret(Position::new(0, 11));
+        v.remove_links();
+        let p = &v.doc.main.paras[0];
+        assert!(p.runs.iter().all(|r| r.chp.link == 0));
+        assert_eq!(p.chp_of_char(10).underline, Underline::None);
+        assert!(!v.has_link());
+        assert!(v.doc.undo().is_some());
+        assert_ne!(v.doc.main.paras[0].chp_of_char(10).link, 0);
+    }
+
+    #[test]
+    fn a_new_link_at_the_cursor_inserts_its_text() {
+        let mut v = view("See ");
+        v.sel = Selection::caret(Position::new(0, 4));
+        let t = v.link_target();
+        assert_eq!(t.text, "");
+        v.apply_link(
+            &t,
+            "this page",
+            Link::new("https://example.com/"),
+            quill_core::link::BROWSER_BLUE,
+        );
+        let p = &v.doc.main.paras[0];
+        assert_eq!(p.text, "See this page");
+        assert_ne!(p.chp_of_char(4).link, 0);
+        assert_eq!(v.sel, Selection::caret(Position::new(0, 13)));
+        // Typing goes on after the link, not in it.
+        v.type_text(" now");
+        let p = &v.doc.main.paras[0];
+        assert_eq!(p.chp_of_char(14).link, 0);
+        assert_eq!(p.chp_of_char(14).underline, Underline::None);
+    }
+
+    #[test]
+    fn only_web_and_mail_addresses_are_followed_blindly() {
+        assert!(!follow("file:///Applications/Calculator.app"));
+        assert!(!follow("javascript:alert(1)"));
+        assert!(!follow("not a link"));
+    }
+}

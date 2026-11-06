@@ -1,0 +1,84 @@
+[package]
+name = "quill-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+quill-core = { path = "../crates/quill-core" }
+quill-formats = { path = "../crates/quill-formats" }
+quill-app = { path = "../crates/quill-app", features = ["fuzzing"] }
+
+[[bin]]
+name = "zip"
+path = "fuzz_targets/zip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xml"
+path = "fuzz_targets/xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "docx"
+path = "fuzz_targets/docx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "odt"
+path = "fuzz_targets/odt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rtf"
+path = "fuzz_targets/rtf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "images"
+path = "fuzz_targets/images.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "settings"
+path = "fuzz_targets/settings.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "glossary"
+path = "fuzz_targets/glossary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "merge_data"
+path = "fuzz_targets/merge_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "html"
+path = "fuzz_targets/html.rs"
+test = false
+doc = false
+bench = false
