@@ -27,7 +27,7 @@ Everything in the app, measured from the release build for Apple Silicon Macs:
 | Icons and About artwork | 0.9 MB |
 | Licenses, notices and readme | 0.2 MB |
 | **Whole app** | **7.4 MB** |
-| **Download (disk image)** | **5.2 MB** |
+| **Download (disk image)** | **5.1 MB** |
 
 Quill is written from scratch in Rust, draws its own pages and uses native Mac
 menus and dialogs. It uses the fonts already installed on your Mac.
