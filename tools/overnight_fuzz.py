@@ -15,7 +15,7 @@ import time
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = ['docx', 'rtf', 'zip', 'odt', 'html', 'xml', 'images', 'settings', 'glossary', 'merge_data']
+TARGETS = ['docx', 'rtf', 'zip', 'odt', 'html', 'xml', 'images', 'settings', 'glossary', 'merge_data', 'editing']
 LIMIT = 262144
 
 def now():
@@ -55,6 +55,12 @@ def seed():
                     xml_archives += 1
             except (OSError, ValueError, zipfile.BadZipFile, RuntimeError):
                 continue
+    # Seed operation programs so the editing target reaches every action
+    # before mutation starts, including Undo/Redo and explicit save checks.
+    for action in range(13):
+        add('editing', bytes([action, 0, 0, 0, 3, 0]) * 4)
+    add('editing', b''.join(bytes([action, 0, 0, 0, 3, 0])
+                             for action in [0, 10, 11, 10, 1, 11, 4, 5, 3, 6, 7, 8, 9, 12]))
     # Valid tiny BMP and uncompressed grayscale TIFF, absent from the source collection.
     add('images', b'BM' + struct.pack('<IHHI', 58, 0, 0, 54) + struct.pack('<IiiHHIIiiII', 40, 1, 1, 1, 24, 0, 4, 0, 0, 0, 0) + b'\x00\x00\xff\x00')
     entries = [(256,4,1,1),(257,4,1,1),(258,3,1,8),(259,3,1,1),(262,3,1,1),(273,4,1,122),(278,4,1,1),(279,4,1,1),(277,3,1,1)]

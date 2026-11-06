@@ -916,9 +916,8 @@ impl Reader {
             self.apply_rpr(&old_rpr, &mut old);
         }
         old.rev = 0;
-        if old == (CharProps { rev: 0, ..*chp }) {
-            return;
-        }
+        // A user can format text and then restore its original appearance.
+        // The revision still records who edited it, even when old == current.
         let by = self.stamp(change);
         chp.rev = quill_core::revision::update(chp.rev, |r| r.formatted = Some((by, old)));
     }

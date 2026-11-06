@@ -2,6 +2,9 @@
 
 use libfuzzer_sys::fuzz_target;
 
+#[path = "../support/round_trip.rs"]
+mod round_trip;
+
 // Read the file, keep it within range as opening does, then save it in
 // each format and read that back, as a round trip through Quill would.
 fuzz_target!(|data: &[u8]| {
@@ -9,7 +12,5 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     doc.keep_in_bounds();
-    let _ = quill_formats::docx::read(&quill_formats::docx::write(&doc, 0));
-    let _ = quill_formats::rtf::read(&quill_formats::rtf::write(&doc));
-    let _ = quill_formats::native::read(&quill_formats::native::write(&doc, 0));
+    round_trip::check_imported(&doc);
 });

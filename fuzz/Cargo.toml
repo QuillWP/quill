@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 quill-core = { path = "../crates/quill-core" }
 quill-formats = { path = "../crates/quill-formats" }
 quill-app = { path = "../crates/quill-app", features = ["fuzzing"] }
@@ -79,6 +80,13 @@ bench = false
 [[bin]]
 name = "html"
 path = "fuzz_targets/html.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "editing"
+path = "fuzz_targets/editing.rs"
 test = false
 doc = false
 bench = false

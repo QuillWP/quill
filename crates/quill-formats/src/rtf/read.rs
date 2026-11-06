@@ -1043,15 +1043,7 @@ impl Reader {
         let w = self.st.rev;
         let inserted = w.revised.then(|| self.stamp(w.revauth, w.revdttm));
         let deleted = w.deleted.then(|| self.stamp(w.revauthdel, w.revdttmdel));
-        let formatted = w
-            .old
-            .filter(|old| {
-                *old != CharProps {
-                    rev: 0,
-                    ..self.st.chp
-                }
-            })
-            .map(|old| (self.stamp(w.crauth, w.crdate), old));
+        let formatted = w.old.map(|old| (self.stamp(w.crauth, w.crdate), old));
         self.st.chp.rev = quill_core::revision::intern(Revision {
             inserted,
             deleted,

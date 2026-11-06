@@ -76,12 +76,29 @@ pub fn describe(doc: &Document) -> BTreeMap<String, String> {
             font: 0,
             object: 0,
             link: 0,
+            comment: 0,
+            rev: 0,
             ..*c
         };
         let link = quill_core::link::get(c.link)
             .map(|l| format!(" link={l:?}"))
             .unwrap_or_default();
-        format!("{plain:?} font={} {object}{link}", doc.font_name(c.font))
+        let comment = if c.comment != 0
+            && notes.contains(&c.comment)
+            && ch.is_some()
+            && ch != Some(chars::ANNOTATION)
+        {
+            format!(" comment={}", note(c.comment))
+        } else {
+            String::new()
+        };
+        let revision = quill_core::revision::get(c.rev)
+            .map(|r| format!(" revision={r:?}"))
+            .unwrap_or_default();
+        format!(
+            "{plain:?} font={} {object}{link}{comment}{revision}",
+            doc.font_name(c.font)
+        )
     };
     let pap = |p: &ParaProps| {
         let plain = ParaProps {
@@ -165,7 +182,19 @@ pub fn describe(doc: &Document) -> BTreeMap<String, String> {
         out.insert(format!("mark of {}", note(*id)), m.clone());
     }
     for (id, info) in &doc.annotation_info {
-        out.insert(format!("info of {}", note(*id)), format!("{info:?}"));
+        // Deleted notes retain metadata for Undo, but are not saved content.
+        if !notes.contains(id) {
+            continue;
+        }
+        let parent = info.parent.map(note);
+        let plain = quill_core::notes::AnnotationInfo {
+            parent: None,
+            ..info.clone()
+        };
+        out.insert(
+            format!("info of {}", note(*id)),
+            format!("{plain:?} parent={parent:?}"),
+        );
     }
     out.insert("props".into(), format!("{:?}", doc.props));
     let last = quill_core::SectionProps {
