@@ -43,7 +43,7 @@ pub const OBJECTS: &str = "Embedded objects such as charts and spreadsheets were
 pub const EQUATIONS: &str = "Equations were kept as a line of text, such as (a+b)/2, and can no longer be edited as equations.";
 pub const ANCHORED: &str =
     "Floating pictures became frames, which may not sit exactly where they did.";
-pub const NESTED_TABLES: &str = "Tables inside tables were flattened into the outer table's cells.";
+pub const NESTED_TABLES: &str = "Tables nested more than five deep, or inside a paragraph, were flattened into the cell they are in.";
 pub const WIDE_ROWS: &str =
     "Table rows with more than 255 cells had the extra cells' text put in the last cell.";
 pub const FIELDS: &str =

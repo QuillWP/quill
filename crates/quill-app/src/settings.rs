@@ -57,6 +57,38 @@ impl DefaultView {
     }
 }
 
+/// Whether Quill opens again the documents that were open when it last quit
+/// (Preferences > Open And Save).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Reopen {
+    Always,
+    Never,
+    #[default]
+    Prompt,
+}
+
+impl Reopen {
+    pub const ALL: [Reopen; 3] = [Reopen::Always, Reopen::Never, Reopen::Prompt];
+
+    /// The name Preferences shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Reopen::Always => "Always",
+            Reopen::Never => "Never",
+            Reopen::Prompt => "Prompt",
+        }
+    }
+
+    /// The name the settings file uses.
+    fn key(self) -> &'static str {
+        match self {
+            Reopen::Always => "always",
+            Reopen::Never => "never",
+            Reopen::Prompt => "prompt",
+        }
+    }
+}
+
 /// The unit lengths are shown in (Preferences > General).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Unit {
@@ -130,6 +162,9 @@ pub struct Settings {
     pub interpret_rtf: bool,
     pub make_backup: bool,
     pub foreign_as_quill: bool,
+    pub reopen: Reopen,
+    /// The saved documents open when Quill last quit.
+    pub last_session: Vec<PathBuf>,
     // Default Font
     pub font: String,
     /// Half-points.
@@ -176,6 +211,8 @@ pub struct Settings {
     pub toolbar_position: u8,
     /// Customized buttons: position, picture and command name.
     pub toolbar_buttons: Vec<(usize, usize, String)>,
+    /// The custom colors of the color palette, newest first, as 0xRRGGBB.
+    pub custom_colors: Vec<u32>,
     // Commands: (menu or key, command name) added to or taken from the original's.
     pub menu_add: Vec<(String, String)>,
     pub menu_remove: Vec<(String, String)>,
@@ -272,6 +309,7 @@ impl Default for Settings {
             ruler_foreground: 0x000000,
             toolbar_position: 0,
             toolbar_buttons: Vec::new(),
+            custom_colors: Vec::new(),
             menu_add: Vec::new(),
             menu_remove: Vec::new(),
             keys_add: Vec::new(),
@@ -301,6 +339,8 @@ impl Default for Settings {
             interpret_rtf: true,
             make_backup: false,
             foreign_as_quill: true,
+            reopen: Reopen::Prompt,
+            last_session: Vec::new(),
             font: "Georgia".into(),
             size: 24,
             document: DocumentProps::default(),
@@ -441,6 +481,7 @@ impl Settings {
         put(&mut out, "interpret_rtf", b(self.interpret_rtf));
         put(&mut out, "make_backup", b(self.make_backup));
         put(&mut out, "foreign_as_quill", b(self.foreign_as_quill));
+        put(&mut out, "reopen_documents", self.reopen.key().into());
 
         section(
             &mut out,
@@ -488,6 +529,21 @@ impl Settings {
                 .map(|(p, i, c)| format!("{p}|{i}|{c}"))
                 .collect::<Vec<_>>()
                 .join(";"),
+        );
+
+        section(
+            &mut out,
+            "Colors",
+            Some("The custom colors of the color palette, newest first, as HTML codes"),
+        );
+        put(
+            &mut out,
+            "custom_colors",
+            self.custom_colors
+                .iter()
+                .map(|c| format!("#{c:06X}"))
+                .collect::<Vec<_>>()
+                .join(","),
         );
 
         section(
@@ -594,6 +650,12 @@ impl Settings {
         for path in &self.recent_documents {
             put(&mut out, "recent_document", escape_path(path));
         }
+        if !self.last_session.is_empty() {
+            section(&mut out, "Open When Quill Last Quit", None);
+        }
+        for path in &self.last_session {
+            put(&mut out, "last_session_document", escape_path(path));
+        }
         out
     }
 
@@ -697,6 +759,13 @@ impl Settings {
                         })
                         .collect()
                 }
+                "custom_colors" => {
+                    s.custom_colors = v
+                        .split(',')
+                        .filter_map(hex_color)
+                        .take(crate::palette::SLOTS)
+                        .collect()
+                }
                 "menu_add" => s.menu_add = pairs_parse(v),
                 "menu_remove" => s.menu_remove = pairs_parse(v),
                 "keys_add" => s.keys_add = pairs_parse(v),
@@ -759,6 +828,17 @@ impl Settings {
                     if !v.is_empty() && s.recent_documents.len() < 50 {
                         s.recent_documents.push(unescape_path(v));
                     }
+                }
+                "last_session_document" => {
+                    if !v.is_empty() && s.last_session.len() < 200 {
+                        s.last_session.push(unescape_path(v));
+                    }
+                }
+                "reopen_documents" => {
+                    s.reopen = Reopen::ALL
+                        .into_iter()
+                        .find(|r| r.key() == v)
+                        .unwrap_or_default()
                 }
                 "interpret_rtf" => s.interpret_rtf = flag,
                 "make_backup" => s.make_backup = flag,

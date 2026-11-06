@@ -1,6 +1,7 @@
 //! Hyphenation and thesaurus data loaded from the `data` folder, plus the
 //! session's Ignore All list. Spelling itself comes from the host system.
 
+#[cfg(not(target_os = "macos"))]
 use quill_core::hyphen::Hyphenator;
 use quill_core::thesaurus::Thesaurus;
 use std::cell::RefCell;
@@ -36,10 +37,28 @@ fn load(name: &str) -> Option<String> {
     String::from_utf8(raw).ok()
 }
 
-pub fn hyphenator() -> Option<&'static Hyphenator> {
+#[cfg(not(target_os = "macos"))]
+fn hyphenator() -> Option<&'static Hyphenator> {
     static H: OnceLock<Option<Hyphenator>> = OnceLock::new();
     H.get_or_init(|| load("hyph_en_US.pat").map(|t| Hyphenator::from_text(&t)))
         .as_ref()
+}
+
+/// Whether hyphenation is to hand: the system's on the Mac, the patterns
+/// file elsewhere.
+pub fn can_hyphenate() -> bool {
+    #[cfg(target_os = "macos")]
+    return crate::mac_hyphen::available();
+    #[cfg(not(target_os = "macos"))]
+    return hyphenator().is_some();
+}
+
+/// Where `word` may break: character counts from its start.
+pub fn hyphen_breaks(word: &str) -> Vec<usize> {
+    #[cfg(target_os = "macos")]
+    return crate::mac_hyphen::breaks(word);
+    #[cfg(not(target_os = "macos"))]
+    return hyphenator().map(|h| h.breaks(word)).unwrap_or_default();
 }
 
 pub fn thesaurus() -> Option<&'static Thesaurus> {
@@ -137,8 +156,10 @@ mod tests {
 
     #[test]
     fn the_data_files_load_and_work() {
-        let h = hyphenator().expect("hyphenation patterns");
-        assert_eq!(h.breaks("hyphenation"), [2, 6]);
+        assert!(can_hyphenate());
+        let b = hyphen_breaks("hyphenation");
+        assert!(b.contains(&2) && b.contains(&6), "{b:?}");
+        assert!(hyphen_breaks("cat").is_empty());
         let t = thesaurus().expect("thesaurus");
         let (head, m) = t.look_up("happier").unwrap();
         assert_eq!(head, "happy");

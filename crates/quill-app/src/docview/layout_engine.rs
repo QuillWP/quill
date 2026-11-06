@@ -1,6 +1,7 @@
 //! Pagination, section geometry, headers, footers, and layout invalidation.
 
 use super::*;
+use quill_core::props::Twips;
 
 impl DocView {
     pub(super) fn options(&self) -> LayoutOptions {
@@ -126,14 +127,15 @@ impl DocView {
                 i += 1;
                 continue;
             }
-            let Some(row) = table::row_at(paras, i) else {
+            let Some(row) = table::row_at_level(paras, i, 1) else {
                 i += 1;
                 continue;
             };
             let props = table::row_props(paras, &row, self.column_twips(i));
             for (k, &(a, b)) in row.cells.iter().enumerate() {
-                let w = ((props.cells[k].width - props.gap) as f32 / 20.0).max(12.0);
-                want[a..=b].fill(w);
+                let avail = props.cells[k].width - props.gap;
+                want[a..=b].fill((avail as f32 / 20.0).max(12.0));
+                size_nested(paras, a, b, 1, avail, &mut want);
             }
             want[row.end] = 12.0;
             i = row.end + 1;
@@ -465,7 +467,7 @@ impl DocView {
             let row = paras[i]
                 .pap
                 .in_table
-                .then(|| table::row_at(paras, i))
+                .then(|| table::row_at_level(paras, i, 1))
                 .flatten();
             // A frame: its paragraphs go where the frame says, and the text
             // after them flows round it.
@@ -550,16 +552,25 @@ impl DocView {
             let pad = props.gap as f32 / 40.0;
             let mut tallest: f32 = 0.0;
             let mut cells = Vec::new();
+            let mut used = Vec::new();
+            let mut nested = Vec::new();
             for (k, &(a, b)) in row.cells.iter().enumerate() {
                 let x0 = lefts[k] as f32 / 20.0;
                 let x1 = x0 + props.cells[k].width as f32 / 20.0;
-                let mut cy = y;
-                for p in a..=b {
-                    tops[p] = cy;
-                    xs[p] = x0 + pad;
-                    cy += height(p);
-                }
-                tallest = tallest.max(cy - y);
+                let end = place_cell(
+                    paras,
+                    &height,
+                    &mut tops,
+                    &mut xs,
+                    (a, b),
+                    1,
+                    x0 + pad,
+                    props.cells[k].width - props.gap,
+                    y,
+                    &mut nested,
+                );
+                tallest = tallest.max(end - y);
+                used.push(end - y);
                 cells.push((a, b, x0, x1));
             }
             let h = match props.height {
@@ -567,6 +578,22 @@ impl DocView {
                 quill_core::RowHeight::AtLeast(t) => tallest.max(t as f32 / 20.0),
                 quill_core::RowHeight::Exactly(t) => t as f32 / 20.0,
             };
+            // Cells set to Center or Bottom move their text down into the
+            // room the row has spare.
+            for (k, &(a, b)) in row.cells.iter().enumerate() {
+                let spare = (h - used[k]).max(0.0);
+                let down = match props.cells[k].valign {
+                    quill_core::props::VAlign::Top => 0.0,
+                    quill_core::props::VAlign::Center => (spare / 2.0).round(),
+                    quill_core::props::VAlign::Bottom => spare,
+                };
+                if down > 0.0 {
+                    tops[a..=b].iter_mut().for_each(|t| *t += down);
+                    for n in nested.iter_mut().filter(|n| n.first >= a && n.last <= b) {
+                        n.top += down;
+                    }
+                }
+            }
             tops[row.end] = y;
             xs[row.end] = cells.last().map_or(0.0, |c| c.3) + pad;
             blocks.push(Block {
@@ -574,7 +601,11 @@ impl DocView {
                 last: row.end,
                 top: y,
                 height: h,
-                row: Some(RowGeom { cells, props }),
+                row: Some(RowGeom {
+                    cells,
+                    props,
+                    nested,
+                }),
             });
             y += h;
             i = row.end + 1;
@@ -743,3 +774,156 @@ impl DocView {
         );
     }
 }
+
+/// A row of a table inside a cell, fitted to the `avail` twips of text in
+/// that cell: it starts at the cell's left, and is narrowed (its cells in
+/// proportion) if it would stick out.
+fn fitted_row(paras: &[Paragraph], row: &table::Row, avail: Twips) -> quill_core::RowProps {
+    let mut props = table::row_props(paras, row, avail);
+    if props.align == Align::Left {
+        props.indent = props.gap / 2;
+    }
+    let width = props.width();
+    let room = avail.max(props.gap + 72);
+    if width > room {
+        for c in &mut props.cells {
+            c.width = ((c.width as i64 * room as i64 / width as i64) as Twips).max(props.gap + 12);
+        }
+    }
+    props
+}
+
+/// The layout widths of the paragraphs in the tables inside cell `a..=b`,
+/// whose cell paragraphs are `level` tables deep and `avail` twips wide.
+fn size_nested(paras: &[Paragraph], a: usize, b: usize, level: u8, avail: Twips, want: &mut [f32]) {
+    let mut j = a;
+    while j <= b {
+        if paras[j].pap.level() > level
+            && let Some(row) = table::row_at_level(paras, j, level + 1)
+            && row.end <= b
+        {
+            let props = fitted_row(paras, &row, avail);
+            for (k, &(ia, ib)) in row.cells.iter().enumerate() {
+                let w = props.cells[k].width - props.gap;
+                want[ia..=ib].fill((w as f32 / 20.0).max(12.0));
+                size_nested(paras, ia, ib, level + 1, w, want);
+            }
+            want[row.end] = 12.0;
+            j = row.end + 1;
+        } else {
+            j += 1;
+        }
+    }
+}
+
+/// Place the paragraphs of cell `a..=b` (`level` tables deep, text
+/// starting at `left` and `avail` twips wide) one under another from `y`,
+/// the tables inside it laid out as rows of cells side by side. Returns
+/// where the cell's contents end.
+#[allow(clippy::too_many_arguments)]
+fn place_cell(
+    paras: &[Paragraph],
+    height: &dyn Fn(usize) -> f32,
+    tops: &mut [f32],
+    xs: &mut [f32],
+    (a, b): (usize, usize),
+    level: u8,
+    left: f32,
+    avail: Twips,
+    y: f32,
+    nested: &mut Vec<NestedRow>,
+) -> f32 {
+    let mut cy = y;
+    let mut j = a;
+    while j <= b {
+        if paras[j].pap.level() > level
+            && let Some(row) = table::row_at_level(paras, j, level + 1)
+            && row.end <= b
+        {
+            let props = fitted_row(paras, &row, avail);
+            let lefts = props.lefts(avail);
+            let pad = props.gap as f32 / 40.0;
+            let mark = nested.len();
+            let mut tallest: f32 = 0.0;
+            let mut cells = Vec::new();
+            let mut used = Vec::new();
+            for (k, &(ia, ib)) in row.cells.iter().enumerate() {
+                let x0 = left + lefts[k] as f32 / 20.0;
+                let x1 = x0 + props.cells[k].width as f32 / 20.0;
+                let end = place_cell(
+                    paras,
+                    height,
+                    tops,
+                    xs,
+                    (ia, ib),
+                    level + 1,
+                    x0 + pad,
+                    props.cells[k].width - props.gap,
+                    cy,
+                    nested,
+                );
+                tallest = tallest.max(end - cy);
+                used.push(end - cy);
+                cells.push((ia, ib, x0, x1));
+            }
+            let h = match props.height {
+                quill_core::RowHeight::Auto => tallest,
+                quill_core::RowHeight::AtLeast(t) => tallest.max(t as f32 / 20.0),
+                quill_core::RowHeight::Exactly(t) => t as f32 / 20.0,
+            };
+            for (k, &(ia, ib)) in row.cells.iter().enumerate() {
+                let spare = (h - used[k]).max(0.0);
+                let down = match props.cells[k].valign {
+                    quill_core::props::VAlign::Top => 0.0,
+                    quill_core::props::VAlign::Center => (spare / 2.0).round(),
+                    quill_core::props::VAlign::Bottom => spare,
+                };
+                if down > 0.0 {
+                    tops[ia..=ib].iter_mut().for_each(|t| *t += down);
+                    for n in nested[mark..]
+                        .iter_mut()
+                        .filter(|n| n.first >= ia && n.last <= ib)
+                    {
+                        n.top += down;
+                    }
+                }
+            }
+            tops[row.end] = cy;
+            xs[row.end] = cells.last().map_or(left, |c| c.3) + pad;
+            nested.push(NestedRow {
+                first: row.first,
+                last: row.end,
+                level: level + 1,
+                top: cy,
+                height: h,
+                geom: RowGeom {
+                    cells,
+                    props,
+                    nested: Vec::new(),
+                },
+            });
+            cy += h;
+            j = row.end + 1;
+        } else {
+            tops[j] = cy;
+            xs[j] = left;
+            // The empty paragraph a cell needs after a table in it takes
+            // only a sliver of room, until something is typed in it.
+            let after_table = j == b
+                && j > a
+                && paras[j].text.is_empty()
+                && paras[j - 1].mark == Mark::RowEnd
+                && paras[j - 1].pap.level() > level;
+            cy += if after_table {
+                height(j).min(AFTER_TABLE)
+            } else {
+                height(j)
+            };
+            j += 1;
+        }
+    }
+    cy
+}
+
+/// The room left under a table at the end of a cell, in points.
+const AFTER_TABLE: f32 = 3.0;

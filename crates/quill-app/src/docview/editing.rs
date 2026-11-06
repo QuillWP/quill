@@ -70,6 +70,11 @@ impl DocView {
     }
 
     pub(super) fn delete_selection(&mut self) -> Position {
+        if let Some(block) = self.cell_block()
+            && !block.whole_table(&self.doc.main.paras)
+        {
+            return self.clear_cells(&block);
+        }
         let (s, e) = self.sel.range();
         if s != e { self.delete_range(s, e) } else { s }
     }
@@ -140,6 +145,9 @@ impl DocView {
         let Some(row) = table::row_at(paras, p) else {
             return;
         };
+        // Tab stays in this table: the rows beside this one are the ones
+        // as deep.
+        let level = paras[row.end].pap.level();
         let k = row.cell_of(p).unwrap_or(row.cells.len());
         let target = if back {
             if k > 0 {
@@ -147,12 +155,13 @@ impl DocView {
             } else {
                 row.first
                     .checked_sub(1)
-                    .and_then(|q| table::row_at(paras, q))
+                    .and_then(|q| table::row_at_level(paras, q, level))
+                    .filter(|r| paras[r.end].pap.level() == level)
                     .and_then(|r| r.cells.last().copied())
             }
         } else if k + 1 < row.cells.len() {
             Some(row.cells[k + 1])
-        } else if let Some(r) = table::row_at(paras, row.end + 1) {
+        } else if let Some(r) = table::row_at_level(paras, row.end + 1, level) {
             r.cells.first().copied()
         } else {
             let props = table::row_props(paras, &row, self.column_twips(row.first));
@@ -351,6 +360,15 @@ impl DocView {
             TableCells => return Effect::Dialog(DialogId::TableCells),
             TableLayout => return Effect::Dialog(DialogId::TableLayout),
             SelectTable => self.select_table(),
+            ZoomIn => return Effect::Zoom(1),
+            LookUp => return Effect::LookUp,
+            ZoomOut => return Effect::Zoom(-1),
+            Zoom100 => return Effect::Zoom(0),
+            InsertRowAbove => crate::table_dialogs::insert_rows(self, false),
+            InsertRowBelow => crate::table_dialogs::insert_rows(self, true),
+            InsertColumnLeft => crate::table_dialogs::insert_columns(self, false),
+            InsertColumnRight => crate::table_dialogs::insert_columns(self, true),
+            ConvertToTable => crate::table_dialogs::convert_command(self),
             UpdateToc => self.update_toc(),
             MakeTocEditable => self.make_toc_editable(),
             StyleDialog => return Effect::Dialog(DialogId::Style),
@@ -520,8 +538,10 @@ impl DocView {
                 let at = if tracking && forward && !self.crosses_table(s, e) {
                     // The deleted text is still there: carry on after it.
                     self.doc.delete_and_end(MAIN, s, e)
-                } else {
+                } else if self.sel.is_empty() {
                     self.delete_range(s, e)
+                } else {
+                    self.delete_selection()
                 };
                 self.typing_chp = None;
                 self.finish_edit(Selection::caret(at));
@@ -584,11 +604,23 @@ impl DocView {
                     return Effect::None;
                 }
                 let (s, e) = self.sel.range();
-                let frag = self.doc.copy(MAIN, s, e);
+                let block = self
+                    .cell_block()
+                    .filter(|b| !b.whole_table(&self.doc.main.paras));
+                let frag = match &block {
+                    Some(b) => {
+                        let tw = self.column_twips(s.para);
+                        self.doc.copy_cells(MAIN, &b.rows, b.from, b.to, tw)
+                    }
+                    None => self.doc.copy(MAIN, s, e),
+                };
                 clip.put(&self.doc, frag);
                 if cmd == Cut {
                     self.doc.begin("Cut", self.sel);
-                    let at = self.delete_range(s, e);
+                    let at = match &block {
+                        Some(b) => self.clear_cells(b),
+                        None => self.delete_range(s, e),
+                    };
                     self.finish_edit(Selection::caret(at));
                 }
             }
@@ -610,6 +642,15 @@ impl DocView {
                     return Effect::None;
                 }
                 self.doc.begin("Paste", self.sel);
+                if let Some(block) = self
+                    .cell_block()
+                    .filter(|b| !b.whole_table(&self.doc.main.paras))
+                {
+                    let at = self.paste_into_cells(&block, content);
+                    self.finish_edit(Selection::caret(at));
+                    self.undo_if_too_large("paste");
+                    return Effect::None;
+                }
                 let at = self.delete_selection();
                 let end = match content {
                     Clip::Rich(rich) => {
@@ -813,16 +854,32 @@ impl DocView {
         }
         let (s, e) = self.sel.range();
         self.doc.begin(label, self.sel);
-        self.doc.format_chars(MAIN, s, e, f);
+        match self.cell_block() {
+            Some(block) => {
+                for (a, b) in block.cells() {
+                    let len = self.doc.main.paras[b].len();
+                    self.doc
+                        .format_chars(MAIN, Position::new(a, 0), Position::new(b, len), &f);
+                }
+            }
+            None => self.doc.format_chars(MAIN, s, e, f),
+        }
         self.finish_edit(self.sel);
     }
 
     /// Apply a paragraph change to the selected paragraphs. A selection
     /// that ends at the very start of a paragraph leaves that one alone.
-    pub fn format_paras(&mut self, label: &'static str, f: impl FnMut(&mut ParaProps)) {
+    pub fn format_paras(&mut self, label: &'static str, mut f: impl FnMut(&mut ParaProps)) {
         let (first, last) = self.selected_paras();
         self.doc.begin(label, self.sel);
-        self.doc.format_paras(MAIN, first, last, f);
+        match self.cell_block() {
+            Some(block) => {
+                for (a, b) in block.cells() {
+                    self.doc.format_paras(MAIN, a, b, &mut f);
+                }
+            }
+            None => self.doc.format_paras(MAIN, first, last, f),
+        }
         let sel = self.sel;
         self.finish_edit(sel);
     }
@@ -977,7 +1034,9 @@ impl DocView {
     /// cell boundaries, as window x positions (for the table ruler).
     pub fn table_ruler(&self) -> Option<(f32, f32, Vec<f32>)> {
         let p = self.sel.focus.para;
-        if !self.doc.main.paras.get(p)?.pap.in_table || self.blocks.is_empty() {
+        // A table inside a cell has no table ruler of its own yet.
+        let pap = &self.doc.main.paras.get(p)?.pap;
+        if !pap.in_table || pap.nest > 0 || self.blocks.is_empty() {
             return None;
         }
         let b = &self.blocks[self.block_at(self.tops[p])];

@@ -22,6 +22,8 @@ pub const MIN_SIZE: u16 = 2;
 pub const MAX_SIZE: u16 = 3276;
 /// Word's most columns in a section.
 pub const MAX_COLUMNS: u16 = 45;
+/// Tables inside tables go this deep; anything deeper is flattened to it.
+pub const MAX_TABLE_LEVEL: u8 = 5;
 /// The longest font or style name kept, in characters: Word allows 255
 /// for a style and far fewer for a font. A damaged file can have pages
 /// of data where a name should be, and every run would repeat it.
@@ -213,6 +215,7 @@ impl ParaProps {
         if let Some(f) = &mut self.frame {
             frame(f);
         }
+        self.nest = self.nest.min(MAX_TABLE_LEVEL - 1);
     }
 }
 
@@ -254,6 +257,7 @@ impl Paragraph {
 impl Story {
     pub fn keep_in_bounds(&mut self) {
         self.paras.iter_mut().for_each(Paragraph::keep_in_bounds);
+        crate::table::repair(&mut self.paras);
     }
 }
 

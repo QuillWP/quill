@@ -87,6 +87,14 @@ impl App {
         let Some(action) = action else {
             return;
         };
+        // While a text field in a dialog is being edited (Find, Replace and
+        // the like), Cut, Copy, Paste, Select All and Undo are the field's.
+        #[cfg(target_os = "macos")]
+        if let Action::Cmd(cmd) = &action
+            && crate::mac_dialog::edit_in_field(*cmd)
+        {
+            return;
+        }
         let front = self
             .front
             .filter(|id| self.index(*id).is_some())
@@ -117,7 +125,10 @@ impl App {
                 self.new_window(el, crate::settings::get().new_document(), None)
             }
             (Action::Cmd(Cmd::Open), None) => self.open_dialog(el, None),
-            (Action::Cmd(Cmd::Quit), None) => el.exit(),
+            (Action::Cmd(Cmd::Quit), None) => {
+                crate::settings::update(|s| s.last_session.clear());
+                el.exit()
+            }
             (_, None) => {}
             (action, Some(id)) => {
                 let Some(i) = self.index(id) else {

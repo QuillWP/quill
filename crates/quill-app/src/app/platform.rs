@@ -83,6 +83,23 @@ impl App {
             w.window.request_redraw();
             return;
         }
+        // A box or the button of the color pop-out, which are not items of
+        // the dialog.
+        if dialog.popout.is_some()
+            && (id.starts_with("std") || id.starts_with("cus") || id == "edit")
+        {
+            let outcome = if id == "edit" {
+                Outcome::Button("edit")
+            } else {
+                Outcome::Swatch {
+                    id,
+                    double: choice.is_some_and(|(_, double, _)| double),
+                }
+            };
+            w.st.dialog_outcome(outcome, clip);
+            w.window.request_redraw();
+            return;
+        }
         native.apply_to_model(dialog, id, choice);
         let outcome = crate::mac_dialog::NativeDialog::outcome(dialog, id);
         w.st.dialog_outcome(outcome, clip);

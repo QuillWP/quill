@@ -362,7 +362,7 @@ pub fn character_spec(
         variants: Vec::new(),
     }];
     family_choices.extend_from_slice(fonts);
-    let (mut d, _) = crate::format_dialogs::character(view, &family_choices);
+    let (mut d, _) = crate::format_dialogs::character_for_find(view, &family_choices);
     let names = d.options("font");
     let font = spec
         .font

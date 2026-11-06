@@ -262,6 +262,9 @@ fn pap(out: &mut String, p: &ParaProps) {
     let _ = write!(out, "\\s{}", p.style);
     if p.in_table {
         out.push_str("\\intbl");
+        if p.nest > 0 {
+            let _ = write!(out, "\\itap{}", p.nest + 1);
+        }
     }
     if let Some(f) = &p.frame {
         frame(out, f);
@@ -377,7 +380,16 @@ fn pict(out: &mut String, pic: &quill_core::Picture) {
 
 /// A paragraph of the text, or (`in_note`) of a footnote, where a
 /// reference is the note's own mark.
-fn paragraph(out: &mut String, doc: &Document, p: &Paragraph, tables: &Tables, in_note: bool) {
+/// `nested` is the row of a row mark in a table inside a cell, for its
+/// definition: a nested row is defined where it ends.
+fn paragraph(
+    out: &mut String,
+    doc: &Document,
+    p: &Paragraph,
+    tables: &Tables,
+    in_note: bool,
+    nested: Option<&RowProps>,
+) {
     if p.mark == Mark::RowEnd {
         // The end of a row is a paragraph mark with its own format, or
         // it would take the last cell's.
@@ -385,7 +397,15 @@ fn paragraph(out: &mut String, doc: &Document, p: &Paragraph, tables: &Tables, i
         pap(out, &p.pap);
         out.push_str("\\plain");
         chp(out, &p.mark_chp, tables);
-        out.push_str("\\row\n");
+        match nested {
+            // Programs that cannot nest tables read the group after it.
+            Some(row) => {
+                out.push_str("{\\*\\nesttableprops");
+                row_definition(out, row);
+                out.push_str("\\nestrow}{\\nonesttables\\par}\n");
+            }
+            None => out.push_str("\\row\n"),
+        }
         return;
     }
     out.push_str("\\pard\\plain");
@@ -455,6 +475,7 @@ fn paragraph(out: &mut String, doc: &Document, p: &Paragraph, tables: &Tables, i
     out.push_str("\\plain");
     chp(out, &p.mark_chp, tables);
     out.push_str(match p.mark {
+        Mark::CellEnd if p.pap.nest > 0 => "\\nestcell\n",
         Mark::CellEnd => "\\cell\n",
         Mark::SectionBreak => "\\sect\n",
         _ => "\\par\n",
@@ -601,6 +622,11 @@ fn row_definition(out: &mut String, row: &RowProps) {
     let mut edge = row.indent - row.gap / 2;
     for cell in &row.cells {
         edge += cell.width;
+        match cell.valign {
+            quill_core::props::VAlign::Top => {}
+            quill_core::props::VAlign::Center => out.push_str("\\clvertalc"),
+            quill_core::props::VAlign::Bottom => out.push_str("\\clvertalb"),
+        }
         let _ = write!(out, "\\cellx{edge}");
     }
     let _ = write!(
@@ -625,20 +651,42 @@ fn row_definition(out: &mut String, row: &RowProps) {
         ] {
             let _ = write!(out, ",{},{}", border_style(line.style), line.space);
         }
+        match cell.valign {
+            quill_core::props::VAlign::Top => {}
+            quill_core::props::VAlign::Center => out.push_str(",1"),
+            quill_core::props::VAlign::Bottom => out.push_str(",2"),
+        }
     }
     out.push_str("}\n");
 }
 
-/// Before the first paragraph of a table row, the row's definition.
+/// Before the first paragraph of a table row, the row's definition. A
+/// table inside a cell has its rows defined where they end instead.
 fn row_start(out: &mut String, doc: &Document, paras: &[Paragraph], i: usize) {
-    let starts_row = i == 0 || !paras[i - 1].pap.in_table || paras[i - 1].mark == Mark::RowEnd;
-    if paras[i].pap.in_table
+    let starts_row = i == 0
+        || paras[i - 1].pap.level() == 0
+        || (paras[i - 1].mark == Mark::RowEnd && paras[i - 1].pap.level() == 1);
+    if paras[i].pap.level() >= 1
         && starts_row
-        && let Some(row) = quill_core::table::row_at(paras, i)
+        && let Some(row) = quill_core::table::row_at_level(paras, i, 1)
     {
         let props = quill_core::table::row_props(paras, &row, doc.props.text_width());
         row_definition(out, &props);
     }
+}
+
+/// The row a nested row's end mark closes, for its definition.
+fn nested_row(doc: &Document, paras: &[Paragraph], i: usize) -> Option<RowProps> {
+    let p = &paras[i];
+    if p.mark != Mark::RowEnd || p.pap.nest == 0 {
+        return None;
+    }
+    let row = quill_core::table::row_at_level(paras, i, p.pap.level())?;
+    Some(quill_core::table::row_props(
+        paras,
+        &row,
+        doc.props.text_width(),
+    ))
 }
 
 /// The paragraphs of a header, footer, note or annotation, with their
@@ -646,7 +694,14 @@ fn row_start(out: &mut String, doc: &Document, paras: &[Paragraph], i: usize) {
 fn story(out: &mut String, doc: &Document, paras: &[Paragraph], tables: &Tables, in_note: bool) {
     for (i, p) in paras.iter().enumerate() {
         row_start(out, doc, paras, i);
-        paragraph(out, doc, p, tables, in_note);
+        paragraph(
+            out,
+            doc,
+            p,
+            tables,
+            in_note,
+            nested_row(doc, paras, i).as_ref(),
+        );
     }
 }
 
@@ -851,7 +906,14 @@ pub fn write(doc: &Document) -> Vec<u8> {
     headers(&mut out, doc, section_index, &tables);
     for (i, para) in doc.main.paras.iter().enumerate() {
         row_start(&mut out, doc, &doc.main.paras, i);
-        paragraph(&mut out, doc, para, &tables, false);
+        paragraph(
+            &mut out,
+            doc,
+            para,
+            &tables,
+            false,
+            nested_row(doc, &doc.main.paras, i).as_ref(),
+        );
         if para.mark == Mark::SectionBreak && i + 1 < doc.main.paras.len() {
             section_index += 1;
             section(&mut out, doc.section_props_at(i + 1));

@@ -130,6 +130,23 @@ impl DocView {
         n
     }
 
+    /// The word for Look Up, with its font name and size in points and
+    /// where its baseline starts, in window coordinates before the
+    /// document zoom.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn look_up_spot(&self) -> Option<(String, String, f32, f32, f32)> {
+        let (a, b) = self.word_at_caret()?;
+        let p = &self.doc.main.paras[a.para];
+        let word = p.text[a.offset..b.offset].to_string();
+        let l = self.layout(a.para);
+        let (li, x) = l.caret(a.offset, false);
+        let line = &l.lines[li];
+        let (wx, wy) = self.to_window(self.xs[a.para] + x, self.tops[a.para] + line.top);
+        let chp = p.chp_of_char(a.offset);
+        let font = self.doc.font_name(chp.font).to_string();
+        Some((word, font, chp.size as f32 / 2.0, wx, wy + line.baseline))
+    }
+
     /// The word the Thesaurus starts from: the selection's first word, or
     /// the word at the insertion point.
     pub fn word_at_caret(&self) -> Option<(Position, Position)> {
@@ -159,7 +176,9 @@ impl DocView {
         end: Option<Position>,
         capitals: bool,
     ) -> Option<HyphenSpot> {
-        let h = crate::language::hyphenator()?;
+        if !crate::language::can_hyphenate() {
+            return None;
+        }
         let paras = &self.doc.main.paras;
         for (i, p) in paras.iter().enumerate().skip(from.para) {
             if end.is_some_and(|e| i > e.para) {
@@ -195,7 +214,7 @@ impl DocView {
                 {
                     continue;
                 }
-                let breaks = h.breaks(word);
+                let breaks = crate::language::hyphen_breaks(word);
                 let glyph_x = |off: usize| {
                     l.line_glyphs(next)
                         .iter()

@@ -81,6 +81,16 @@ pub fn describe(cmd: Cmd) -> String {
             "Marks the annotation at the insertion point resolved, or open again (toggle)."
         }
         DeleteAnnotation => "Deletes the annotation at the insertion point and its replies.",
+        InsertRowAbove => "Inserts a row above the selected rows, across the whole table.",
+        InsertRowBelow => "Inserts a row below the selected rows, across the whole table.",
+        InsertColumnLeft => "Inserts a column left of the selected cells, in every row.",
+        InsertColumnRight => "Inserts a column right of the selected cells, in every row.",
+        ConvertToTable => {
+            "Turns the selected tab or comma separated lines into a table, one line to a row."
+        }
+        LookUp => {
+            "Shows the system's definitions and thesaurus for the word at the insertion point."
+        }
         ShowChanges => "Shows tracked changes marked up, or the text with them accepted (toggle).",
         _ => "",
     };

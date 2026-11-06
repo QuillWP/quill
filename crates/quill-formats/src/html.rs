@@ -1,7 +1,7 @@
 //! Basic self-contained HTML5: named paragraph styles become CSS classes,
 //! direct formatting becomes inline CSS, and pictures use data URLs.
 
-use crate::export::{Block, base64, blocks, escape, points};
+use crate::export::{Block, base64, blocks_at, escape, points};
 use quill_core::Document;
 use std::fmt::Write as _;
 
@@ -143,19 +143,49 @@ fn paragraph_css(p: &ParaProps) -> String {
         ("bottom", p.borders.bottom),
         ("left", p.borders.left),
     ] {
-        let border = match line.style {
-            BorderStyle::None => "none",
-            BorderStyle::Dotted => "0.5pt dotted",
-            BorderStyle::Hairline => "0.25pt solid",
-            BorderStyle::Single => "0.5pt solid",
-            BorderStyle::Thick => "1.5pt solid",
-            BorderStyle::Double => "1.5pt double",
-        };
         let _ = write!(
             out,
-            "border-{edge}:{border};padding-{edge}:{}pt;",
+            "border-{edge}:{};padding-{edge}:{}pt;",
+            border_css(line.style),
             points(line.space)
         );
+    }
+    out
+}
+
+fn border_css(style: BorderStyle) -> &'static str {
+    match style {
+        BorderStyle::None => "none",
+        BorderStyle::Dotted => "0.5pt dotted",
+        BorderStyle::Hairline => "0.25pt solid",
+        BorderStyle::Single => "0.5pt solid",
+        BorderStyle::Thick => "1.5pt solid",
+        BorderStyle::Double => "1.5pt double",
+    }
+}
+
+/// A table cell's borders and shading. The page style gives every `td` a
+/// thin gray border, so each edge is written, "none" included, or a
+/// borderless cell would gain one.
+fn cell_css(cell: &quill_core::props::CellProps) -> String {
+    let b = &cell.borders;
+    let mut out = String::new();
+    if b.top.style == b.bottom.style && b.top.style == b.left.style && b.top.style == b.right.style
+    {
+        let _ = write!(out, ";border:{}", border_css(b.top.style));
+    } else {
+        for (edge, line) in [
+            ("top", b.top),
+            ("right", b.right),
+            ("bottom", b.bottom),
+            ("left", b.left),
+        ] {
+            let _ = write!(out, ";border-{edge}:{}", border_css(line.style));
+        }
+    }
+    if cell.shading > 0 {
+        let gray = 255 - (255u32 * cell.shading.min(1000) as u32 / 1000);
+        let _ = write!(out, ";background-color:#{gray:02x}{gray:02x}{gray:02x}");
     }
     out
 }
@@ -299,7 +329,12 @@ impl Writer<'_> {
     }
 
     fn story(&self, paras: &[Paragraph], out: &mut String, note: bool) {
-        for block in blocks(paras) {
+        self.story_at(paras, 0, out, note);
+    }
+
+    /// The paragraphs of a story, or of a cell `level` tables deep.
+    fn story_at(&self, paras: &[Paragraph], level: u8, out: &mut String, note: bool) {
+        for block in blocks_at(paras, level) {
             match block {
                 Block::Paragraph(p) => self.paragraph(p, out, note),
                 Block::Table(rows) => {
@@ -309,14 +344,18 @@ impl Writer<'_> {
                             quill_core::table::row_props(paras, &row, self.doc.props.text_width());
                         out.push_str("<tr>");
                         for (i, (a, b)) in row.cells.iter().copied().enumerate() {
+                            let valign = match props.cells[i].valign {
+                                quill_core::props::VAlign::Top => "",
+                                quill_core::props::VAlign::Center => ";vertical-align:middle",
+                                quill_core::props::VAlign::Bottom => ";vertical-align:bottom",
+                            };
                             let _ = write!(
                                 out,
-                                "<td style=\"width:{}pt\">",
-                                points(props.cells[i].width)
+                                "<td style=\"width:{}pt{valign}{}\">",
+                                points(props.cells[i].width),
+                                cell_css(&props.cells[i])
                             );
-                            for p in &paras[a..=b] {
-                                self.paragraph(p, out, note);
-                            }
+                            self.story_at(&paras[a..=b], level + 1, out, note);
                             out.push_str("</td>");
                         }
                         out.push_str("</tr>\n");

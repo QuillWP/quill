@@ -1054,7 +1054,8 @@ impl<'a> Reader<'a> {
         if p.text.is_empty() && !self.keep && !broke {
             return;
         }
-        p.pap.in_table = self.tables > 0;
+        p.pap
+            .set_level(self.tables.min(quill_core::limits::MAX_TABLE_LEVEL as u32) as u8);
         out.push(p);
         self.keep = false;
     }
@@ -1322,9 +1323,9 @@ impl<'a> Reader<'a> {
         }
         let cells_of =
             |row: &'a Element| row.elements().filter(|c| c.name == "td" || c.name == "th");
-        if self.tables > 0 {
-            // Tables do not nest in the original: the inner table's text becomes
-            // paragraphs of the outer cell.
+        if self.tables >= quill_core::limits::MAX_TABLE_LEVEL as u32 {
+            // Past the depth Quill keeps, the inner table's text becomes
+            // paragraphs of the cell it is in.
             self.report.note(notes::NESTED_TABLES);
             for row in rows {
                 for cell in cells_of(row) {
@@ -1389,9 +1390,15 @@ impl<'a> Reader<'a> {
                 self.children(cell, &cf, out);
                 self.path.pop();
                 self.flush(out);
-                if out.len() == start {
+                // A cell ends in a paragraph of its own, even after a table
+                // in it.
+                if out.len() == start
+                    || out
+                        .last()
+                        .is_some_and(|p| p.pap.level() as u32 > self.tables)
+                {
                     let mut p = Paragraph::new(cf.pap.clone(), cf.chp);
-                    p.pap.in_table = true;
+                    p.pap.set_level(self.tables as u8);
                     out.push(p);
                 }
                 let last = out.last_mut().expect("pushed");
@@ -1421,6 +1428,7 @@ impl<'a> Reader<'a> {
                         ..Borders::default()
                     },
                     shading: 0,
+                    valign: Default::default(),
                 });
             }
             self.tables -= 1;
@@ -1430,7 +1438,7 @@ impl<'a> Reader<'a> {
             }
             let n = self.doc.styles.get(0);
             let mut end = Paragraph::new(n.pap.clone(), row_chp);
-            end.pap.in_table = true;
+            end.pap.set_level(self.tables as u8 + 1);
             end.mark = Mark::RowEnd;
             end.row = Some(Box::new(RowProps {
                 cells,

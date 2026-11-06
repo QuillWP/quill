@@ -49,6 +49,20 @@ pub enum Kind {
     /// An area the dialog's owner draws and handles clicks in (a preview,
     /// a list of samples, an icon).
     Custom,
+    /// A box of one color (0xRRGGBB), with a thin frame. As a `button`
+    /// it can be pressed, like a color well.
+    Swatch {
+        rgb: u32,
+        button: bool,
+    },
+    /// A slider from 0 to `max`, its track shading from the color `from`
+    /// to `to`. Pressing or dragging it sets `value` and reports a change.
+    Slider {
+        value: i32,
+        max: i32,
+        from: u32,
+        to: u32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -87,10 +101,37 @@ pub enum Outcome {
     /// A custom item was clicked at this point, relative to its top left;
     /// the flag is whether Shift was down.
     Clicked(&'static str, f32, f32, bool),
+    /// A box of a pop-out was pressed; `double` is whether it was the
+    /// second press of a double-click.
+    Swatch {
+        id: &'static str,
+        double: bool,
+    },
     /// OK (or Return), Cancel (or Escape, ⌘.), or Apply.
     Ok,
     Cancel,
     Apply,
+}
+
+/// A small panel that pops out beside one of a dialog's items: boxes of
+/// color, and perhaps a button. Its places are in points from its own top
+/// left; it opens below its `anchor` item.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Popout {
+    pub anchor: &'static str,
+    pub size: (f32, f32),
+    pub items: Vec<PopItem>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PopItem {
+    pub id: &'static str,
+    pub rect: Rect,
+    /// The color of a box, or None for an empty one (or a button).
+    pub rgb: Option<u32>,
+    pub selected: bool,
+    /// A button's text; empty for a box.
+    pub label: &'static str,
 }
 
 pub struct Dialog {
@@ -119,6 +160,11 @@ pub struct Dialog {
     /// Drawn as inactive: a modeless window while the document has the
     /// keyboard.
     pub inactive: bool,
+    /// The slider being dragged.
+    held_slider: Option<usize>,
+    /// A panel popped out beside an item, and the last box pressed in it.
+    pub popout: Option<Popout>,
+    pop_click: Option<(std::time::Instant, &'static str)>,
     /// A plain box with no title bar, like Go To and alerts.
     pub plain: bool,
 }
@@ -157,6 +203,9 @@ impl Dialog {
             close_box: false,
             modeless: false,
             inactive: false,
+            held_slider: None,
+            popout: None,
+            pop_click: None,
             plain: false,
         }
     }
@@ -423,6 +472,106 @@ impl Dialog {
             .push(Item::new(id, "", Rect::new(x, y, w, h), Kind::Custom));
     }
 
+    /// A box of the color `rgb` (0xRRGGBB).
+    pub fn swatch(&mut self, id: &'static str, x: f32, y: f32, w: f32, h: f32, rgb: u32) {
+        self.items.push(Item::new(
+            id,
+            "",
+            Rect::new(x, y, w, h),
+            Kind::Swatch { rgb, button: false },
+        ));
+    }
+
+    /// A box of the color `rgb` that can be pressed, like a color well.
+    pub fn swatch_button(&mut self, id: &'static str, x: f32, y: f32, w: f32, h: f32, rgb: u32) {
+        self.items.push(Item::new(
+            id,
+            "",
+            Rect::new(x, y, w, h),
+            Kind::Swatch { rgb, button: true },
+        ));
+    }
+
+    pub fn set_swatch(&mut self, id: &str, color: u32) {
+        if let Some(Item {
+            kind: Kind::Swatch { rgb, .. },
+            ..
+        }) = self.items.iter_mut().find(|i| i.id == id)
+        {
+            *rgb = color;
+        }
+    }
+
+    /// The color of the swatch `id`.
+    pub fn swatch_rgb(&self, id: &str) -> Option<u32> {
+        match self.items.iter().find(|i| i.id == id).map(|i| &i.kind) {
+            Some(Kind::Swatch { rgb, .. }) => Some(*rgb),
+            _ => None,
+        }
+    }
+
+    /// A slider from 0 to `max`, with its track going from color `from`
+    /// to color `to`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn slider(
+        &mut self,
+        id: &'static str,
+        x: f32,
+        y: f32,
+        w: f32,
+        max: i32,
+        value: i32,
+        (from, to): (u32, u32),
+    ) {
+        self.items.push(Item::new(
+            id,
+            "",
+            Rect::new(x, y, w, 16.0),
+            Kind::Slider {
+                value: value.clamp(0, max),
+                max,
+                from,
+                to,
+            },
+        ));
+    }
+
+    pub fn slider_value(&self, id: &str) -> i32 {
+        match self.items.iter().find(|i| i.id == id).map(|i| &i.kind) {
+            Some(Kind::Slider { value, .. }) => *value,
+            _ => 0,
+        }
+    }
+
+    pub fn set_slider(&mut self, id: &str, new: i32, track: (u32, u32)) {
+        if let Some(Item {
+            kind:
+                Kind::Slider {
+                    value,
+                    max,
+                    from,
+                    to,
+                },
+            ..
+        }) = self.items.iter_mut().find(|i| i.id == id)
+        {
+            *value = new.clamp(0, *max);
+            (*from, *to) = track;
+        }
+    }
+
+    /// Whether the dialog has items only its own canvas drawing can show
+    /// (an owner-drawn area, a color box, a slider), so it cannot be a
+    /// native window.
+    pub fn needs_canvas(&self) -> bool {
+        self.items.iter().any(|i| {
+            matches!(
+                i.kind,
+                Kind::Custom | Kind::Swatch { .. } | Kind::Slider { .. }
+            )
+        })
+    }
+
     pub fn enable(&mut self, id: &str, on: bool) {
         if let Some(i) = self.items.iter_mut().find(|i| i.id == id) {
             i.enabled = on;
@@ -659,12 +808,69 @@ impl Dialog {
                 self.draw_item(c, label, it, focused, self.pressed == Some(i));
             }
         }
+        self.draw_popout(c, label);
         if let Some(popup) = &self.popup {
             menu::draw_menu(c, label, &popup.menu, &popup.open);
             if let Some((parent, open)) = &popup.submenu
                 && let Some(child) = popup.menu.items[*parent].submenu.as_ref()
             {
                 menu::draw_menu(c, label, child, open);
+            }
+        }
+    }
+
+    /// Where the popped-out panel is: under its anchor, kept inside the
+    /// dialog's width.
+    fn popout_rect(&self) -> Option<Rect> {
+        let p = self.popout.as_ref()?;
+        let anchor = self.at(self.items.iter().find(|i| i.id == p.anchor)?.rect);
+        let f = self.frame();
+        let x = anchor.x.min(f.right() - p.size.0 - 8.0).max(f.x + 8.0);
+        Some(Rect::new(x, anchor.bottom() + 2.0, p.size.0, p.size.1))
+    }
+
+    fn draw_popout(&self, c: &mut Canvas, label: &mut Label) {
+        let (Some(p), Some(panel)) = (&self.popout, self.popout_rect()) else {
+            return;
+        };
+        // A soft shadow, then the panel.
+        c.fill(
+            Rect::new(panel.x + 1.0, panel.y + 2.0, panel.w, panel.h),
+            0xC4C4C4,
+        );
+        modern_box(c, panel, 6.0, 0xA8A8A8, 0xFFFFFF);
+        for it in &p.items {
+            let r = Rect::new(
+                panel.x + it.rect.x,
+                panel.y + it.rect.y,
+                it.rect.w,
+                it.rect.h,
+            );
+            if !it.label.is_empty() {
+                modern_box(c, r, 5.0, 0xB5B5B5, 0xF4F4F4);
+                let w = label.width(MODERN_FONT, SIZE, false, it.label);
+                label.draw(
+                    c,
+                    MODERN_FONT,
+                    SIZE,
+                    false,
+                    r.x + (r.w - w) / 2.0,
+                    r.y + r.h / 2.0 + 4.5,
+                    it.label,
+                    0x202020,
+                );
+                continue;
+            }
+            match it.rgb {
+                Some(rgb) => {
+                    c.fill(r, rgb);
+                    c.frame(r, 0x808080);
+                }
+                None => c.frame(r, 0xC8C8C8),
+            }
+            if it.selected {
+                c.frame(r.inset(-2.0), 0x0A84FF);
+                c.frame(r.inset(-3.0), 0x0A84FF);
             }
         }
     }
@@ -857,6 +1063,48 @@ impl Dialog {
                 }
             }
             Kind::Custom => {}
+            Kind::Swatch { rgb, button } => {
+                c.fill(r, *rgb);
+                c.frame(
+                    r,
+                    if *button && pressed {
+                        0x202020
+                    } else {
+                        0x808080
+                    },
+                );
+            }
+            Kind::Slider {
+                value,
+                max,
+                from,
+                to,
+            } => {
+                let track = Rect::new(r.x, r.y + 3.0, r.w, r.h - 6.0);
+                // The track shades from one end color to the other.
+                let steps = (track.w / 2.0).ceil().max(1.0) as usize;
+                let mix = |a: u32, b: u32, t: f32| -> u32 {
+                    let ch = |sh: u32| {
+                        let (a, b) = (((a >> sh) & 0xFF) as f32, ((b >> sh) & 0xFF) as f32);
+                        (a + (b - a) * t).round() as u32
+                    };
+                    ch(16) << 16 | ch(8) << 8 | ch(0)
+                };
+                for k in 0..steps {
+                    let x = track.x + k as f32 * track.w / steps as f32;
+                    let w = track.w / steps as f32 + 0.5;
+                    let t = k as f32 / (steps - 1).max(1) as f32;
+                    c.fill(
+                        Rect::new(x, track.y, w.min(track.right() - x), track.h),
+                        mix(*from, *to, t),
+                    );
+                }
+                c.frame(track, 0x808080);
+                let x = r.x + 4.0 + (r.w - 8.0) * *value as f32 / (*max).max(1) as f32;
+                let knob = Rect::new((x - 3.0).round(), r.y, 7.0, r.h);
+                c.fill(knob, 0xFFFFFF);
+                c.frame(knob, 0x404040);
+            }
         }
     }
 
@@ -865,12 +1113,48 @@ impl Dialog {
     fn item_at(&self, x: f32, y: f32) -> Option<usize> {
         self.items.iter().position(|it| {
             it.enabled
-                && !matches!(it.kind, Kind::Text | Kind::Note | Kind::Group)
+                && !matches!(
+                    it.kind,
+                    Kind::Text | Kind::Note | Kind::Group | Kind::Swatch { button: false, .. }
+                )
                 && self.at(it.rect).contains(x, y)
         })
     }
 
     pub fn mouse_down(&mut self, x: f32, y: f32, shift: bool, label: &mut Label) -> Outcome {
+        if let Some(panel) = self.popout_rect() {
+            if panel.contains(x, y) {
+                let (lx, ly) = (x - panel.x, y - panel.y);
+                let hit = self
+                    .popout
+                    .as_ref()
+                    .and_then(|p| p.items.iter().find(|it| it.rect.contains(lx, ly)))
+                    .map(|it| (it.id, !it.label.is_empty(), it.rgb.is_some()));
+                return match hit {
+                    Some((id, true, _)) => Outcome::Button(id),
+                    Some((id, false, true)) => {
+                        let now = std::time::Instant::now();
+                        let double = self.pop_click.is_some_and(|(t, last)| {
+                            last == id && now - t < std::time::Duration::from_millis(450)
+                        });
+                        self.pop_click = (!double).then_some((now, id));
+                        Outcome::Swatch { id, double }
+                    }
+                    _ => Outcome::None,
+                };
+            }
+            // A press anywhere else puts the panel away; one on the item it
+            // came out of does no more than that.
+            let anchor = self
+                .popout
+                .as_ref()
+                .and_then(|p| self.items.iter().find(|i| i.id == p.anchor))
+                .map(|i| self.at(i.rect));
+            self.popout = None;
+            if anchor.is_some_and(|a| a.contains(x, y)) {
+                return Outcome::None;
+            }
+        }
         if let Some(popup) = &mut self.popup {
             let in_parent = popup.open.rect.contains(x, y);
             let in_child = popup
@@ -897,6 +1181,10 @@ impl Dialog {
             Kind::Custom => {
                 let r = self.at(self.items[i].rect);
                 return Outcome::Clicked(self.items[i].id, x - r.x, y - r.y, shift);
+            }
+            Kind::Slider { .. } => {
+                self.held_slider = Some(i);
+                return self.drag_slider(x);
             }
             Kind::Popup {
                 options,
@@ -994,9 +1282,31 @@ impl Dialog {
         Outcome::None
     }
 
-    pub fn mouse_move(&mut self, x: f32, y: f32, label: &mut Label) {
+    /// Move the held slider to the pointer's x.
+    fn drag_slider(&mut self, x: f32) -> Outcome {
+        let Some(i) = self.held_slider else {
+            return Outcome::None;
+        };
+        let r = self.at(self.items[i].rect);
+        let id = self.items[i].id;
+        let Kind::Slider { value, max, .. } = &mut self.items[i].kind else {
+            return Outcome::None;
+        };
+        let t = ((x - r.x - 4.0) / (r.w - 8.0).max(1.0)).clamp(0.0, 1.0);
+        let new = (t * *max as f32).round() as i32;
+        if new == *value {
+            return Outcome::None;
+        }
+        *value = new;
+        Outcome::Changed(id)
+    }
+
+    pub fn mouse_move(&mut self, x: f32, y: f32, label: &mut Label) -> Outcome {
         if let Some((dx, dy)) = self.drag {
             self.origin = ((x - dx).round(), (y - dy).max(20.0).round());
+        }
+        if self.held_slider.is_some() {
+            return self.drag_slider(x);
         }
         if let Some(popup) = &mut self.popup {
             if let Some((parent, child_open)) = &mut popup.submenu
@@ -1005,7 +1315,7 @@ impl Dialog {
             {
                 child_open.hot = menu::item_at(child, child_open, x, y);
                 popup.open.hot = Some(*parent);
-                return;
+                return Outcome::None;
             }
             popup.open.hot = menu::item_at(&popup.menu, &popup.open, x, y);
             if let Some(k) = popup.open.hot
@@ -1019,6 +1329,7 @@ impl Dialog {
                 popup.submenu = None;
             }
         }
+        Outcome::None
     }
 
     /// Scroll an open pop-up with a wheel or trackpad. The submenu under
@@ -1044,6 +1355,9 @@ impl Dialog {
 
     pub fn mouse_up(&mut self, x: f32, y: f32) -> Outcome {
         self.drag = None;
+        if self.held_slider.take().is_some() {
+            return Outcome::None;
+        }
         if let Some(popup) = &mut self.popup {
             if popup.just_opened {
                 popup.just_opened = false;
@@ -1113,6 +1427,7 @@ impl Dialog {
                 }
                 Outcome::Changed(id)
             }
+            Kind::Swatch { button: true, .. } => Outcome::Button(id),
             Kind::Button { .. } => match id {
                 "ok" => Outcome::Ok,
                 "cancel" => Outcome::Cancel,

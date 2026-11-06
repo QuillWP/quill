@@ -1,10 +1,12 @@
 //! OpenDocument Text 1.3 export. No private document payload or external tools.
 
-use crate::export::{Block, blocks, escape, points};
+use crate::export::{Block, blocks_at, escape, points};
 use crate::zip;
 use quill_core::Document;
 use quill_core::para::{Paragraph, chars};
-use quill_core::props::{Align, CharProps, LineSpacing, ParaProps, Underline};
+use quill_core::props::{
+    Align, BorderStyle, CellProps, CharProps, LineSpacing, ParaProps, Underline, VAlign,
+};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
@@ -111,6 +113,19 @@ fn para_props(p: &ParaProps) -> String {
     )
 }
 
+/// A border as `fo:border` writes it. The widths are chosen so the reader
+/// maps each back to the same line style.
+fn border_value(style: BorderStyle) -> &'static str {
+    match style {
+        BorderStyle::None => "none",
+        BorderStyle::Dotted => "0.5pt dotted #000000",
+        BorderStyle::Hairline => "0.25pt solid #000000",
+        BorderStyle::Single => "0.5pt solid #000000",
+        BorderStyle::Thick => "3pt solid #000000",
+        BorderStyle::Double => "1.5pt double #000000",
+    }
+}
+
 struct Writer<'a> {
     doc: &'a Document,
     automatic: String,
@@ -141,6 +156,39 @@ impl Writer<'_> {
             } else {
                 para_props(p)
             }
+        );
+        name
+    }
+
+    /// A table-cell style for a cell's borders, shading and vertical
+    /// alignment, one per distinct set.
+    fn cell_style(&mut self, cell: &CellProps) -> String {
+        let name = self.id("c");
+        let b = &cell.borders;
+        let mut props = String::new();
+        for (edge, line) in [
+            ("top", b.top),
+            ("bottom", b.bottom),
+            ("left", b.left),
+            ("right", b.right),
+        ] {
+            let _ = write!(props, r#" fo:border-{edge}="{}""#, border_value(line.style));
+        }
+        if cell.shading > 0 {
+            let gray = 255 - (255u32 * cell.shading.min(1000) as u32 / 1000);
+            let _ = write!(
+                props,
+                r##" fo:background-color="#{gray:02x}{gray:02x}{gray:02x}""##
+            );
+        }
+        match cell.valign {
+            VAlign::Top => {}
+            VAlign::Center => props.push_str(r#" style:vertical-align="middle""#),
+            VAlign::Bottom => props.push_str(r#" style:vertical-align="bottom""#),
+        }
+        let _ = write!(
+            self.automatic,
+            r#"<style:style style:name="{name}" style:family="table-cell"><style:table-cell-properties{props}/></style:style>"#
         );
         name
     }
@@ -240,7 +288,12 @@ impl Writer<'_> {
     }
 
     fn story(&mut self, paras: &[Paragraph], out: &mut String) {
-        for block in blocks(paras) {
+        self.story_at(paras, 0, out);
+    }
+
+    /// The paragraphs of a story, or of a cell `level` tables deep.
+    fn story_at(&mut self, paras: &[Paragraph], level: u8, out: &mut String) {
+        for block in blocks_at(paras, level) {
             match block {
                 Block::Paragraph(p) => self.paragraph(p, out, false),
                 Block::Table(rows) => {
@@ -252,12 +305,16 @@ impl Writer<'_> {
                     );
                     for row in rows {
                         out.push_str("<table:table-row>");
+                        let props =
+                            quill_core::table::row_props(paras, &row, self.doc.props.text_width());
                         let n = row.cells.len();
-                        for (a, b) in row.cells {
-                            out.push_str("<table:table-cell office:value-type=\"string\">");
-                            for p in &paras[a..=b] {
-                                self.paragraph(p, out, false);
-                            }
+                        for (i, (a, b)) in row.cells.into_iter().enumerate() {
+                            let style = self.cell_style(&props.cells[i]);
+                            let _ = write!(
+                                out,
+                                "<table:table-cell table:style-name=\"{style}\" office:value-type=\"string\">"
+                            );
+                            self.story_at(&paras[a..=b], level + 1, out);
                             out.push_str("</table:table-cell>");
                         }
                         for _ in n..columns {

@@ -5,12 +5,16 @@
 //! goes through `splice`, so tables undo like everything else.
 
 use crate::document::{Document, StoryId};
+use crate::limits::MAX_TABLE_LEVEL;
 use crate::para::{Mark, Paragraph, chars};
 use crate::props::{RowProps, Twips};
 use crate::story::Position;
 
 /// One row: its paragraphs from `first` to its end mark at `end`, and each
 /// cell's first and last paragraph.
+/// The narrowest a cell can be and still be split in two: 0.1 in each.
+const MIN_SPLIT_WIDTH: Twips = 144;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub first: usize,
@@ -25,46 +29,51 @@ impl Row {
     }
 }
 
-/// Make pasted paragraphs fit where they go. Inside a table cell (`inside`)
-/// tables do not nest, so everything becomes plain paragraphs of the cell.
-/// Elsewhere whole rows stay rows; cells copied without their whole row
-/// become plain paragraphs, one for each cell.
-pub(crate) fn fit_pasted(paras: &mut Vec<Paragraph>, inside: bool) {
+/// Make pasted paragraphs fit where they go, which is `inside` tables deep
+/// (0 for ordinary text). Whole rows stay rows: at the top they stay as
+/// they are, inside a cell they become a table in it, as long as that
+/// does not go past `MAX_TABLE_LEVEL`. Cells copied without their whole
+/// row become plain paragraphs, one for each cell.
+pub(crate) fn fit_pasted(paras: &mut Vec<Paragraph>, inside: u8) {
     let flatten = |p: &mut Paragraph| {
-        p.pap.in_table = inside;
+        p.pap.set_level(inside);
         p.mark = Mark::Paragraph;
         p.row = None;
     };
-    if inside {
-        // A row's end mark holds no text; it goes.
-        paras.retain(|p| p.mark != Mark::RowEnd || !p.pap.in_table);
-        paras.iter_mut().for_each(flatten);
-        return;
-    }
     let mut i = 0;
     while i < paras.len() {
-        if !paras[i].pap.in_table {
+        if paras[i].pap.level() == 0 {
             i += 1;
             continue;
         }
         let run_end = (i..paras.len())
-            .find(|&j| !paras[j].pap.in_table)
+            .find(|&j| paras[j].pap.level() == 0)
             .unwrap_or(paras.len());
         // Whole rows only: each ends with its row mark, after as many
-        // cells as the mark describes.
+        // cells as the mark describes, at every depth.
         let mut whole = paras[run_end - 1].mark == Mark::RowEnd;
-        let mut cells = 0;
+        let mut cells = [0usize; MAX_TABLE_LEVEL as usize + 1];
+        let mut deepest = 0;
         for p in &paras[i..run_end] {
+            let level = (p.pap.level() as usize).min(cells.len() - 1);
+            deepest = deepest.max(level);
             match p.mark {
-                Mark::CellEnd => cells += 1,
+                Mark::CellEnd => cells[level] += 1,
                 Mark::RowEnd => {
-                    whole &= p.row.as_ref().is_some_and(|r| r.cells.len() == cells);
-                    cells = 0;
+                    whole &= p
+                        .row
+                        .as_ref()
+                        .is_some_and(|r| r.cells.len() == cells[level]);
+                    cells[level] = 0;
                 }
                 _ => {}
             }
         }
-        if whole {
+        if whole && deepest + inside as usize <= MAX_TABLE_LEVEL as usize {
+            for p in &mut paras[i..run_end] {
+                let level = p.pap.level();
+                p.pap.set_level(level + inside);
+            }
             i = run_end;
             continue;
         }
@@ -83,18 +92,95 @@ pub(crate) fn fit_pasted(paras: &mut Vec<Paragraph>, inside: bool) {
     }
 }
 
-/// The row holding paragraph `p`, if it is in a table.
+/// Make the tables of a story well formed, as files from other programs
+/// (and damaged ones) may not be: a table inside a cell has to be closed
+/// by its own row marks within a cell of the table round it, and a cell has
+/// to end in a paragraph of its own. Paragraphs that cannot be put right
+/// become ordinary paragraphs of the cell (or story) they are in, keeping
+/// their text.
+pub fn repair(paras: &mut Vec<Paragraph>) {
+    let end = paras.len();
+    repair_range(paras, 0, end, 0);
+}
+
+fn repair_range(paras: &mut Vec<Paragraph>, a: usize, mut end: usize, level: u8) {
+    let mut j = a;
+    // Each pass either moves on or fixes something, but never forever.
+    let mut budget = 4 * (end - a) + 16;
+    while j < end && budget > 0 {
+        budget -= 1;
+        if paras[j].pap.level() <= level {
+            j += 1;
+            continue;
+        }
+        let row = row_at_level(paras, j, level + 1).filter(|r| r.first == j && r.end < end);
+        let Some(row) = row else {
+            // Not a row that closes: plain text of this level.
+            let p = &mut paras[j];
+            p.pap.set_level(level);
+            if matches!(p.mark, Mark::CellEnd | Mark::RowEnd) {
+                p.mark = Mark::Paragraph;
+                p.row = None;
+            }
+            j += 1;
+            continue;
+        };
+        // A cell that ends with a table of its own (so without a cell mark
+        // of its own) gets a paragraph after it.
+        let cell_level = level + 1;
+        if let Some(&(_, cb)) = row
+            .cells
+            .iter()
+            .find(|&&(_, cb)| paras[cb].pap.level() > cell_level)
+        {
+            let mut pap = paras[cb].pap.clone();
+            pap.set_level(cell_level);
+            let mut fix = Paragraph::new(pap, paras[cb].mark_chp);
+            fix.mark = Mark::CellEnd;
+            paras.insert(cb + 1, fix);
+            end += 1;
+            continue;
+        }
+        // Tables in the cells, last cell first so the places hold.
+        for &(ca, cb) in row.cells.iter().rev() {
+            let before = paras.len();
+            repair_range(paras, ca, cb + 1, cell_level);
+            end += paras.len() - before;
+        }
+        let Some(row) = row_at_level(paras, j, level + 1) else {
+            j += 1;
+            continue;
+        };
+        j = row.end + 1;
+    }
+}
+
+/// The row holding paragraph `p`, if it is in a table: the innermost
+/// one when the paragraph is in a table inside a cell.
 pub fn row_at(paras: &[Paragraph], p: usize) -> Option<Row> {
-    if !paras.get(p)?.pap.in_table {
+    let level = paras.get(p)?.pap.level();
+    if level == 0 {
         return None;
     }
+    row_at_level(paras, p, level)
+}
+
+/// The row at table depth `level` holding paragraph `p`, which is that
+/// deep or deeper: with `level` 1, the outer table's row round a nested
+/// table's paragraph. A row's cells run to its cell marks at its own depth,
+/// so a nested table's marks, being deeper, belong to a cell's contents.
+pub fn row_at_level(paras: &[Paragraph], p: usize, level: u8) -> Option<Row> {
+    if level == 0 || paras.get(p)?.pap.level() < level {
+        return None;
+    }
+    let ends_row = |q: &Paragraph| q.mark == Mark::RowEnd && q.pap.level() == level;
     let mut first = p;
-    while first > 0 && paras[first - 1].pap.in_table && paras[first - 1].mark != Mark::RowEnd {
+    while first > 0 && paras[first - 1].pap.level() >= level && !ends_row(&paras[first - 1]) {
         first -= 1;
     }
     let mut end = p;
-    while end < paras.len() && paras[end].mark != Mark::RowEnd {
-        if !paras[end].pap.in_table {
+    while end < paras.len() && !ends_row(&paras[end]) {
+        if paras[end].pap.level() < level {
             return None;
         }
         end += 1;
@@ -105,7 +191,7 @@ pub fn row_at(paras: &[Paragraph], p: usize) -> Option<Row> {
     let mut cells = Vec::new();
     let mut start = first;
     for (i, para) in paras.iter().enumerate().take(end).skip(first) {
-        if para.mark == Mark::CellEnd {
+        if para.mark == Mark::CellEnd && para.pap.level() == level {
             cells.push((start, i));
             start = i + 1;
         }
@@ -120,21 +206,31 @@ pub fn row_at(paras: &[Paragraph], p: usize) -> Option<Row> {
     Some(Row { first, end, cells })
 }
 
-/// Every row of the table holding paragraph `p`, top to bottom.
+/// Every row of the table holding paragraph `p`, top to bottom: that of
+/// the innermost table `p` is in.
 pub fn table_rows(paras: &[Paragraph], p: usize) -> Vec<Row> {
     let Some(row) = row_at(paras, p) else {
         return Vec::new();
     };
+    rows_around(paras, &row)
+}
+
+/// The rows of the table `row` belongs to, top to bottom.
+pub fn rows_around(paras: &[Paragraph], row: &Row) -> Vec<Row> {
+    let level = paras[row.end].pap.level();
     let mut first = row.first;
-    while first > 0 && paras[first - 1].mark == Mark::RowEnd {
-        match row_at(paras, first - 1) {
+    while first > 0
+        && paras[first - 1].mark == Mark::RowEnd
+        && paras[first - 1].pap.level() == level
+    {
+        match row_at_level(paras, first - 1, level) {
             Some(r) => first = r.first,
             None => break,
         }
     }
     let mut rows = Vec::new();
     let mut i = first;
-    while let Some(r) = row_at(paras, i) {
+    while let Some(r) = row_at_level(paras, i, level) {
         i = r.end + 1;
         rows.push(r);
     }
@@ -158,6 +254,15 @@ pub fn row_props(paras: &[Paragraph], row: &Row, text_width: Twips) -> RowProps 
         }
         None => RowProps::even(n, text_width / n as Twips),
     }
+}
+
+/// Whether every row of a table runs margin to margin in `text_width`,
+/// allowing for columns that didn't divide evenly.
+pub fn is_full_width(paras: &[Paragraph], rows: &[Row], text_width: Twips) -> bool {
+    rows.iter().all(|r| {
+        let p = row_props(paras, r, text_width);
+        (p.width() - text_width).abs() <= (p.cells.len() as Twips).max(15)
+    })
 }
 
 /// How Insert Table turns selected text into cells.
@@ -192,8 +297,9 @@ impl Document {
     }
 
     /// Insert > Table: `rows` by `cols` empty cells `width` wide at `at`,
-    /// splitting the paragraph there. Returns the first cell's position,
-    /// or `at` unchanged inside a table (tables do not nest in the original).
+    /// splitting the paragraph there. Returns the first cell's position.
+    /// Inside a cell it makes a table in the cell, up to `MAX_TABLE_LEVEL`
+    /// deep; past that, `at` comes back unchanged.
     pub fn insert_table(
         &mut self,
         story: StoryId,
@@ -202,7 +308,8 @@ impl Document {
         cols: usize,
         width: Twips,
     ) -> Position {
-        if self.story(story).paras[at.para].pap.in_table || rows == 0 || cols == 0 {
+        let level = self.story(story).paras[at.para].pap.level() + 1;
+        if level > MAX_TABLE_LEVEL || rows == 0 || cols == 0 {
             return at;
         }
         let p = if at.offset > 0 {
@@ -216,6 +323,9 @@ impl Document {
                 new.push(self.empty_cell(story, p));
             }
             new.push(self.row_mark(story, p, RowProps::even(cols, width)));
+        }
+        for q in &mut new {
+            q.pap.set_level(level);
         }
         self.splice(story, p, 0, new);
         Position::new(p, 0)
@@ -316,30 +426,63 @@ impl Document {
                 continue;
             };
             p = last.end + 1;
-            let props: Vec<RowProps> = rows
-                .iter()
-                .map(|r| row_props(&self.main.paras, r, was))
-                .collect();
-            // Full width allows for columns that didn't divide evenly.
-            let full = |r: &RowProps| (r.width() - was).abs() <= (r.cells.len() as Twips).max(15);
-            if !props.iter().all(full) {
-                continue;
-            }
-            for (row, mut r) in rows.iter().zip(props) {
-                let old = r.width().max(1) as i64;
-                let mut left = now;
-                let n = r.cells.len();
-                for (k, c) in r.cells.iter_mut().enumerate() {
-                    c.width = if k + 1 == n {
-                        left
-                    } else {
-                        (c.width as i64 * now as i64 / old) as Twips
-                    };
-                    left -= c.width;
-                }
-                self.set_row(story, row.end, r);
+            if is_full_width(&self.main.paras, &rows, was) {
+                self.fit_rows(story, &rows, was, now);
             }
         }
+    }
+
+    /// Stretch or shrink each of `rows` so it is `now` wide, keeping the
+    /// columns in proportion. The last cell takes what rounding leaves.
+    pub fn fit_rows(&mut self, story: StoryId, rows: &[Row], text_width: Twips, now: Twips) {
+        for row in rows {
+            let mut r = row_props(&self.story(story).paras, row, text_width);
+            let old = r.width().max(1) as i64;
+            let mut left = now;
+            let n = r.cells.len();
+            for (k, c) in r.cells.iter_mut().enumerate() {
+                c.width = if k + 1 == n {
+                    left
+                } else {
+                    (c.width as i64 * now as i64 / old) as Twips
+                };
+                left -= c.width;
+            }
+            self.set_row(story, row.end, r);
+        }
+    }
+
+    /// Copy columns `from..=to` of `rows` as a smaller table of whole rows,
+    /// each row mark keeping just those cells' settings.
+    pub fn copy_cells(
+        &self,
+        story: StoryId,
+        rows: &[Row],
+        from: usize,
+        to: usize,
+        text_width: Twips,
+    ) -> crate::document::Fragment {
+        let paras = &self.story(story).paras;
+        let mut out = Vec::new();
+        for row in rows {
+            let last = row.cells.len().saturating_sub(1);
+            let cols = from.min(last)..=to.min(last);
+            for k in cols.clone() {
+                let (a, b) = row.cells[k];
+                out.extend(paras[a..=b].iter().cloned());
+            }
+            let mut props = row_props(paras, row, text_width);
+            props.cells = props.cells[cols].to_vec();
+            let mut mark = paras[row.end].clone();
+            mark.row = Some(Box::new(props));
+            out.push(mark);
+        }
+        self.with_objects(crate::document::Fragment {
+            paras: out,
+            ends_with_mark: true,
+            objects: Vec::new(),
+            notes: Vec::new(),
+        })
     }
 
     pub fn set_row(&mut self, story: StoryId, end: usize, props: RowProps) {
@@ -486,6 +629,50 @@ impl Document {
         props.cells.drain(from..=to.min(props.cells.len() - 1));
         let mut mark = paras[row.end].clone();
         mark.row = Some(Box::new(props));
+        new.push(mark);
+        self.splice(story, row.first, row.end - row.first + 1, new);
+    }
+
+    /// Format > Table Layout > Split Cell: each of cells `from..=to` of a row
+    /// becomes two side by side, sharing its width and borders. The text
+    /// stays in the first. Cells too narrow to halve are left alone.
+    pub fn split_cells(
+        &mut self,
+        story: StoryId,
+        row: &Row,
+        props: &RowProps,
+        from: usize,
+        to: usize,
+    ) {
+        let to = to.min(row.cells.len() - 1).min(props.cells.len() - 1);
+        if from > to {
+            return;
+        }
+        let mut new_props = props.clone();
+        new_props.cells.clear();
+        let mut new: Vec<Paragraph> = Vec::new();
+        for (k, &(a, b)) in row.cells.iter().enumerate() {
+            let paras = &self.story(story).paras;
+            new.extend_from_slice(&paras[a..=b]);
+            let cell = &props.cells[k.min(props.cells.len() - 1)];
+            if k >= from && k <= to && cell.width >= 2 * MIN_SPLIT_WIDTH {
+                let first = cell.width - cell.width / 2;
+                let second = cell.width / 2;
+                new_props.cells.push(crate::props::CellProps {
+                    width: first,
+                    ..cell.clone()
+                });
+                new_props.cells.push(crate::props::CellProps {
+                    width: second,
+                    ..cell.clone()
+                });
+                new.push(self.empty_cell(story, a));
+            } else {
+                new_props.cells.push(cell.clone());
+            }
+        }
+        let mut mark = self.story(story).paras[row.end].clone();
+        mark.row = Some(Box::new(new_props));
         new.push(mark);
         self.splice(story, row.first, row.end - row.first + 1, new);
     }
@@ -681,5 +868,107 @@ mod tests {
         d.undo();
         assert_eq!(d.props.text_width(), tw);
         assert_eq!(widths(&d), [tw / 3 * 3, tw / 3 * 3, 2880]);
+    }
+
+    #[test]
+    fn a_table_in_a_cell_is_found_as_its_own_rows_and_the_outer_row_goes_round_it() {
+        let mut d = Document::new();
+        d.insert_table(Main, Position::new(0, 0), 1, 2, 3000);
+        // Into the first cell: a table of two rows by two cells.
+        let at = d.insert_table(Main, Position::new(0, 0), 2, 2, 1000);
+        assert_eq!(at, Position::new(0, 0));
+        let paras = &d.main.paras;
+        // Inner rows first, then the outer cell's own paragraph, the
+        // second outer cell and the outer row mark.
+        let levels: Vec<u8> = paras.iter().map(|p| p.pap.level()).collect();
+        assert_eq!(levels, [2, 2, 2, 2, 2, 2, 1, 1, 1, 0]);
+        let inner = table_rows(paras, 0);
+        assert_eq!(inner.len(), 2);
+        assert!(inner.iter().all(|r| r.cells.len() == 2));
+        let outer = row_at_level(paras, 0, 1).unwrap();
+        assert_eq!(outer.cells, [(0, 6), (7, 7)]);
+        assert_eq!(row_at(paras, 6).unwrap(), outer);
+        assert_eq!(table_rows(paras, 7).len(), 1);
+        // The inner table inside a nest of its own.
+        assert_eq!(row_at_level(paras, 3, 2).unwrap(), inner[1]);
+        assert!(row_at_level(paras, 6, 2).is_none());
+    }
+
+    #[test]
+    fn whole_tables_paste_into_a_cell_as_nested_tables_and_pieces_as_text() {
+        let mut d = Document::new();
+        d.insert_table(Main, Position::new(0, 0), 1, 1, 3000);
+        let mut src = Document::new();
+        src.insert_table(Main, Position::new(0, 0), 1, 2, 1000);
+        let last = src.main.paras.len() - 1;
+        let whole = src.copy(Main, Position::new(0, 0), Position::new(last, 0));
+        let end = d.insert_fragment(Main, Position::new(0, 0), &whole);
+        let levels: Vec<u8> = d.main.paras.iter().map(|p| p.pap.level()).collect();
+        assert_eq!(levels, [2, 2, 2, 1, 1, 0]);
+        assert_eq!(end, Position::new(3, 0));
+        // Cells without their row become text in the cell.
+        let mut e = Document::new();
+        e.insert_table(Main, Position::new(0, 0), 1, 1, 3000);
+        let piece = src.copy(Main, Position::new(0, 0), Position::new(0, 0));
+        e.insert_fragment(Main, Position::new(0, 0), &piece);
+        assert!(e.main.paras.iter().all(|p| p.pap.level() <= 1));
+    }
+
+    #[test]
+    fn repair_puts_nested_tables_right_or_makes_them_text() {
+        use crate::props::ParaProps;
+        let para = |level: u8, mark: Mark, text: &str| {
+            let mut pap = ParaProps::default();
+            pap.set_level(level);
+            let mut p = Paragraph::new(pap, Default::default());
+            p.mark = mark;
+            p.insert(0, text, Default::default());
+            p
+        };
+        let levels = |v: &[Paragraph]| -> Vec<(u8, Mark)> {
+            v.iter().map(|p| (p.pap.level(), p.mark)).collect()
+        };
+        use Mark::{CellEnd, RowEnd};
+        // A table in a table that never closes: its text stays, as text.
+        let mut v = vec![
+            para(1, CellEnd, "a"),
+            para(1, RowEnd, ""),
+            para(2, CellEnd, "x"),
+            para(2, RowEnd, ""),
+        ];
+        repair(&mut v);
+        assert_eq!(
+            levels(&v),
+            [
+                (1, CellEnd),
+                (1, RowEnd),
+                (0, Mark::Paragraph),
+                (0, Mark::Paragraph)
+            ]
+        );
+        assert_eq!(v[2].text, "x");
+        // A cell that ends with a table in it gets a paragraph to end on.
+        let mut v = vec![
+            para(2, CellEnd, "x"),
+            para(2, RowEnd, ""),
+            para(1, RowEnd, ""),
+        ];
+        repair(&mut v);
+        assert_eq!(
+            levels(&v),
+            [(2, CellEnd), (2, RowEnd), (1, CellEnd), (1, RowEnd)]
+        );
+        // A table that is fine is left as it is.
+        let ok = vec![
+            para(1, Mark::Paragraph, "before"),
+            para(2, CellEnd, "a"),
+            para(2, RowEnd, ""),
+            para(1, CellEnd, "after"),
+            para(1, RowEnd, ""),
+            para(0, Mark::Paragraph, "end"),
+        ];
+        let mut v = ok.clone();
+        repair(&mut v);
+        assert_eq!(levels(&v), levels(&ok));
     }
 }

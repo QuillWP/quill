@@ -161,6 +161,13 @@ pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
                 s.foreign_as_quill,
             );
             d.note("foreign_help", "Highly recommended", 32.0, 122.0, 380.0);
+            d.text("Reopen last session's documents:", 16.0, 157.0);
+            let choices: Vec<&str> = settings::Reopen::ALL.iter().map(|r| r.label()).collect();
+            let at = settings::Reopen::ALL
+                .iter()
+                .position(|r| *r == s.reopen)
+                .unwrap_or(2);
+            d.popup("reopen", &choices, at, 232.0, 154.0, 100.0);
         }
         SPELLING_PANEL => {
             d.text("Custom Dictionary:", 9.0, 41.0);
@@ -318,6 +325,10 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
             s.interpret_rtf = on("rtf");
             s.make_backup = on("backup");
             s.foreign_as_quill = on("foreign_quill");
+            s.reopen = settings::Reopen::ALL
+                .get(d.selected("reopen"))
+                .copied()
+                .unwrap_or_default();
         }),
         TOOLBAR_PANEL => {
             let at = match d.radio_on(1) {
@@ -356,6 +367,28 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reopen_documents_preference_saves_and_reads_back() {
+        settings::update(|s| *s = settings::Settings::default());
+        let mut d = preferences(2, &[]);
+        assert_eq!(d.selected("reopen"), 2);
+        d.set_selected("reopen", 0);
+        changed(2, &mut d, "reopen");
+        assert_eq!(settings::get().reopen, settings::Reopen::Always);
+        settings::update(|s| s.last_session = vec!["/a/One.qwp".into(), "/b/Two.rtf".into()]);
+        let back = settings::Settings::from_text(&settings::get().to_text());
+        assert_eq!(back.reopen, settings::Reopen::Always);
+        assert_eq!(back.last_session, settings::get().last_session);
+        for item in &d.items {
+            assert!(
+                item.rect.right() <= d.width,
+                "{} falls outside Preferences",
+                item.id
+            );
+        }
+        settings::update(|s| *s = settings::Settings::default());
+    }
 
     #[test]
     fn recent_count_and_save_format_preferences_are_live_and_bounded() {

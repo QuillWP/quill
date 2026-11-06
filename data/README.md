@@ -10,6 +10,9 @@ dictionaries repository (https://github.com/LibreOffice/dictionaries,
 | `hyph_en_US.pat` | `hyph_en_US.dic` (TeX hyphenation patterns and TUGboat exceptions) | BSD-style, see `licenses/README_hyph_en_US.txt` |
 | `th_en_US.dat` | `th_en_US_v2.dat` (MyThes thesaurus generated from WordNet) | WordNet license (Princeton University), see below |
 
+On macOS Quill hyphenates with the system's own patterns, so the Mac
+package leaves `hyph_en_US.pat` and its license out.
+
 The thesaurus is derived from WordNet. WordNet is copyright Princeton
 University and is distributed under a license that permits use, copying,
 modification and distribution for any purpose without fee, provided its

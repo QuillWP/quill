@@ -9,7 +9,7 @@ use crate::canvas::{Canvas, Label, Rect, color};
 use crate::chrome::{self, BAR, ScrollPart};
 use crate::commands::{self as command_map, Cmd, Mods};
 use crate::dialog::{DKey, Dialog, Outcome};
-use crate::docview::{Clipboard, DialogId, DocView, Effect, Port};
+use crate::docview::{BorderKind, Clipboard, DialogId, DocView, Effect, Port};
 use crate::format_dialogs::{self, Which};
 use crate::menu::{self, MENU_BAR_HEIGHT, Menu, OpenMenu};
 use crate::pane::{self, Pane, PaneHit};
@@ -179,6 +179,8 @@ pub struct WinState {
     /// dialog whose native construction failed keep the portable renderer.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     native_dialogs: bool,
+    /// The color palette popped out beside a dialog's color, while it is.
+    color_pop: Option<crate::palette::PaletteState>,
     pub show_toolbar: bool,
     toolbar_press: Option<usize>,
     /// The toolbar button under the pointer.
@@ -341,6 +343,7 @@ impl WinState {
             own_menu_bar: !cfg!(target_os = "macos"),
             native_scrollbars: false,
             native_dialogs: false,
+            color_pop: None,
             dialog_mouse: false,
             font_names: Vec::new(),
             font_families: Vec::new(),
@@ -591,6 +594,11 @@ impl WinState {
                 });
             }
             Action::Size(hp) => self.view.set_size(hp),
+            Action::CellAlign(i) => {
+                if let Some(&(_, v, h)) = crate::docview::CELL_ALIGNMENTS.get(i) {
+                    self.view.align_cells(v, h);
+                }
+            }
             Action::Style(id) => {
                 // Choosing a paragraph's own style when it has been
                 // reformatted asks whether to redefine the style or put the
@@ -1019,7 +1027,8 @@ impl WinState {
         if let Some((_, d)) = self.dialogs.last_mut()
             && (self.dialog_mouse || !d.modeless)
         {
-            d.mouse_move(cx, cy, label);
+            let o = d.mouse_move(cx, cy, label);
+            self.slider_moved(o);
             return true;
         }
         if let Some(t) = &self.menu {
@@ -1224,14 +1233,19 @@ impl WinState {
             return CursorIcon::Text;
         }
         let (dx, dy) = self.document_point(x, y);
-        if self.menu.is_none()
+        let in_text = self.menu.is_none()
             && self
                 .dialogs
                 .last()
                 .is_none_or(|(_, d)| d.modeless && !d.contains(cx, cy))
-            && self.view.area.contains(dx, dy)
-            && dx >= self.view.text_left_window() - 2.0
-        {
+            && self.view.area.contains(dx, dy);
+        if in_text && let Some(kind) = self.view.border_cursor(dx, dy) {
+            return match kind {
+                BorderKind::Column => CursorIcon::ColResize,
+                BorderKind::Row => CursorIcon::RowResize,
+            };
+        }
+        if in_text && dx >= self.view.text_left_window() - 2.0 {
             CursorIcon::Text
         } else {
             CursorIcon::Default
@@ -1481,6 +1495,8 @@ pub struct App {
     next_recovery: Instant,
     recovery_serial: u64,
     recovered: bool,
+    /// Whether the last session's documents have been offered at startup.
+    reopened: bool,
 }
 
 impl App {
@@ -1517,6 +1533,7 @@ impl App {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64),
             recovered: false,
+            reopened: false,
         }
     }
 
@@ -1707,6 +1724,20 @@ impl App {
 
     /// Close a window. The last window on a document asks about saving
     /// first; returns false if the user cancels.
+    /// The saved documents open now, once each, in window order.
+    fn open_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for (_, w) in &self.windows {
+            if let Some(p) = &w.st.main_view().path
+                && w.recovery.is_none()
+                && !paths.contains(p)
+            {
+                paths.push(p.clone());
+            }
+        }
+        paths
+    }
+
     fn close_window(&mut self, id: WindowId) -> bool {
         #[cfg(target_os = "macos")]
         if self.native_print_window == Some(id) {
@@ -1872,6 +1903,15 @@ impl App {
             }
             if let (Some(native), Some(dialog)) = (&mut w.dialog, top) {
                 native.sync_from_model(dialog);
+            }
+            // A press outside the color pop-out put it away: forget it.
+            if let Some(native) = &mut w.dialog
+                && native.popover_dismissed()
+            {
+                if let Some((_, d)) = w.st.dialogs.last_mut() {
+                    d.popout = None;
+                }
+                w.st.color_pop = None;
             }
             w.st.native_dialogs = w.dialog.is_some();
         }
@@ -2270,6 +2310,36 @@ impl App {
                     });
                 }
             }
+            Effect::LookUp =>
+            {
+                #[cfg(target_os = "macos")]
+                if let Some(i) = self.index(id) {
+                    let w = &self.windows[i].1;
+                    let z = w.st.document_zoom;
+                    match w.st.view.look_up_spot() {
+                        Some((word, font, size, x, y)) => crate::mac_lookup::show(
+                            &w.window,
+                            &word,
+                            &font,
+                            (size * z) as f64,
+                            (x * z) as f64,
+                            (y * z) as f64,
+                        ),
+                        None => {
+                            let w = &mut self.windows[i].1;
+                            w.st.view.status =
+                                Some("Put the insertion point in a word to look it up.".into());
+                            w.window.request_redraw();
+                        }
+                    }
+                }
+            }
+            Effect::Zoom(step) => {
+                if let Some(i) = self.index(id) {
+                    self.windows[i].1.st.zoom_step(step);
+                    self.windows[i].1.window.request_redraw();
+                }
+            }
             Effect::ChooseMergeData => {
                 let file = rfd::FileDialog::new()
                     .set_title("Open Data Document")
@@ -2363,17 +2433,21 @@ impl App {
             Effect::Close => {
                 // A Mac app stays open with no windows; elsewhere the last
                 // window closing quits.
+                let session = self.open_paths();
                 if self.close_window(id) && self.windows.is_empty() && !cfg!(target_os = "macos") {
+                    crate::settings::update(|s| s.last_session = session);
                     el.exit();
                 }
             }
             Effect::Quit => {
+                let session = self.open_paths();
                 let ids: Vec<WindowId> = self.windows.iter().map(|(w, _)| *w).collect();
                 for w in ids {
                     if !self.close_window(w) {
                         return;
                     }
                 }
+                crate::settings::update(|s| s.last_session = session);
                 el.exit();
             }
         }
@@ -2499,6 +2573,10 @@ impl App {
                 w.st.show_ruler = !w.st.show_ruler;
             }
             w.window.request_redraw();
+            return;
+        }
+        if code == Some(KeyCode::KeyD) && mods.cmd && mods.ctrl && !mods.shift && !mods.opt {
+            self.effect(el, id, Effect::LookUp);
             return;
         }
         if code == Some(KeyCode::KeyF) && mods.cmd && mods.ctrl && !mods.shift && !mods.opt {
@@ -2746,6 +2824,48 @@ fn strip_ext(title: &str) -> &str {
     }
 }
 
+/// The documents open when Quill last quit that are still there, if
+/// Preferences says to open them again (asking first when set to Prompt).
+fn reopen_last_session() -> Vec<PathBuf> {
+    use crate::settings::Reopen;
+    let (reopen, paths) = crate::settings::with(|s| (s.reopen, s.last_session.clone()));
+    let paths: Vec<PathBuf> = paths.into_iter().filter(|p| p.is_file()).collect();
+    if paths.is_empty() {
+        return paths;
+    }
+    let yes = match reopen {
+        Reopen::Always => true,
+        Reopen::Never => false,
+        Reopen::Prompt => {
+            let names: Vec<String> = paths
+                .iter()
+                .take(10)
+                .filter_map(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .collect();
+            let more = paths.len().saturating_sub(names.len());
+            let mut list = names.join("\n");
+            if more > 0 {
+                list.push_str(&format!("\nand {more} more"));
+            }
+            let answer = rfd::MessageDialog::new()
+                .set_level(rfd::MessageLevel::Info)
+                .set_title("Quill")
+                .set_description(format!(
+                    "Reopen the documents that were open when Quill last quit?\n\n{list}"
+                ))
+                .set_buttons(rfd::MessageButtons::OkCancelCustom(
+                    "Reopen".into(),
+                    "Don't Reopen".into(),
+                ))
+                .show();
+            matches!(answer, rfd::MessageDialogResult::Custom(ref b) if b == "Reopen")
+                || matches!(answer, rfd::MessageDialogResult::Ok)
+        }
+    };
+    if yes { paths } else { Vec::new() }
+}
+
 /// Ask a question with `yes` and Cancel; true for `yes`.
 pub(crate) fn ask(message: &str, detail: &str, yes: &str) -> bool {
     let answer = rfd::MessageDialog::new()
@@ -2759,6 +2879,29 @@ pub(crate) fn ask(message: &str, detail: &str, yes: &str) -> bool {
         .show();
     matches!(answer, rfd::MessageDialogResult::Custom(ref b) if b == yes)
         || matches!(answer, rfd::MessageDialogResult::Ok)
+}
+
+#[cfg_attr(test, allow(dead_code))]
+/// Ask whether to include more than was selected: Some(true) for yes,
+/// Some(false) for the selection only, None for Cancel.
+pub(crate) fn ask_include(message: &str, detail: &str, yes: &str, no: &str) -> Option<bool> {
+    let answer = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Info)
+        .set_title("Quill")
+        .set_description(format!("{message}\n\n{detail}"))
+        .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
+            yes.into(),
+            no.into(),
+            "Cancel".into(),
+        ))
+        .show();
+    match answer {
+        rfd::MessageDialogResult::Yes => Some(true),
+        rfd::MessageDialogResult::No => Some(false),
+        rfd::MessageDialogResult::Custom(choice) if choice == yes => Some(true),
+        rfd::MessageDialogResult::Custom(choice) if choice == no => Some(false),
+        _ => None,
+    }
 }
 
 pub(crate) fn alert(message: &str, detail: &str) {
@@ -2851,7 +2994,11 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
         }
-        let files = std::mem::take(&mut self.pending);
+        let mut files = std::mem::take(&mut self.pending);
+        if files.is_empty() && !self.reopened {
+            files = reopen_last_session();
+        }
+        self.reopened = true;
         self.open_files(el, &files);
         if self.windows.is_empty() {
             self.new_window(el, crate::settings::get().new_document(), None);
@@ -3177,7 +3324,7 @@ impl ApplicationHandler<UserEvent> for App {
                     // wheel scrolled up.
                     let line = matches!(delta, MouseScrollDelta::LineDelta(..));
                     let save = line || phase == TouchPhase::Ended;
-                    w.st.zoom_at(1.1f64.powf(-dy as f64 / 48.0), w.st.pointer.1, save);
+                    w.st.zoom_by(1.1f64.powf(-dy as f64 / 48.0), save);
                 } else {
                     let dx = match delta {
                         MouseScrollDelta::LineDelta(x, _) => -x * 48.0,
@@ -3196,7 +3343,7 @@ impl ApplicationHandler<UserEvent> for App {
                 let w = &mut self.windows[i].1;
                 if w.st.dialogs.is_empty() && w.st.menu.is_none() {
                     let save = matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled);
-                    w.st.zoom_at(1.0 + delta, w.st.pointer.1, save);
+                    w.st.zoom_by(1.0 + delta, save);
                     w.window.request_redraw();
                 }
             }
@@ -4075,6 +4222,134 @@ mod tests {
     }
 
     #[test]
+    fn more_colors_opens_the_palette_and_what_it_picks_goes_into_the_popup() {
+        let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+        let (character, which) = format_dialogs::character_for_find(&state.view, &[]);
+        state.dialogs.push((which, character));
+        let mut clip = Clipboard::without_system();
+
+        // More Colors… from the Color popup opens the palette on top.
+        let n = state.dialogs[0].1.options("color").len();
+        state.dialogs[0].1.set_selected("color", n - 1);
+        state.dialog_outcome(Outcome::Changed("color"), &mut clip);
+        assert_eq!(state.dialogs.len(), 2);
+        assert!(matches!(state.dialogs[1].0, Which::Palette(_)));
+
+        // A color typed as an HTML code, then OK: the popup shows it.
+        state.dialogs[1].1.set_field("hex", "#336699");
+        state.dialog_outcome(Outcome::Changed("hex"), &mut clip);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.dialogs.len(), 1);
+        assert_eq!(state.dialogs[0].1.selected_text("color"), "#336699");
+
+        // Cancel in the palette puts back the color the popup had.
+        let n = state.dialogs[0].1.options("color").len();
+        state.dialogs[0].1.set_selected("color", n - 1);
+        state.dialog_outcome(Outcome::Changed("color"), &mut clip);
+        state.dialogs[1].1.set_field("hex", "#FF00FF");
+        state.dialog_outcome(Outcome::Changed("hex"), &mut clip);
+        state.dialog_outcome(Outcome::Cancel, &mut clip);
+        assert_eq!(state.dialogs.len(), 1);
+        assert_eq!(state.dialogs[0].1.selected_text("color"), "Black");
+
+        // Edit… opens the editor; its OK adds the color to the palette.
+        let n = state.dialogs[0].1.options("color").len();
+        state.dialogs[0].1.set_selected("color", n - 1);
+        state.dialog_outcome(Outcome::Changed("color"), &mut clip);
+        state.dialog_outcome(Outcome::Button("edit"), &mut clip);
+        assert!(matches!(state.dialogs[2].0, Which::EditColor(_)));
+        state.dialogs[2].1.set_field("hex", "#102030");
+        state.dialog_outcome(Outcome::Changed("hex"), &mut clip);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.dialogs.len(), 2);
+        let Which::Palette(p) = &state.dialogs[1].0 else {
+            panic!("the palette is back on top");
+        };
+        assert_eq!(p.custom.first(), Some(&quill_core::props::Rgb(0x102030)));
+        assert_eq!(p.current, quill_core::props::Rgb(0x102030));
+    }
+
+    #[test]
+    fn the_color_button_pops_out_a_palette_and_boxes_choose_and_edit() {
+        let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+        let (character, which) = format_dialogs::build_character_with_button(&state.view);
+        state.dialogs.push((which, character));
+        let mut clip = Clipboard::without_system();
+        let rgb = |s: &WinState| s.dialogs[0].1.swatch_rgb("color").unwrap();
+        assert_eq!(rgb(&state), 0x000000);
+        assert_eq!(state.dialogs[0].1.item_label("color_hex"), "#000000");
+
+        // Pressing the button pops the palette out; pressing it again puts it away.
+        state.dialog_outcome(Outcome::Button("color"), &mut clip);
+        let pop = state.dialogs[0]
+            .1
+            .popout
+            .clone()
+            .expect("the palette is out");
+        assert_eq!(pop.anchor, "color");
+        assert_eq!(pop.items.iter().filter(|i| i.label.is_empty()).count(), 32);
+        assert!(pop.items.iter().any(|i| i.id == "std0" && i.selected));
+        state.dialog_outcome(Outcome::Button("color"), &mut clip);
+        assert!(state.dialogs[0].1.popout.is_none());
+
+        // A box chooses its color and the palette stays out, showing it marked.
+        state.dialog_outcome(Outcome::Button("color"), &mut clip);
+        state.dialog_outcome(
+            Outcome::Swatch {
+                id: "std5",
+                double: false,
+            },
+            &mut clip,
+        );
+        assert_eq!(rgb(&state), 0xFF0000);
+        assert_eq!(state.dialogs[0].1.item_label("color_hex"), "#FF0000");
+        let pop = state.dialogs[0].1.popout.clone().unwrap();
+        assert!(pop.items.iter().any(|i| i.id == "std5" && i.selected));
+        assert!(!pop.items.iter().any(|i| i.id == "std0" && i.selected));
+
+        // A double-click edits it: the editor opens and the palette goes in.
+        state.dialog_outcome(
+            Outcome::Swatch {
+                id: "std9",
+                double: true,
+            },
+            &mut clip,
+        );
+        assert!(matches!(state.dialogs[1].0, Which::EditColor(_)));
+        assert!(state.dialogs[0].1.popout.is_none());
+        state.dialogs[1].1.set_field("hex", "#102030");
+        state.dialog_outcome(Outcome::Changed("hex"), &mut clip);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.dialogs.len(), 1);
+        assert_eq!(rgb(&state), 0x102030);
+        assert_eq!(state.dialogs[0].1.item_label("color_hex"), "#102030");
+
+        // The next time the palette is out, the edited color is a custom one.
+        state.dialog_outcome(Outcome::Button("color"), &mut clip);
+        let pop = state.dialogs[0].1.popout.clone().unwrap();
+        assert!(
+            pop.items
+                .iter()
+                .any(|i| i.id == "cus0" && i.rgb == Some(0x102030) && i.selected)
+        );
+        // Edit Color… in the palette edits the one chosen, in its box.
+        state.dialog_outcome(Outcome::Button("edit"), &mut clip);
+        assert!(matches!(state.dialogs[1].0, Which::EditColor(_)));
+        state.dialogs[1].1.set_field("hex", "#445566");
+        state.dialog_outcome(Outcome::Changed("hex"), &mut clip);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(rgb(&state), 0x445566);
+        state.dialog_outcome(Outcome::Button("color"), &mut clip);
+        let pop = state.dialogs[0].1.popout.clone().unwrap();
+        assert!(
+            pop.items
+                .iter()
+                .any(|i| i.id == "cus0" && i.rgb == Some(0x445566))
+        );
+        assert!(!pop.items.iter().any(|i| i.rgb == Some(0x102030)));
+    }
+
+    #[test]
     fn nested_modal_keyboard_actions_close_one_layer_at_a_time() {
         let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
         let (paragraph, which) = format_dialogs::paragraph(&state.view);
@@ -4208,6 +4483,70 @@ mod tests {
             Some([148.0, 98.0, 900.0, 700.0])
         );
     }
+    #[test]
+    fn zooming_far_down_a_long_document_stays_on_the_same_page() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let paragraph = "A paragraph of ordinary text that runs on for a few lines. ".repeat(8);
+        let doc = quill_core::text::from_plain_text(&format!("{paragraph}\n").repeat(1200));
+        for page_view in [false, true] {
+            let mut state = WinState::new(DocView::new(doc.clone(), "Zoom".into()));
+            state.document_zoom = 1.0;
+            state.ui = 1.0;
+            state.view.page_view = page_view;
+            paint_editor(&mut state, 900, 700, &mut fonts);
+            state.view.scroll_y = (state.view.max_scroll() * 0.4).floor();
+            paint_editor(&mut state, 900, 700, &mut fonts);
+            let page = state.view.visible_page();
+            assert!(page > 20, "the test document is long enough");
+            // The caret is still on page 1; zooming must not go back to it.
+            for _ in 0..6 {
+                state.zoom_by(1.1, false);
+                paint_editor(&mut state, 900, 700, &mut fonts);
+                assert!(state.view.visible_page().abs_diff(page) <= 1);
+            }
+            state.zoom_step(1);
+            paint_editor(&mut state, 900, 700, &mut fonts);
+            assert!(state.view.visible_page().abs_diff(page) <= 1);
+            for _ in 0..6 {
+                state.zoom_by(1.0 / 1.1, false);
+                paint_editor(&mut state, 900, 700, &mut fonts);
+                assert!(state.view.visible_page().abs_diff(page) <= 1);
+            }
+        }
+        crate::settings::update(|s| *s = crate::settings::Settings::default());
+    }
+
+    #[test]
+    fn zooming_in_on_a_page_keeps_it_centered_sideways() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let doc = quill_core::text::from_plain_text(&"A paragraph of text.\n".repeat(200));
+        let mut state = WinState::new(DocView::new(doc, "Zoom".into()));
+        state.document_zoom = 1.0;
+        state.ui = 1.0;
+        state.view.page_view = true;
+        paint_editor(&mut state, 900, 700, &mut fonts);
+        assert_eq!(state.view.scroll_x, 0.0);
+        state.zoom_by(3.0, false);
+        paint_editor(&mut state, 900, 700, &mut fonts);
+        // The page is wider than the window now: its middle is the
+        // window's middle, not its left edge.
+        let (pw, _) = state.view.page_size();
+        let want = crate::docview::PAGE_GAP + pw / 2.0 - state.view.area.w / 2.0;
+        assert!(state.view.scroll_x > 0.0);
+        assert!(
+            (state.view.scroll_x - want).abs() < 1.5,
+            "{} vs {want}",
+            state.view.scroll_x
+        );
+        state.zoom_by(1.0 / 3.0, false);
+        paint_editor(&mut state, 900, 700, &mut fonts);
+        assert_eq!(state.view.scroll_x, 0.0);
+    }
+
     #[test]
     fn stationary_selection_drag_keeps_scrolling_until_release() {
         let Some(mut fonts) = crate::pdf::tests::test_fonts() else {

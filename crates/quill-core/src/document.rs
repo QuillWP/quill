@@ -328,7 +328,21 @@ impl Fragment {
         for (i, p) in paras.iter().enumerate() {
             out.push_str(&p.text);
             if i + 1 < paras.len() || self.ends_with_mark {
-                out.push('\n');
+                // A table copies as tab-separated rows, the way a
+                // spreadsheet takes it; a second paragraph in a cell
+                // gives way to a space so the row stays on one line.
+                match p.mark {
+                    // A table in a cell reads as part of the cell's text.
+                    Mark::CellEnd | Mark::RowEnd if p.pap.nest > 0 => out.push(' '),
+                    Mark::CellEnd => {
+                        if paras.get(i + 1).is_none_or(|n| n.mark != Mark::RowEnd) {
+                            out.push('\t');
+                        }
+                    }
+                    Mark::RowEnd => out.push('\n'),
+                    _ if p.pap.in_table => out.push(' '),
+                    _ => out.push('\n'),
+                }
             }
         }
         out
@@ -1291,6 +1305,10 @@ impl Document {
                 let next = self.styles.get(style.next);
                 tail.pap = next.pap.clone();
                 tail.mark_chp = next.chp;
+                // Starting a new style does not take the paragraph out of
+                // its table cell.
+                tail.pap.in_table = head.pap.in_table;
+                tail.pap.nest = head.pap.nest;
             }
         }
         self.splice(story, at.para, 1, vec![head, tail]);
@@ -1338,7 +1356,7 @@ impl Document {
 
     /// Copy `start..end` as a fragment.
     /// Attach the pictures a fragment's paragraphs name.
-    fn with_objects(&self, mut frag: Fragment) -> Fragment {
+    pub(crate) fn with_objects(&self, mut frag: Fragment) -> Fragment {
         let mut ids: Vec<u32> = frag
             .paras
             .iter()
@@ -1431,11 +1449,13 @@ impl Document {
             &remapped
         };
         let mut target = self.story(story).paras[at.para].clone();
-        // Tables arrive whole or as text, never as broken rows.
+        // Tables arrive whole or as text, never as broken rows. Inside a
+        // cell, a whole table arrives as a table in that cell.
+        let depth = target.pap.level();
         let fitted;
-        let frag = if frag.paras.iter().any(|p| p.pap.in_table) || target.pap.in_table {
+        let frag = if frag.paras.iter().any(|p| p.pap.in_table) || depth > 0 {
             let mut f = frag.clone();
-            crate::table::fit_pasted(&mut f.paras, target.pap.in_table);
+            crate::table::fit_pasted(&mut f.paras, depth);
             if f.paras.is_empty() {
                 return at;
             }
@@ -1447,7 +1467,7 @@ impl Document {
         // A pasted table starts and ends on a paragraph of its own: the
         // text before `at` stays in its paragraph, and the text after it
         // follows the table.
-        if !target.pap.in_table && frag.paras[0].pap.in_table {
+        if frag.paras[0].pap.level() > depth {
             let tail = target.split_off(at.offset);
             let mut out = Vec::with_capacity(frag.paras.len() + 2);
             if at.offset > 0 {
@@ -1455,7 +1475,7 @@ impl Document {
             }
             out.extend(frag.paras.iter().cloned());
             let mut tail = tail;
-            if !frag.ends_with_mark && !frag.paras.last().is_some_and(|p| p.pap.in_table) {
+            if !frag.ends_with_mark && !frag.paras.last().is_some_and(|p| p.pap.level() > depth) {
                 let mut last = out.pop().unwrap();
                 let offset = last.len();
                 last.append(&tail);
@@ -1469,7 +1489,7 @@ impl Document {
                 self.splice(story, at.para, 1, out);
                 return end;
             }
-            tail.pap.in_table = false;
+            tail.pap.set_level(depth);
             out.push(tail);
             let end = Position::new(at.para + out.len() - 1, 0);
             self.splice(story, at.para, 1, out);
@@ -1505,7 +1525,7 @@ impl Document {
         let end;
         // A pasted table's last row keeps its mark: the text after `at`
         // follows on a paragraph of its own.
-        if frag.ends_with_mark || out.last().is_some_and(|p| p.pap.in_table) {
+        if frag.ends_with_mark || out.last().is_some_and(|p| p.pap.level() > 0) {
             end = Position::new(at.para + out.len(), 0);
             out.push(tail);
         } else {

@@ -79,6 +79,7 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
         floating: Vec::new(),
         in_box: 0,
         in_table: false,
+        table_depth: 0,
         table_styles: HashMap::new(),
         default_table_style: None,
         defaults: (ParaProps::default(), CharProps::default()),
@@ -714,6 +715,8 @@ struct Reader {
     in_box: u32,
     /// The paragraph being read is in a table.
     in_table: bool,
+    /// How many tables deep the cell being read is: 0 outside any table.
+    table_depth: u8,
 }
 
 /// Whether the body holds tracked changes Quill accepts rather than
@@ -1390,7 +1393,7 @@ impl Reader {
                     out.push(p);
                     out.append(&mut self.pending);
                 }
-                "tbl" => self.read_table(child, out, in_table),
+                "tbl" => self.read_table(child, out),
                 "sdt" => {
                     self.note_control(child);
                     if let Some(c) = child.child("sdtContent") {
@@ -1444,11 +1447,11 @@ impl Reader {
         );
     }
 
-    fn read_table(&mut self, tbl: &Element, out: &mut Vec<Paragraph>, nested: bool) {
-        if nested {
+    fn read_table(&mut self, tbl: &Element, out: &mut Vec<Paragraph>) {
+        if self.table_depth >= quill_core::limits::MAX_TABLE_LEVEL {
             self.report.note(notes::NESTED_TABLES);
-            // Tables do not nest in the original: keep the inner table's text as
-            // paragraphs of the outer cell.
+            // Past the depth Quill keeps, the inner table's text stays as
+            // paragraphs of the cell it is in.
             for tr in wrapped(tbl, "tr") {
                 for tc in wrapped(tr, "tc") {
                     self.read_block(tc, out, true);
@@ -1456,6 +1459,7 @@ impl Reader {
             }
             return;
         }
+        self.table_depth += 1;
         // The table's own settings, shared by its rows.
         let tblpr = tbl.child("tblPr");
         // Its table style, or the document's default one.
@@ -1571,10 +1575,14 @@ impl Reader {
                 let held = std::mem::replace(&mut self.cell_layers, layers);
                 self.read_block(tc, out, true);
                 let layers = std::mem::replace(&mut self.cell_layers, held);
-                if out.len() == start {
+                // A cell ends in a paragraph of its own, even after a table
+                // in it.
+                if out.len() == start
+                    || out.last().is_some_and(|p| p.pap.level() > self.table_depth)
+                {
                     let n = self.doc.styles.get(0);
                     let mut p = Paragraph::new(n.pap.clone(), n.chp);
-                    p.pap.in_table = true;
+                    p.pap.set_level(self.table_depth);
                     out.push(p);
                 }
                 let last = out.last_mut().unwrap();
@@ -1599,7 +1607,15 @@ impl Reader {
                 // for this cell, then the cell's own.
                 let mut borders = edges.for_cell(at);
                 let mut shading = 0;
+                let mut valign = quill_core::props::VAlign::Top;
                 for pr in layers.iter().filter_map(|l| l.child("tcPr")).chain(tcpr) {
+                    if let Some(v) = pr.child("vAlign") {
+                        valign = match v.attr("val") {
+                            Some("center") => quill_core::props::VAlign::Center,
+                            Some("bottom") => quill_core::props::VAlign::Bottom,
+                            _ => quill_core::props::VAlign::Top,
+                        };
+                    }
                     if let Some(b) = pr.child("tcBorders") {
                         borders = cell_borders(b, &borders, at);
                     }
@@ -1611,6 +1627,7 @@ impl Reader {
                     width,
                     borders,
                     shading,
+                    valign,
                 });
             }
             let height = tr
@@ -1636,7 +1653,7 @@ impl Reader {
             }
             let n = self.doc.styles.get(0);
             let mut row_end = Paragraph::new(n.pap.clone(), row_chp);
-            row_end.pap.in_table = true;
+            row_end.pap.set_level(self.table_depth);
             // A row whose cells are all in one frame ends in it too: a
             // .docx row end has no paragraph settings to say so.
             let cells_frame = out.get(row_start).and_then(|p| p.pap.frame);
@@ -1654,6 +1671,7 @@ impl Reader {
             }));
             out.push(row_end);
         }
+        self.table_depth -= 1;
     }
 
     fn read_paragraph(&mut self, e: &Element, in_table: bool) -> Paragraph {
@@ -1719,6 +1737,11 @@ impl Reader {
         }
         pap.style = style;
         pap.in_table = in_table;
+        pap.nest = if in_table {
+            self.table_depth.saturating_sub(1)
+        } else {
+            0
+        };
         let mut p = Paragraph::new(pap, mark_chp);
         if let Some(sect) = ppr.and_then(|x| x.child("sectPr")) {
             self.page_sizes.push(page_setup(sect));

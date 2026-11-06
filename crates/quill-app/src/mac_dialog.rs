@@ -136,9 +136,49 @@ fn dialog_panel_class() -> &'static AnyClass {
             >(send_event)),
             c"v@:@".as_ptr(),
         );
+        let equivalent: extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> bool =
+            dialog_key_equivalent;
+        objc2::ffi::class_addMethod(
+            raw,
+            sel!(performKeyEquivalent:).as_ptr(),
+            Some(std::mem::transmute::<
+                extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> bool,
+                unsafe extern "C" fn(),
+            >(equivalent)),
+            c"B@:@".as_ptr(),
+        );
         objc2::ffi::objc_registerClassPair(raw);
     }
     AnyClass::get("QuillDialogPanel").expect("dialog panel class was registered")
+}
+
+/// Command-X, C, V, A and Z in a dialog's text field belong to the field.
+/// The menu bar would otherwise claim them for the document behind (or, for
+/// Cut, find its item disabled and do nothing).
+extern "C" fn dialog_key_equivalent(
+    this: *mut AnyObject,
+    _cmd: Sel,
+    event: *mut AnyObject,
+) -> bool {
+    use crate::commands::Cmd;
+    const COMMAND: usize = 1 << 20;
+    const SHIFT_CONTROL_OPTION: usize = (1 << 17) | (1 << 18) | (1 << 19);
+    let flags: usize = unsafe { msg_send![event, modifierFlags] };
+    if flags & COMMAND != 0 && flags & SHIFT_CONTROL_OPTION == 0 {
+        let chars: *mut AnyObject = unsafe { msg_send![event, charactersIgnoringModifiers] };
+        let cmd = match unsafe { rust_string(chars) }.as_str() {
+            "x" => Some(Cmd::Cut),
+            "c" => Some(Cmd::Copy),
+            "v" => Some(Cmd::Paste),
+            "a" => Some(Cmd::SelectAll),
+            "z" => Some(Cmd::Undo),
+            _ => None,
+        };
+        if cmd.is_some_and(edit_in_field) {
+            return true;
+        }
+    }
+    unsafe { msg_send![super(this, class!(NSPanel)), performKeyEquivalent: event] }
 }
 
 fn dispatch(sender: *mut AnyObject) {
@@ -165,6 +205,18 @@ fn dispatch(sender: *mut AnyObject) {
                 })
             }
         }
+    } else if target.id.starts_with("std") || target.id.starts_with("cus") {
+        // A box of the color pop-out: whether this press was the second of
+        // a double-click.
+        let double = unsafe {
+            let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            let event: *mut AnyObject = msg_send![app, currentEvent];
+            !event.is_null() && {
+                let clicks: isize = msg_send![event, clickCount];
+                clicks >= 2
+            }
+        };
+        Some((0, double, false))
     } else {
         target.choice
     };
@@ -494,12 +546,7 @@ pub fn show_about() {
 /// Native conversion is deliberately conservative. A custom canvas item may
 /// be interactive or a live preview, so it remains in the old renderer.
 pub fn supported(dialog: &Dialog) -> bool {
-    is_alert(dialog)
-        || is_commands(dialog)
-        || !dialog
-            .items
-            .iter()
-            .any(|item| matches!(item.kind, Kind::Custom))
+    is_alert(dialog) || is_commands(dialog) || !dialog.needs_canvas()
 }
 
 fn is_commands(dialog: &Dialog) -> bool {
@@ -541,6 +588,8 @@ enum ControlKind {
     Group,
     Table,
     Description,
+    /// A color button; the color its picture was last drawn in.
+    Swatch,
 }
 
 struct Control {
@@ -549,6 +598,8 @@ struct Control {
     id: &'static str,
     kind: ControlKind,
     options: Option<Vec<String>>,
+    /// For a color button, the color its picture shows now.
+    swatch: std::cell::Cell<u32>,
 }
 
 pub struct NativeDialog {
@@ -558,6 +609,8 @@ pub struct NativeDialog {
     _alert: Option<Retained<AnyObject>>,
     parent: *mut AnyObject,
     controls: Vec<Control>,
+    /// The panel popped out beside a control, while there is one.
+    popover: Option<Popover>,
     depth: usize,
     title: String,
     modeless: bool,
@@ -666,6 +719,10 @@ impl NativeDialog {
                     Kind::Popup { options, .. } => Some(options.clone()),
                     _ => None,
                 },
+                swatch: std::cell::Cell::new(match &item.kind {
+                    Kind::Swatch { rgb, .. } => *rgb,
+                    _ => 0,
+                }),
             });
         }
         let mut result = Self {
@@ -673,6 +730,7 @@ impl NativeDialog {
             _alert: None,
             parent,
             controls,
+            popover: None,
             depth,
             title: native_title(dialog).to_string(),
             modeless: dialog.modeless,
@@ -767,6 +825,7 @@ impl NativeDialog {
                 id: item.id,
                 kind: ControlKind::Button,
                 options: None,
+                swatch: std::cell::Cell::new(0),
             });
         }
 
@@ -787,6 +846,7 @@ impl NativeDialog {
             _alert: Some(alert),
             parent,
             controls,
+            popover: None,
             depth,
             title: dialog.title.clone(),
             modeless: false,
@@ -838,6 +898,7 @@ impl NativeDialog {
                     | ControlKind::Static
                     | ControlKind::Group
                     | ControlKind::Table
+                    | ControlKind::Swatch
                     | ControlKind::Description => {}
                 }
             }
@@ -886,7 +947,9 @@ impl NativeDialog {
                         let _: () = msg_send![ptr, setTitle: &*value];
                     }
                     Kind::Popup { selected, .. } => {
-                        if *selected != usize::MAX {
+                        if *selected != usize::MAX
+                            && !matches!(control.kind, ControlKind::Popup(true))
+                        {
                             let _: () = msg_send![ptr, selectItemAtIndex: *selected as isize];
                         }
                     }
@@ -897,6 +960,11 @@ impl NativeDialog {
                     Kind::Button { .. } => {
                         let value = NSString::from_str(&item.label);
                         let _: () = msg_send![ptr, setTitle: &*value];
+                    }
+                    Kind::Swatch { rgb, button: true } if control.swatch.get() != *rgb => {
+                        let frame: NSRect = msg_send![ptr, frame];
+                        set_swatch_picture(ptr, *rgb, frame.size);
+                        control.swatch.set(*rgb);
                     }
                     Kind::Group => {
                         let value = NSString::from_str(&item.label);
@@ -941,6 +1009,7 @@ impl NativeDialog {
                 }
             }
         }
+        self.sync_popover(dialog);
         if is_commands(dialog) {
             let panel = self.panel_id();
             if let Ok(mut panels) = capturing().lock() {
@@ -952,15 +1021,92 @@ impl NativeDialog {
         }
     }
 
+    /// Open, change or close the panel popped out beside a control to match
+    /// what the model says.
+    fn sync_popover(&mut self, dialog: &Dialog) {
+        let Some(spec) = &dialog.popout else {
+            self.popover = None;
+            return;
+        };
+        if self.popover.as_ref().is_some_and(|p| p.spec == *spec) {
+            return;
+        }
+        let panel = Retained::as_ptr(&self.panel) as *mut AnyObject;
+        let Some(anchor) = self.controls.iter().find(|c| c.id == spec.anchor) else {
+            return;
+        };
+        let anchor = Retained::as_ptr(&anchor.object) as *mut AnyObject;
+        unsafe {
+            let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+            let delegate: *mut AnyObject = msg_send![app, delegate];
+            let Some((view, controls)) = popover_view(spec, panel, delegate) else {
+                return;
+            };
+            let vc: *mut AnyObject = msg_send![class!(NSViewController), new];
+            if vc.is_null() {
+                return;
+            }
+            let _: () = msg_send![vc, setView: Retained::as_ptr(&view) as *mut AnyObject];
+            if let Some(p) = &mut self.popover {
+                // Already open: swap what is in it, as a box is chosen.
+                let _: () = msg_send![&*p.object, setContentViewController: vc];
+                if let Ok(mut a) = actions().lock() {
+                    a.retain(|a| !p.controls.contains(&a.control));
+                }
+                p.controls = controls;
+                p.spec = spec.clone();
+            } else {
+                let raw: *mut AnyObject = msg_send![class!(NSPopover), new];
+                if let Some(object) = Retained::from_raw(raw) {
+                    // Transient: a press outside puts it away.
+                    let _: () = msg_send![&*object, setBehavior: 1isize];
+                    let _: () = msg_send![&*object, setContentViewController: vc];
+                    let bounds: NSRect = msg_send![anchor, bounds];
+                    // Below the control (the lower edge of the view).
+                    let _: () = msg_send![
+                        &*object, showRelativeToRect: bounds ofView: anchor preferredEdge: 1usize
+                    ];
+                    self.popover = Some(Popover {
+                        object,
+                        spec: spec.clone(),
+                        controls,
+                        opened: std::time::Instant::now(),
+                    });
+                }
+            }
+            let _: () = msg_send![vc, release];
+        }
+    }
+
+    /// Whether the system put the popped-out panel away by itself (a press
+    /// outside it), so the model should forget it.
+    pub fn popover_dismissed(&mut self) -> bool {
+        let Some(p) = &self.popover else {
+            return false;
+        };
+        if p.opened.elapsed() < std::time::Duration::from_millis(300) {
+            return false;
+        }
+        let shown: bool = unsafe { msg_send![&*p.object, isShown] };
+        if shown {
+            return false;
+        }
+        self.popover = None;
+        true
+    }
+
     pub fn outcome(dialog: &Dialog, id: &'static str) -> Outcome {
         match id {
             "ok" => Outcome::Ok,
             "cancel" => Outcome::Cancel,
             "apply" => Outcome::Apply,
-            id if dialog
-                .items
-                .iter()
-                .any(|item| item.id == id && matches!(item.kind, Kind::Button { .. })) =>
+            id if dialog.items.iter().any(|item| {
+                item.id == id
+                    && matches!(
+                        item.kind,
+                        Kind::Button { .. } | Kind::Swatch { button: true, .. }
+                    )
+            }) =>
             {
                 Outcome::Button(id)
             }
@@ -978,6 +1124,7 @@ impl Control {
             | (ControlKind::Static, Kind::Text | Kind::Note)
             | (ControlKind::Group, Kind::Group) => true,
             (ControlKind::Table | ControlKind::Description, Kind::Custom) => true,
+            (ControlKind::Swatch, Kind::Swatch { button: true, .. }) => true,
             (ControlKind::Radio(a), Kind::Radio { group: b, .. }) => a == b,
             (
                 ControlKind::Popup(menu_button),
@@ -985,7 +1132,10 @@ impl Control {
                     options, selected, ..
                 },
             ) => {
-                *menu_button == (*selected == usize::MAX)
+                // A menu button keeps its kind whatever the model holds: it
+                // records the last item chosen, which must not rebuild the
+                // window (and reselect the text being typed) on the next edit.
+                (*menu_button || *selected != usize::MAX)
                     && self.options.as_ref().is_some_and(|old| old == options)
             }
             _ => false,
@@ -1024,6 +1174,48 @@ impl Drop for NativeDialog {
     }
 }
 
+/// Give a menu-bar editing command to the text field being edited in a
+/// dialog, if there is one. The menu bar's Cut, Copy, Paste, Select All and
+/// Undo otherwise act on the document behind a Find or Replace window.
+/// Returns whether a field took the command.
+pub fn edit_in_field(cmd: crate::commands::Cmd) -> bool {
+    use crate::commands::Cmd;
+    let action = match cmd {
+        Cmd::Cut => sel!(cut:),
+        Cmd::Copy => sel!(copy:),
+        Cmd::Paste => sel!(paste:),
+        Cmd::SelectAll => sel!(selectAll:),
+        Cmd::Undo => sel!(undo:),
+        _ => return false,
+    };
+    // SAFETY: the menu callback runs on the main thread; these are plain
+    // AppKit queries on live objects, and sendAction walks the responder
+    // chain from the key window's first responder.
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let key: *mut AnyObject = msg_send![app, keyWindow];
+        if key.is_null() {
+            return false;
+        }
+        let responder: *mut AnyObject = msg_send![key, firstResponder];
+        if responder.is_null() {
+            return false;
+        }
+        // A text field being edited has the field editor, an NSText, as its
+        // first responder; the document window's is an ordinary view.
+        let editing: bool = msg_send![responder, isKindOfClass: class!(NSText)];
+        if !editing {
+            return false;
+        }
+        msg_send![
+            app,
+            sendAction: action,
+            to: std::ptr::null::<AnyObject>(),
+            from: std::ptr::null::<AnyObject>()
+        ]
+    }
+}
+
 fn native_rect(r: crate::canvas::Rect, content_height: f64) -> NSRect {
     let x = r.x as f64 * SCALE;
     let h = r.h as f64 * SCALE;
@@ -1057,7 +1249,8 @@ unsafe fn make_control(
         ),
         Kind::Text | Kind::Note => (class!(NSTextField), ControlKind::Static, None),
         Kind::Group => (class!(NSBox), ControlKind::Group, None),
-        Kind::Custom => unreachable!(),
+        Kind::Swatch { button: true, .. } => (class!(NSButton), ControlKind::Swatch, Some(0)),
+        Kind::Custom | Kind::Swatch { .. } | Kind::Slider { .. } => unreachable!(),
     };
     let raw: *mut AnyObject = unsafe { msg_send![class, alloc] };
     let raw: *mut AnyObject = if let Kind::Popup { selected, .. } = item.kind {
@@ -1122,7 +1315,11 @@ unsafe fn make_control(
             Kind::Group => {
                 let _: () = msg_send![ptr, setTitle: &*label];
             }
-            Kind::Custom => unreachable!(),
+            Kind::Swatch { rgb, .. } => {
+                let _: () = msg_send![ptr, setBordered: false];
+                set_swatch_picture(ptr, *rgb, frame.size);
+            }
+            Kind::Custom | Kind::Slider { .. } => unreachable!(),
         }
         if let Some(button_type) = button_type {
             let _: () = msg_send![ptr, setButtonType: button_type];
@@ -1147,6 +1344,131 @@ unsafe fn make_control(
         let _: () = msg_send![content, addSubview: ptr];
     }
     Some((object, None, kind))
+}
+
+/// Draw a color button's picture: the color with a thin gray frame, and
+/// a blue one inside it when `chosen`.
+unsafe fn set_swatch_picture_marked(button: *mut AnyObject, rgb: u32, size: NSSize, chosen: bool) {
+    let part = |shift: u32| ((rgb >> shift) & 0xFF) as f64 / 255.0;
+    unsafe {
+        let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
+        let image: *mut AnyObject = msg_send![image, initWithSize: size];
+        if image.is_null() {
+            return;
+        }
+        let _: () = msg_send![image, lockFocus];
+        let fill = NSRect::new(NSPoint::ZERO, size);
+        let color: *mut AnyObject = msg_send![
+            class!(NSColor), colorWithSRGBRed: part(16) green: part(8) blue: part(0) alpha: 1.0f64
+        ];
+        let _: () = msg_send![color, set];
+        let _: () = msg_send![class!(NSBezierPath), fillRect: fill];
+        let (frame_color, inset): (*mut AnyObject, f64) = if chosen {
+            (msg_send![class!(NSColor), systemBlueColor], 1.0)
+        } else {
+            (msg_send![class!(NSColor), grayColor], 0.5)
+        };
+        let _: () = msg_send![frame_color, set];
+        let line = NSRect::new(
+            NSPoint::new(inset, inset),
+            NSSize::new(size.width - 2.0 * inset, size.height - 2.0 * inset),
+        );
+        let _: () = msg_send![class!(NSBezierPath), strokeRect: line];
+        let _: () = msg_send![image, unlockFocus];
+        let _: () = msg_send![button, setImage: image];
+        let _: () = msg_send![button, setImagePosition: 1usize];
+        let _: () = msg_send![button, setImageScaling: 1usize];
+        let _: () = msg_send![image, release];
+    }
+}
+
+unsafe fn set_swatch_picture(button: *mut AnyObject, rgb: u32, size: NSSize) {
+    unsafe { set_swatch_picture_marked(button, rgb, size, false) }
+}
+
+/// A box of a pop-out, or its button, as it was built.
+struct Popover {
+    object: Retained<AnyObject>,
+    /// What it was built from, to see when the model has changed it.
+    spec: crate::dialog::Popout,
+    /// Its controls, to take their actions away.
+    controls: Vec<usize>,
+    opened: std::time::Instant,
+}
+
+impl Drop for Popover {
+    fn drop(&mut self) {
+        if let Ok(mut a) = actions().lock() {
+            a.retain(|a| !self.controls.contains(&a.control));
+        }
+        unsafe {
+            let _: () = msg_send![&*self.object, close];
+        }
+    }
+}
+
+/// The view holding a pop-out's boxes, its actions going to `panel`.
+unsafe fn popover_view(
+    spec: &crate::dialog::Popout,
+    panel: *mut AnyObject,
+    delegate: *mut AnyObject,
+) -> Option<(Retained<AnyObject>, Vec<usize>)> {
+    let size = NSSize::new(spec.size.0 as f64 * SCALE, spec.size.1 as f64 * SCALE);
+    let raw: *mut AnyObject = unsafe { msg_send![class!(NSView), alloc] };
+    let raw: *mut AnyObject =
+        unsafe { msg_send![raw, initWithFrame: NSRect::new(NSPoint::ZERO, size)] };
+    let view = unsafe { Retained::from_raw(raw) }?;
+    let view_ptr = Retained::as_ptr(&view) as *mut AnyObject;
+    let mut controls = Vec::new();
+    for (index, item) in spec.items.iter().enumerate() {
+        let frame = NSRect::new(
+            NSPoint::new(
+                item.rect.x as f64 * SCALE,
+                size.height - (item.rect.y + item.rect.h) as f64 * SCALE,
+            ),
+            NSSize::new(item.rect.w as f64 * SCALE, item.rect.h as f64 * SCALE),
+        );
+        let raw: *mut AnyObject = unsafe { msg_send![class!(NSButton), alloc] };
+        let raw: *mut AnyObject = unsafe { msg_send![raw, initWithFrame: frame] };
+        if raw.is_null() {
+            continue;
+        }
+        let button = unsafe { Retained::from_raw(raw) }?;
+        let ptr = Retained::as_ptr(&button) as *mut AnyObject;
+        unsafe {
+            let _: () = msg_send![ptr, setButtonType: 0usize];
+            if item.label.is_empty() {
+                let _: () = msg_send![ptr, setBordered: false];
+                let rgb = item.rgb.unwrap_or(0xFFFFFF);
+                if item.rgb.is_some() {
+                    set_swatch_picture_marked(ptr, rgb, frame.size, item.selected);
+                } else {
+                    // An empty custom box: a pale outline.
+                    set_swatch_picture_marked(ptr, 0xF4F4F4, frame.size, false);
+                }
+                if let Some(rgb) = item.rgb {
+                    let tip = NSString::from_str(&format!("#{:06X}", rgb & 0xFF_FFFF));
+                    let _: () = msg_send![ptr, setToolTip: &*tip];
+                }
+            } else {
+                let title = NSString::from_str(item.label);
+                let _: () = msg_send![ptr, setTitle: &*title];
+                let _: () = msg_send![ptr, setBezelStyle: 1usize];
+            }
+            let _: () = msg_send![ptr, setTarget: delegate];
+            let _: () = msg_send![ptr, setAction: sel!(quillDialogAction:)];
+            let _: () = msg_send![view_ptr, addSubview: ptr];
+        }
+        actions().lock().ok()?.push(ActionTarget {
+            control: ptr as usize,
+            panel: panel as usize,
+            id: item.id,
+            choice: Some((index, false, false)),
+            default: false,
+        });
+        controls.push(ptr as usize);
+    }
+    Some((view, controls))
 }
 
 unsafe fn make_commands_control(

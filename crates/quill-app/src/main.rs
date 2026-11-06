@@ -28,9 +28,12 @@ mod link_dialog;
 mod listbox;
 mod local_dictionary;
 #[cfg(target_os = "macos")]
-mod mac_color;
 #[cfg(target_os = "macos")]
 mod mac_dialog;
+#[cfg(target_os = "macos")]
+mod mac_hyphen;
+#[cfg(target_os = "macos")]
+mod mac_lookup;
 #[cfg(target_os = "macos")]
 mod mac_open;
 #[cfg(target_os = "macos")]
@@ -47,6 +50,7 @@ mod merge_dialogs;
 mod native_menu;
 mod outline_bar;
 mod page_dialogs;
+mod palette;
 mod pane;
 mod paste_special;
 mod pdf;

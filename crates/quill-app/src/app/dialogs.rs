@@ -223,6 +223,73 @@ impl WinState {
     /// menu-bar choices arrive through a separate AppKit callback and use
     /// this same gate.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    /// Open or close the color palette beside the Character dialog's color.
+    fn toggle_color_popout(&mut self) {
+        let Some((_, d)) = self.dialogs.last_mut() else {
+            return;
+        };
+        if d.popout.take().is_some() {
+            self.color_pop = None;
+            return;
+        }
+        let Some(rgb) = d.swatch_rgb("color") else {
+            return;
+        };
+        let st = crate::palette::PaletteState::new(Some(quill_core::props::Rgb(rgb)));
+        d.popout = Some(crate::palette::popout(&st, "color"));
+        self.color_pop = Some(st);
+    }
+
+    /// A box of the color pop-out was pressed: choose its color, or on a
+    /// double-click edit it.
+    fn color_popout_box(&mut self, id: &'static str, double: bool) {
+        let Some(st) = &mut self.color_pop else {
+            return;
+        };
+        let Some(pick) = crate::palette::pop_swatch(st, id, double) else {
+            return;
+        };
+        match pick {
+            crate::palette::Pick::Chose(c) => {
+                if let Some((_, d)) = self.dialogs.last_mut() {
+                    d.set_swatch("color", c.0);
+                    d.set_label("color_hex", &crate::palette::hex(c));
+                    d.popout = Some(crate::palette::popout(st, "color"));
+                }
+            }
+            crate::palette::Pick::Edit(slot) => {
+                let (start, target) = crate::palette::edit_of(st, Some(slot));
+                self.open_color_editor(start, target);
+            }
+        }
+    }
+
+    /// The pop-out's Edit Color… button: edit the color chosen.
+    fn color_popout_edit(&mut self) {
+        let Some(st) = &self.color_pop else {
+            return;
+        };
+        let (start, target) = crate::palette::edit_of(st, None);
+        self.open_color_editor(start, target);
+    }
+
+    fn open_color_editor(&mut self, start: quill_core::props::Rgb, target: crate::palette::Target) {
+        if let Some((_, d)) = self.dialogs.last_mut() {
+            d.popout = None;
+        }
+        let (editor, es) = crate::palette::editor(start, target);
+        self.dialogs.push((Which::EditColor(es), editor));
+    }
+
+    /// A slider in the open dialog moved under the pointer.
+    pub(super) fn slider_moved(&mut self, o: Outcome) {
+        if let Outcome::Changed(id) = o
+            && let Some((Which::EditColor(st), d)) = self.dialogs.last_mut()
+        {
+            crate::palette::edit_changed(st, d, id);
+        }
+    }
+
     pub(super) fn modal_dialog_open(&self) -> bool {
         self.dialogs.last().is_some_and(|(_, d)| !d.modeless)
     }
@@ -384,7 +451,12 @@ impl WinState {
                     self.dialogs.pop();
                 }
                 Outcome::Changed(id) if *kind == 0 => {
-                    format_dialogs::character_changed(d, id, None)
+                    if *id == "color" && format_dialogs::wants_palette(d) {
+                        let (palette, st) = crate::palette::palette(None);
+                        self.dialogs.push((Which::Palette(st), palette));
+                    } else {
+                        format_dialogs::character_changed(d, id);
+                    }
                 }
                 _ => {}
             },
@@ -740,6 +812,62 @@ impl WinState {
                 }
                 _ => {}
             },
+            Which::Palette(st) => match o {
+                Outcome::Clicked(id, x, y, _) => {
+                    if let crate::palette::Click::Edit(slot) =
+                        crate::palette::clicked(st, d, id, *x, *y)
+                    {
+                        let (start, target) = crate::palette::edit_of(st, Some(slot));
+                        let (editor, es) = crate::palette::editor(start, target);
+                        self.dialogs.push((Which::EditColor(es), editor));
+                    }
+                }
+                Outcome::Changed(id) => crate::palette::changed(st, d, id),
+                Outcome::Button("edit") => {
+                    let (start, target) = crate::palette::edit_of(st, None);
+                    let (editor, es) = crate::palette::editor(start, target);
+                    self.dialogs.push((Which::EditColor(es), editor));
+                }
+                Outcome::Ok | Outcome::Cancel => {
+                    let (chosen, start) = if *o == Outcome::Ok {
+                        (Some(crate::palette::finish(st)), st.start)
+                    } else {
+                        (None, st.start)
+                    };
+                    self.dialogs.pop();
+                    // Back in the dialog that asked: the color chosen, or
+                    // the one it had.
+                    if let Some((_, parent)) = self.dialogs.last_mut() {
+                        format_dialogs::show_color(parent, chosen.or(start));
+                    }
+                }
+                _ => {}
+            },
+            Which::EditColor(st) => match o {
+                Outcome::Changed(id) => crate::palette::edit_changed(st, d, id),
+                Outcome::Ok => {
+                    let (target, color) = (st.target, crate::palette::edit_color(d));
+                    self.dialogs.pop();
+                    match self.dialogs.last_mut() {
+                        Some((Which::Palette(ps), pd)) => {
+                            crate::palette::edited(ps, pd, target, color);
+                        }
+                        // From the pop-out beside a color: the color is
+                        // remembered and becomes the dialog's.
+                        Some((_, cd)) if cd.swatch_rgb("color").is_some() => {
+                            crate::palette::remember_edit(target, color);
+                            cd.set_swatch("color", color.0);
+                            cd.set_label("color_hex", &crate::palette::hex(color));
+                        }
+                        _ => {}
+                    }
+                    self.color_pop = None;
+                }
+                Outcome::Cancel => {
+                    self.dialogs.pop();
+                }
+                _ => {}
+            },
             Which::DropCap => match o {
                 Outcome::Changed(id) => crate::frame_dialog::drop_cap_changed(d, id),
                 Outcome::Ok => {
@@ -816,8 +944,27 @@ impl WinState {
             Outcome::Cancel => {
                 self.dialogs.pop();
             }
+            Outcome::Button("color") if matches!(which, Which::Character(_)) => {
+                self.toggle_color_popout();
+            }
+            Outcome::Swatch { id, double } if matches!(which, Which::Character(_)) => {
+                self.color_popout_box(id, double);
+            }
+            Outcome::Button("edit") if matches!(which, Which::Character(_)) => {
+                self.color_popout_edit();
+            }
+            Outcome::Changed("color")
+                if matches!(which, Which::Character(_)) && format_dialogs::wants_palette(d) =>
+            {
+                let start = match which {
+                    Which::Character(base) => Some(base.color),
+                    _ => None,
+                };
+                let (palette, st) = crate::palette::palette(start);
+                self.dialogs.push((Which::Palette(st), palette));
+            }
             Outcome::Changed(id) => format_dialogs::changed(which, d, &self.view, id),
-            Outcome::Clicked(..) => {}
+            Outcome::Clicked(..) | Outcome::Swatch { .. } => {}
             Outcome::Button("usedefault") => {
                 if format_dialogs::use_as_default(which, d, &mut self.view) {
                     self.dialogs.pop();

@@ -18,6 +18,10 @@ use quill_core::props::{
 /// Which dialog is open, and what it started from.
 #[derive(Clone, Debug)]
 pub enum Which {
+    /// The color palette, opened from a Color popup's More Colors….
+    Palette(crate::palette::PaletteState),
+    /// Its editor, for one color.
+    EditColor(crate::palette::EditState),
     /// Paste Special, and the forms it offers.
     PasteSpecial(Vec<crate::paste_special::Form>),
     Character(CharProps),
@@ -123,6 +127,9 @@ pub fn draw_custom(which: &Which, id: &str, r: Rect, c: &mut Canvas, label: &mut
     if let Which::Commands(st) = which {
         crate::commands_dialog::draw(st, id, r, c, label);
     }
+    if let Which::Palette(st) = which {
+        crate::palette::draw(st, id, r, c);
+    }
 }
 
 /// The note icon of an alert: a page with lines of text, as the original's.
@@ -141,7 +148,7 @@ fn draw_note_icon(r: Rect, c: &mut Canvas) {
 pub fn changed(which: &mut Which, d: &mut Dialog, view: &DocView, id: &str) {
     match which {
         Which::Style(st) => crate::style_dialog::changed(st, d, view, id),
-        Which::Character(base) => character_changed(d, id, Some(base.color)),
+        Which::Character(_) => character_changed(d, id),
         Which::Border(st) => border_dialog::changed(st, d, id),
         Which::Section if id == "margin_numbers" => page_dialogs::margin_numbers_changed(d),
         Which::Toc | Which::Index => crate::contents_dialogs::level_changed(d, id),
@@ -298,10 +305,38 @@ pub(crate) const UNDERLINE_KINDS: [Underline; 5] = [
     Underline::Dotted,
 ];
 
+/// Whether the Character dialog's color is a button that pops out the
+/// color palette (the Mac's native dialogs have the pop-out), instead of
+/// a popup whose More Colors… opens the palette in a window.
+pub const COLOR_BUTTON: bool = cfg!(target_os = "macos");
+
 /// Format > Character (⌘D).
 pub fn character(
     view: &DocView,
     font_families: &[quill_layout::FontFamilyInfo],
+) -> (Dialog, Which) {
+    build_character(view, font_families, COLOR_BUTTON)
+}
+
+/// The Character dialog with its color button, whatever the platform.
+#[cfg(test)]
+pub fn build_character_with_button(view: &DocView) -> (Dialog, Which) {
+    build_character(view, &[], true)
+}
+
+/// The Character dialog as Find uses it: its color a popup that can say
+/// any color.
+pub fn character_for_find(
+    view: &DocView,
+    font_families: &[quill_layout::FontFamilyInfo],
+) -> (Dialog, Which) {
+    build_character(view, font_families, false)
+}
+
+fn build_character(
+    view: &DocView,
+    font_families: &[quill_layout::FontFamilyInfo],
+    color_button: bool,
 ) -> (Dialog, Which) {
     let c = view.current_chp();
     let mut d = Dialog::new("Character", 384.0, 262.0);
@@ -343,8 +378,13 @@ pub fn character(
         120.0,
     );
     d.text("Color:", 146.0, 56.0);
-    let (colors, color) = color_options(Some(c.color), false);
-    d.popup_owned("color", colors, color, 146.0, 74.0, 134.0);
+    if color_button {
+        d.swatch_button("color", 146.0, 74.0, 44.0, 22.0, c.color.0);
+        d.text_as("color_hex", &crate::palette::hex(c.color), 198.0, 78.0);
+    } else {
+        let (colors, color) = color_options(Some(c.color), false);
+        d.popup_owned("color", colors, color, 146.0, 74.0, 134.0);
+    }
 
     d.group("Style", 12.0, 104.0, 128.0, 152.0);
     let styles = [
@@ -390,8 +430,8 @@ pub fn character(
 
 /// Keep the "By:" fields in step with their radio buttons, filling in
 /// The original's defaults (3 pt up, 2 pt down, 1.5 pt condensed, 3 pt expanded).
-/// The last entry in the Color popup, which opens a color picker.
-pub const OTHER_COLOR: &str = "Other…";
+/// The last entry in the Color popup, which opens the color palette.
+pub const OTHER_COLOR: &str = "More Colors…";
 
 /// The Color popup's entries and which is selected: the original's eight colors,
 /// `have` if it is none of those (as "#RRGGBB"), then Other…. With `any`,
@@ -427,35 +467,24 @@ pub fn color_named(name: &str) -> Option<Rgb> {
         .map(|(_, c)| *c)
 }
 
-/// Other… was chosen in a Color popup: pick a color, starting from
-/// `start`, and add it to the popup. Canceled, the popup goes back to
-/// `start`.
-pub fn color_other(d: &mut Dialog, start: Option<Rgb>) {
-    if d.selected_text("color") != OTHER_COLOR {
-        return;
-    }
+/// Whether the Color popup has been taken to Other…, which opens the
+/// color palette.
+pub fn wants_palette(d: &Dialog) -> bool {
+    d.selected_text("color") == OTHER_COLOR
+}
+
+/// Put `color` in the Color popup (None for any color, in Find), as it
+/// is after the palette has been used or canceled.
+pub fn show_color(d: &mut Dialog, color: Option<Rgb>) {
     let any = d.options("color").first().is_some_and(|n| n.is_empty());
-    let picked = pick_color(start.unwrap_or(Rgb::BLACK)).or(start);
-    let (names, selected) = color_options(picked, any);
+    let (names, selected) = color_options(color, any);
     d.set_options("color", names, selected);
 }
 
-#[cfg(target_os = "macos")]
-fn pick_color(start: Rgb) -> Option<Rgb> {
-    if cfg!(test) {
-        return None;
-    }
-    crate::mac_color::choose("Text Color", start)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn pick_color(_start: Rgb) -> Option<Rgb> {
-    None
-}
-
-pub fn character_changed(d: &mut Dialog, id: &str, start: Option<Rgb>) {
+pub fn character_changed(d: &mut Dialog, id: &str) {
+    // The color popup's Other… is taken up by the window, which opens
+    // the palette.
     if id == "color" {
-        color_other(d, start);
         return;
     }
     let default = match id {
@@ -495,8 +524,12 @@ fn read_character(d: &Dialog, base: &CharProps, view: &mut DocView) -> Option<Ch
     }
     c.size = (size * 2.0).round() as u16;
     c.underline = UNDERLINE_KINDS[d.selected("underline").min(4)];
-    // Other… with nothing picked leaves the color as it was.
-    c.color = color_named(&d.selected_text("color")).unwrap_or(base.color);
+    // A color button says what it shows; with a popup, More Colors… with
+    // nothing picked leaves the color as it was.
+    c.color = match d.swatch_rgb("color") {
+        Some(rgb) => Rgb(rgb),
+        None => color_named(&d.selected_text("color")).unwrap_or(base.color),
+    };
     c.bold = d.is_on("bold");
     c.italic = d.is_on("italic");
     c.outline = d.is_on("outline");
@@ -664,6 +697,10 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
                 return false;
             };
             let base = *base;
+            // A color chosen is a color used: the palette keeps it.
+            if target.color != base.color {
+                crate::palette::remember_used(target.color);
+            }
             view.format_chars("Formatting", move |c| {
                 macro_rules! changed {
                     ($($f:ident),*) => { $( if target.$f != base.$f { c.$f = target.$f; } )* };
@@ -740,6 +777,8 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
         | Which::Clipboard(_)
         | Which::PasteSpecial(_)
         | Which::Alert(_)
+        | Which::Palette(_)
+        | Which::EditColor(_)
         | Which::Frame
         | Which::DropCap => true,
         Which::Section => page_dialogs::apply_section(d, view),
@@ -810,15 +849,33 @@ mod tests {
     fn ok_without_changes_keeps_a_color_not_in_the_menu() {
         let mut v = view("Some text");
         v.format_chars("Formatting", |c| c.color = Rgb(0x123456));
-        let (mut d, mut which) = character(&v, &[]);
-        assert_eq!(d.selected_text("color"), "#123456");
+        // With the color button, it shows what the color is.
+        let (mut d, mut which) = build_character(&v, &[], true);
+        assert_eq!(d.swatch_rgb("color"), Some(0x123456));
+        assert_eq!(d.item_label("color_hex"), "#123456");
         assert!(apply(&mut which, &mut d, &mut v));
         assert_eq!(v.doc.main.paras[0].chp_of_char(0).color, Rgb(0x123456));
-        // Other… with nothing picked goes back to the color it had.
+        // A color chosen is read from the button.
+        d.set_swatch("color", 0xFF8000);
+        assert!(apply(&mut which, &mut d, &mut v));
+        assert_eq!(v.doc.main.paras[0].chp_of_char(0).color, Rgb(0xFF8000));
+        // With a popup (Find, and platforms without the pop-out) the color
+        // not in the menu is its own entry.
+        let (mut d, mut which) = build_character(&v, &[], false);
+        assert_eq!(d.selected_text("color"), "#FF8000");
+        assert!(apply(&mut which, &mut d, &mut v));
+        assert_eq!(v.doc.main.paras[0].chp_of_char(0).color, Rgb(0xFF8000));
+        // More Colors… asks for the palette; a Cancel there puts the
+        // color it had back, and a choice puts that in.
         let n = d.options("color").len();
         d.set_selected("color", n - 1);
-        character_changed(&mut d, "color", Some(Rgb(0x123456)));
+        assert!(wants_palette(&d));
+        show_color(&mut d, Some(Rgb(0x123456)));
         assert_eq!(d.selected_text("color"), "#123456");
+        assert!(!wants_palette(&d));
+        show_color(&mut d, Some(Rgb(0xABCDEF)));
+        assert_eq!(d.selected_text("color"), "#ABCDEF");
+        assert_eq!(color_named(&d.selected_text("color")), Some(Rgb(0xABCDEF)));
         assert_eq!(color_named("Red"), Some(Rgb(0xFF0000)));
         assert_eq!(color_named("#00FF7F"), Some(Rgb(0x00FF7F)));
     }

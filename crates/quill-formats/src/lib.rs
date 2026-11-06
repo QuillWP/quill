@@ -839,6 +839,34 @@ mod tests {
     use quill_core::{Position, StoryId, text};
 
     #[test]
+    fn cell_vertical_alignment_survives_every_format() {
+        use quill_core::props::VAlign;
+        let mut doc = quill_core::Document::new();
+        doc.insert_table(StoryId::Main, Position::new(0, 0), 1, 3, 2000);
+        let row = quill_core::table::row_at(&doc.main.paras, 0).unwrap();
+        let mut props = quill_core::table::row_props(&doc.main.paras, &row, 6000);
+        props.cells[1].valign = VAlign::Center;
+        props.cells[2].valign = VAlign::Bottom;
+        doc.set_row(StoryId::Main, row.end, props);
+        let dir = std::env::temp_dir().join(format!("quill-valign-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for format in [Format::Quill, Format::Docx, Format::Rtf] {
+            let path = dir.join(format!("a.{}", format.extensions()[0]));
+            save(&doc, &path, format).unwrap();
+            let back = load(&path).unwrap();
+            let row = quill_core::table::row_at(&back.main.paras, 0).unwrap();
+            let props = quill_core::table::row_props(&back.main.paras, &row, 6000);
+            let got: Vec<VAlign> = props.cells.iter().map(|c| c.valign).collect();
+            assert_eq!(
+                got,
+                [VAlign::Top, VAlign::Center, VAlign::Bottom],
+                "{format:?}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn save_and_load_files() {
         let dir = std::env::temp_dir().join(format!("quill-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

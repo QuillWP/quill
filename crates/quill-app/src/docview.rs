@@ -16,7 +16,9 @@ use quill_layout::{
 };
 use std::time::{Duration, Instant};
 
+mod cells;
 mod changes;
+pub use cells::CELL_ALIGNMENTS;
 mod clipboard;
 mod compose;
 mod contents;
@@ -29,6 +31,7 @@ mod link;
 mod live_spelling;
 mod memory;
 pub use language::HyphenSpot;
+mod borders;
 mod notes;
 mod outline;
 mod picture;
@@ -36,6 +39,7 @@ mod sections;
 mod table_move;
 mod tools;
 
+pub use borders::BorderKind;
 pub use clipboard::{Clip, Clipboard};
 pub(crate) use drawing::{draw_border_box, paint_paragraph};
 pub use link::LinkTarget;
@@ -107,6 +111,9 @@ pub enum Effect {
     DeleteAnnotation,
     /// Fill the screen with the window, or put it back.
     FullScreen,
+    /// Zoom in (1) or out (-1) a step, or back to 100% (0).
+    Zoom(i8),
+    LookUp,
 }
 
 /// What each window on a shared document keeps for itself: where it is
@@ -178,6 +185,22 @@ struct RowGeom {
     /// boundary.
     cells: Vec<(usize, usize, f32, f32)>,
     props: quill_core::RowProps,
+    /// The rows of tables in this row's cells, at any depth.
+    nested: Vec<NestedRow>,
+}
+
+/// A row of a table inside a cell: where it sits, in points from the left
+/// margin and the top of the text.
+#[derive(Clone, Debug)]
+struct NestedRow {
+    /// Its first paragraph and its end mark.
+    first: usize,
+    last: usize,
+    /// How many tables deep it is: 2 for a table in a cell.
+    level: u8,
+    top: f32,
+    height: f32,
+    geom: RowGeom,
 }
 
 /// Remembered for Edit > Repeat.
@@ -306,6 +329,8 @@ pub struct DocView {
     /// A picture handle being dragged.
     pic_drag: Option<picture::PicDrag>,
     table_drag: Option<table_move::TableDrag>,
+    /// A cell border being dragged.
+    border_drag: Option<borders::BorderDrag>,
     /// Frames placed on the pages (Page Layout view and printing).
     frames: Vec<frames::FrameBox>,
     /// The areas each paragraph's lines were laid out to keep clear of,
@@ -389,6 +414,7 @@ impl DocView {
             back: Vec::new(),
             pic_drag: None,
             table_drag: None,
+            border_drag: None,
             frames: Vec::new(),
             wraps: Vec::new(),
             want_wrap: Vec::new(),
@@ -630,7 +656,25 @@ impl DocView {
                     .iter()
                     .position(|c| x < c.3)
                     .unwrap_or(row.cells.len() - 1);
-                let (a, last, _, _) = row.cells[k];
+                let (mut a, mut last, _, _) = row.cells[k];
+                // A table in that cell, under the point: its cell instead,
+                // and so on inwards.
+                let mut level = 1;
+                while let Some(inner) = row.nested.iter().find(|n| {
+                    n.level == level + 1
+                        && n.first >= a
+                        && n.last <= last
+                        && n.top <= y
+                        && y < n.top + n.height
+                }) {
+                    let cells = &inner.geom.cells;
+                    let k = cells
+                        .iter()
+                        .position(|c| x < c.3)
+                        .unwrap_or(cells.len() - 1);
+                    (a, last) = (cells[k].0, cells[k].1);
+                    level += 1;
+                }
                 (a..=last).rev().find(|&p| self.tops[p] <= y).unwrap_or(a)
             }
         };
@@ -669,6 +713,27 @@ impl DocView {
 
     pub fn max_scroll(&self) -> f32 {
         (self.total_height() - self.area.h).max(0.0)
+    }
+
+    /// Scroll so the middle of the window stays on the same spot of the
+    /// document when the zoom goes from `old` to `new`. The area is still
+    /// the old zoom's: the window is the same size, so it covers
+    /// `old / new` as much of the document afterwards.
+    pub fn zoom_around_center(&mut self, old: f32, new: f32) {
+        if !(old > 0.0 && new > 0.0 && old.is_finite() && new.is_finite()) || self.area.h <= 0.0 {
+            return;
+        }
+        let ratio = old / new;
+        self.scroll_y = (self.scroll_y + self.area.h / 2.0 * (1.0 - ratio)).max(0.0);
+        if self.page_view {
+            let (pw, _) = self.page_size();
+            let centered = |w: f32| ((w - pw) / 2.0).max(PAGE_GAP).floor();
+            let (before, after) = (self.area.w, self.area.w * ratio);
+            // How far the middle of the window is from the page's left edge.
+            let from_edge = before / 2.0 - (centered(before) - self.scroll_x);
+            let most = (pw + 2.0 * PAGE_GAP - after).max(0.0);
+            self.scroll_x = (centered(after) - after / 2.0 + from_edge).clamp(0.0, most);
+        }
     }
 
     /// Scroll so the selection's moving end is on screen.
@@ -726,7 +791,11 @@ impl DocView {
             _ => 1,
         };
         self.last_click = Some((now, wx, wy, count));
-        if count == 1 && (self.picture_mouse_down(wx, wy, shift) || self.table_mouse_down(wx, wy)) {
+        if count == 1
+            && (self.picture_mouse_down(wx, wy, shift)
+                || self.table_mouse_down(wx, wy)
+                || self.border_mouse_down(wx, wy))
+        {
             return;
         }
         if self.outline {
@@ -809,7 +878,10 @@ impl DocView {
     }
 
     pub fn mouse_drag(&mut self, wx: f32, wy: f32) {
-        if self.picture_drag(wx, wy) || self.table_mouse_drag(wx, wy) {
+        if self.picture_drag(wx, wy)
+            || self.table_mouse_drag(wx, wy)
+            || self.border_mouse_drag(wx, wy)
+        {
             return;
         }
         let Some((unit, origin)) = self.drag else {
@@ -837,10 +909,14 @@ impl DocView {
         self.drag = None;
         self.picture_mouse_up();
         self.table_mouse_up();
+        self.border_mouse_up();
     }
 
     pub fn dragging(&self) -> bool {
-        self.drag.is_some() || self.pic_drag.is_some() || self.table_drag.is_some()
+        self.drag.is_some()
+            || self.pic_drag.is_some()
+            || self.table_drag.is_some()
+            || self.border_drag.is_some()
     }
 
     /// The whole line around `pos`, as clicking in the selection bar picks.
@@ -1158,6 +1234,154 @@ mod tests {
             .join(" ")
     }
 
+    /// A 3 by 3 table with "r0c0" and so on in its cells, then an empty
+    /// paragraph. Cell (r, k) is paragraph 4r + k.
+    fn grid() -> DocView {
+        let mut v = DocView::new(Document::new(), "t".into());
+        v.doc.insert_table(MAIN, Position::new(0, 0), 3, 3, 1440);
+        for r in 0..3 {
+            for k in 0..3 {
+                v.sel = Selection::caret(Position::new(4 * r + k, 0));
+                v.type_text(&format!("r{r}c{k}"));
+            }
+        }
+        v.doc.forget_history();
+        v
+    }
+
+    #[test]
+    fn dragging_across_cells_selects_a_rectangle_of_whole_cells() {
+        let mut clip = Clipboard::new();
+        let mut v = grid();
+        // From the middle of r0c1 to the middle of r1c2.
+        v.sel = Selection::new(Position::new(1, 2), Position::new(6, 1));
+        let block = v.cell_block().unwrap();
+        assert_eq!((block.rows.len(), block.from, block.to), (2, 1, 2));
+        assert_eq!(block.cells(), [(1, 1), (2, 2), (5, 5), (6, 6)]);
+        // Dragged up and to the left, it is the same rectangle.
+        v.sel = Selection::new(Position::new(6, 1), Position::new(1, 2));
+        assert_eq!(v.cell_block(), Some(block));
+        // Within one cell it is ordinary text.
+        v.sel = Selection::new(Position::new(1, 0), Position::new(1, 2));
+        assert!(v.cell_block().is_none());
+
+        // Bold goes on the selected cells only, all of their text.
+        v.sel = Selection::new(Position::new(1, 2), Position::new(6, 1));
+        v.exec(Cmd::Bold, false, &mut clip);
+        let bold = |v: &DocView, p: usize| v.doc.main.paras[p].chp_at(0).bold;
+        assert!([1, 2, 5, 6].iter().all(|&p| bold(&v, p)));
+        assert!([0, 4, 8, 9, 10].iter().all(|&p| !bold(&v, p)));
+        assert!(v.doc.main.paras[1].chp_of_char(0).bold);
+
+        // Copy makes a 2 by 2 table of just those cells.
+        let block = v.cell_block().unwrap();
+        let frag = v
+            .doc
+            .copy_cells(MAIN, &block.rows, block.from, block.to, 9360);
+        let rows: Vec<_> = frag
+            .paras
+            .iter()
+            .filter(|p| p.mark == Mark::RowEnd)
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|r| r.row.as_ref().unwrap().cells.len() == 2)
+        );
+        assert_eq!(frag.paras[0].text, "r0c1");
+
+        // Delete empties them and leaves the table in shape.
+        v.exec(Cmd::Backspace, false, &mut clip);
+        let text = |v: &DocView, p: usize| v.doc.main.paras[p].text.clone();
+        assert!([1, 2, 5, 6].iter().all(|&p| text(&v, p).is_empty()));
+        assert_eq!(text(&v, 0), "r0c0");
+        assert_eq!(text(&v, 10), "r2c2");
+        assert_eq!(table::table_rows(&v.doc.main.paras, 0).len(), 3);
+        assert_eq!(v.sel, Selection::caret(Position::new(1, 0)));
+        v.exec(Cmd::Undo, false, &mut clip);
+        assert_eq!(text(&v, 6), "r1c2");
+    }
+
+    #[test]
+    fn pasting_into_selected_cells_fills_them_one_for_one() {
+        let mut clip = Clipboard::without_system();
+        let mut v = grid();
+        let text = |v: &DocView, p: usize| v.doc.main.paras[p].text.clone();
+        // Copy the first row's first two cells, paste into a block that
+        // starts at r1c0: the two cells land there, the rest is untouched.
+        v.sel = Selection::new(Position::new(0, 1), Position::new(1, 1));
+        v.exec(Cmd::Copy, false, &mut clip);
+        v.sel = Selection::new(Position::new(4, 1), Position::new(10, 1));
+        v.exec(Cmd::Paste, false, &mut clip);
+        assert_eq!(text(&v, 4), "r0c0");
+        assert_eq!(text(&v, 5), "r0c1");
+        assert_eq!(text(&v, 6), "r1c2");
+        assert_eq!(text(&v, 8), "r2c0");
+        assert_eq!(table::table_rows(&v.doc.main.paras, 0).len(), 3);
+        v.exec(Cmd::Undo, false, &mut clip);
+        assert_eq!(text(&v, 4), "r1c0");
+
+        // One value fills every selected cell.
+        v.sel = Selection::new(Position::new(2, 0), Position::new(2, 4));
+        v.exec(Cmd::Copy, false, &mut clip);
+        v.sel = Selection::new(Position::new(4, 1), Position::new(9, 1));
+        v.exec(Cmd::Paste, false, &mut clip);
+        assert!([4, 5, 8, 9].iter().all(|&p| text(&v, p) == "r0c2"));
+        assert_eq!(text(&v, 6), "r1c2");
+        assert_eq!(text(&v, 10), "r2c2");
+
+        // Text from another program: tabs across, line ends down.
+        let mut other = Clipboard::without_system();
+        other.put_text("x\ty\nz\tw");
+        v.sel = Selection::new(Position::new(0, 1), Position::new(5, 1));
+        v.exec(Cmd::Paste, false, &mut other);
+        assert_eq!([0, 1, 4, 5].map(|p| text(&v, p)), ["x", "y", "z", "w"]);
+        assert_eq!(text(&v, 2), "r0c2");
+    }
+
+    #[test]
+    fn cell_alignment_goes_on_each_selected_cell() {
+        use quill_core::props::VAlign;
+        let mut v = grid();
+        v.sel = Selection::new(Position::new(4, 1), Position::new(9, 1));
+        v.align_cells(VAlign::Bottom, Align::Center);
+        let paras = &v.doc.main.paras;
+        let rows = table::table_rows(paras, 0);
+        let valign = |r: usize, k: usize| table::row_props(paras, &rows[r], 9360).cells[k].valign;
+        assert_eq!(valign(1, 0), VAlign::Bottom);
+        assert_eq!(valign(2, 1), VAlign::Bottom);
+        assert_eq!(valign(1, 2), VAlign::Top);
+        assert_eq!(valign(0, 0), VAlign::Top);
+        assert_eq!(paras[5].pap.align, Align::Center);
+        assert_eq!(paras[6].pap.align, Align::Left);
+        // With just an insertion point, its own cell.
+        v.sel = Selection::caret(Position::new(10, 0));
+        v.align_cells(VAlign::Center, Align::Right);
+        assert_eq!(v.cell_alignment(), Some((VAlign::Center, Align::Right)));
+        v.sel = Selection::caret(Position::new(4, 0));
+        assert_eq!(v.cell_alignment(), Some((VAlign::Bottom, Align::Center)));
+    }
+
+    #[test]
+    fn centered_and_bottom_cells_sit_lower_in_a_tall_row() {
+        use quill_core::props::VAlign;
+        let mut fonts = quill_layout::Fonts::new(quill_layout::Catalog::scan_system());
+        let mut v = grid();
+        // Cell r0c0 gets three lines, so the first row is three lines tall.
+        v.sel = Selection::caret(Position::new(0, 4));
+        let mut clip = Clipboard::new();
+        v.exec(Cmd::NewParagraph, false, &mut clip);
+        v.exec(Cmd::NewParagraph, false, &mut clip);
+        v.sel = Selection::caret(Position::new(3, 0));
+        v.align_cells(VAlign::Center, Align::Left);
+        v.sel = Selection::caret(Position::new(4, 0));
+        v.align_cells(VAlign::Bottom, Align::Left);
+        v.update_layout(&mut fonts);
+        let line = v.tops[1] - v.tops[0];
+        assert!((v.tops[3] - (v.tops[0] + line)).abs() < 1.5, "centered");
+        assert!((v.tops[4] - (v.tops[0] + 2.0 * line)).abs() < 1.5, "bottom");
+    }
+
     #[test]
     fn whole_tables_cut_copy_and_paste_in_one_piece() {
         let mut clip = Clipboard::new();
@@ -1186,19 +1410,170 @@ mod tests {
         assert_eq!(shape(&v), format!("{table} Before {table} After"));
         v.exec(Cmd::Undo, false, &mut clip);
 
-        // Tables do not nest: inside a cell, the table's text arrives as
-        // paragraphs of that cell.
+        // Inside a cell, the table arrives as a table in that cell, after
+        // the text before the insertion point and before the text after.
         v.sel = Selection::caret(Position::new(2, 1));
         v.exec(Cmd::Paste, false, &mut clip);
-        assert_eq!(shape(&v), "Before aTc baT bT cT dT Tc Tr cTc dTc Tr After");
+        assert_eq!(
+            shape(&v),
+            format!("Before aTc bT {table} Tc Tr cTc dTc Tr After")
+        );
+        let levels: Vec<u8> = v.doc.main.paras.iter().map(|p| p.pap.level()).collect();
+        assert_eq!(levels, [0, 1, 1, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 0]);
         v.exec(Cmd::Undo, false, &mut clip);
 
-        // Cells copied without their row paste as plain paragraphs.
+        // Cells copied without the rest of their row paste as a table of
+        // just those cells.
         v.sel = Selection::new(Position::new(1, 0), Position::new(2, 1));
         v.exec(Cmd::Copy, false, &mut clip);
         v.sel = Selection::caret(Position::new(7, 5));
         v.exec(Cmd::Paste, false, &mut clip);
-        assert_eq!(shape(&v), format!("Before {table} Aftera b"));
+        assert_eq!(shape(&v), format!("Before {table} After aTc bTc Tr "));
+    }
+
+    /// An outer table of one row and two cells; the first holds "before",
+    /// a table of one row and two cells ("in1", "in2") and "after".
+    fn nested_view() -> DocView {
+        let mut doc = Document::new();
+        doc.insert_table(MAIN, Position::new(0, 0), 1, 2, 4000);
+        let chp = doc.styles.get(0).chp;
+        doc.insert_text(MAIN, Position::new(0, 0), "before", chp);
+        doc.split_paragraph(MAIN, Position::new(0, 6));
+        doc.insert_table(MAIN, Position::new(1, 0), 1, 2, 1500);
+        doc.insert_text(MAIN, Position::new(1, 0), "in1", chp);
+        doc.insert_text(MAIN, Position::new(2, 0), "in2", chp);
+        doc.insert_text(MAIN, Position::new(4, 0), "after", chp);
+        doc.insert_text(MAIN, Position::new(5, 0), "side", chp);
+        doc.forget_history();
+        DocView::new(doc, "T".into())
+    }
+
+    #[test]
+    fn a_table_in_a_cell_is_laid_out_inside_the_cell() {
+        let mut fonts = quill_layout::Fonts::new(quill_layout::Catalog::scan_system());
+        if fonts.family_names().is_empty() {
+            return;
+        }
+        let mut v = nested_view();
+        v.area = Rect::new(0.0, 0.0, 800.0, 600.0);
+        v.update_layout(&mut fonts);
+        let levels: Vec<u8> = v.doc.main.paras.iter().map(|p| p.pap.level()).collect();
+        assert_eq!(levels, [1, 2, 2, 2, 1, 1, 1, 0]);
+        // One block for the outer row, with the inner row in it.
+        let b = &v.blocks[0];
+        let row = b.row.as_ref().unwrap();
+        assert_eq!((b.first, b.last), (0, 6));
+        assert_eq!(row.nested.len(), 1);
+        let inner = &row.nested[0];
+        let (outer_x0, outer_x1) = (row.cells[0].2, row.cells[0].3);
+        assert!(inner.geom.cells[0].2 >= outer_x0);
+        assert!(inner.geom.cells[1].3 <= outer_x1 + 0.01);
+        // Text sits in order: before, the inner cells side by side, after.
+        assert!(v.tops[0] < v.tops[1]);
+        assert_eq!(v.tops[1], v.tops[2]);
+        assert!(v.xs[1] < v.xs[2]);
+        assert!(v.tops[4] >= inner.top + inner.height - 0.01);
+        // The second outer cell starts at the row's top.
+        assert_eq!(v.tops[5], b.top);
+        assert!(b.height >= v.tops[4] + v.layout(4).height - b.top - 0.01);
+        // A point in the second inner cell hits its text.
+        let (x, y) = (v.xs[2] + 1.0, v.tops[2] + 1.0);
+        assert_eq!(v.hit_doc(x, y).0.para, 2);
+        let (x, y) = (v.xs[1] + 1.0, v.tops[1] + 1.0);
+        assert_eq!(v.hit_doc(x, y).0.para, 1);
+        let (x, y) = (v.xs[4] + 1.0, v.tops[4] + 1.0);
+        assert_eq!(v.hit_doc(x, y).0.para, 4);
+    }
+
+    /// The x of a point well inside the first cell of the outer row.
+    fn row_x(v: &DocView) -> f32 {
+        v.blocks[0].row.as_ref().unwrap().cells[0].2 + 12.0
+    }
+    #[test]
+    fn a_table_at_the_end_of_a_cell_leaves_only_a_sliver_below_it() {
+        let mut fonts = quill_layout::Fonts::new(quill_layout::Catalog::scan_system());
+        if fonts.family_names().is_empty() {
+            return;
+        }
+        // An empty cell with a table in it: nothing before, nothing after.
+        let mut doc = Document::new();
+        doc.insert_table(MAIN, Position::new(0, 0), 1, 2, 4000);
+        doc.insert_table(MAIN, Position::new(0, 0), 1, 1, 1500);
+        doc.forget_history();
+        let mut v = DocView::new(doc, "T".into());
+        v.area = Rect::new(0.0, 0.0, 800.0, 600.0);
+        v.update_layout(&mut fonts);
+        let b = &v.blocks[0];
+        let inner = &b.row.as_ref().unwrap().nested[0];
+        // The row ends just under the inner row.
+        let gap = b.top + b.height - (inner.top + inner.height);
+        assert!(gap > 0.0 && gap <= 3.01, "{gap}");
+        // Typing under the table makes room for the text.
+        v.sel = Selection::caret(Position::new(2, 0));
+        v.type_text("after");
+        v.update_layout(&mut fonts);
+        let b = &v.blocks[0];
+        let inner = &b.row.as_ref().unwrap().nested[0];
+        assert!(b.top + b.height - (inner.top + inner.height) > 8.0);
+    }
+
+    #[test]
+    fn dragging_a_cell_border_changes_cell_widths_and_row_heights() {
+        let mut fonts = quill_layout::Fonts::new(quill_layout::Catalog::scan_system());
+        if fonts.family_names().is_empty() {
+            return;
+        }
+        let mut clip = Clipboard::new();
+        let mut v = nested_view();
+        v.area = Rect::new(0.0, 0.0, 800.0, 600.0);
+        v.update_layout(&mut fonts);
+        let widths = |v: &DocView, para: usize| -> Vec<i32> {
+            let paras = &v.doc.main.paras;
+            let row = table::row_at(paras, para).unwrap();
+            let props = table::row_props(paras, &row, 9000);
+            props.cells.iter().map(|c| c.width).collect()
+        };
+        assert_eq!(widths(&v, 1), [1500, 1500]);
+
+        // The border between the two inner cells: 10 points is 200 twips,
+        // taken from the cell on its right.
+        let row = v.blocks[0].row.as_ref().unwrap();
+        let (bx, top) = (row.nested[0].geom.cells[0].3, row.nested[0].top);
+        let (wx, wy) = v.to_window(bx, top + 2.0);
+        assert_eq!(v.border_cursor(wx, wy), Some(BorderKind::Column));
+        v.mouse_down(wx, wy, false, false);
+        assert!(v.dragging());
+        v.mouse_drag(wx + 10.0, wy);
+        v.mouse_up();
+        assert_eq!(widths(&v, 1), [1700, 1300]);
+        // The outer table is as it was.
+        assert_eq!(widths(&v, 0), [4000, 4000]);
+        // One step to undo.
+        v.exec(Cmd::Undo, false, &mut clip);
+        assert_eq!(widths(&v, 1), [1500, 1500]);
+        v.update_layout(&mut fonts);
+
+        // The bottom of the outer row: 20 points taller.
+        let b = &v.blocks[0];
+        let (wx, wy) = v.to_window(row_x(&v), b.top + b.height);
+        assert_eq!(v.border_cursor(wx, wy), Some(BorderKind::Row));
+        let tall = b.height;
+        v.mouse_down(wx, wy, false, false);
+        v.mouse_drag(wx, wy + 20.0);
+        v.mouse_up();
+        let paras = &v.doc.main.paras;
+        let row = table::row_at_level(paras, 0, 1).unwrap();
+        let props = table::row_props(paras, &row, 9000);
+        assert_eq!(
+            props.height,
+            quill_core::RowHeight::AtLeast(((tall + 20.0) * 20.0).round() as i32)
+        );
+        v.update_layout(&mut fonts);
+        assert!((v.blocks[0].height - (tall + 20.0)).abs() < 0.6);
+
+        // Away from any border, a press is an ordinary click.
+        let (wx, wy) = v.to_window(row_x(&v) + 5.0, v.tops[0] + 3.0);
+        assert_eq!(v.border_cursor(wx, wy), None);
     }
 
     #[test]

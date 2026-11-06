@@ -36,6 +36,8 @@ pub enum Action {
     ClearRecent,
     /// Bring the n-th window to the front.
     Window(usize),
+    /// Line up the selected cells' text: an index into CELL_ALIGNMENTS.
+    CellAlign(usize),
 }
 
 /// Installed language and math coverage families with many separate names.
@@ -331,6 +333,10 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
                 .key("⌘R")
                 .checked(cx.show_ruler),
             b.cmd("Print Merge Helper…", Cmd::PrintMergeHelper),
+            sep(),
+            b.cmd("Zoom In", Cmd::ZoomIn),
+            b.cmd("Zoom Out", Cmd::ZoomOut),
+            b.cmd("Zoom 100%", Cmd::Zoom100),
             b.item(
                 if cx.full_screen {
                     "Exit Full Screen"
@@ -405,6 +411,14 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Table Cells…", Cmd::TableCells).enabled(in_table),
             b.cmd("Table Layout…", Cmd::TableLayout).enabled(in_table),
             b.cmd("Select Table", Cmd::SelectTable).enabled(in_table),
+            b.cmd("Insert Row Above", Cmd::InsertRowAbove)
+                .enabled(in_table),
+            b.cmd("Insert Row Below", Cmd::InsertRowBelow)
+                .enabled(in_table),
+            b.cmd("Insert Column Left", Cmd::InsertColumnLeft)
+                .enabled(in_table),
+            b.cmd("Insert Column Right", Cmd::InsertColumnRight)
+                .enabled(in_table),
             b.cmd("Frame…", Cmd::FrameDialog),
             sep(),
             b.cmd("Style…", Cmd::StyleDialog),
@@ -455,6 +469,8 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Spelling…", Cmd::Spelling).key("⌘L"),
             b.later("Grammar…", "⌘⇧G"),
             b.cmd("Thesaurus…", Cmd::Thesaurus),
+            #[cfg(target_os = "macos")]
+            b.cmd("Look Up", Cmd::LookUp).key("⌃⌘D"),
             b.cmd("Hyphenation…", Cmd::Hyphenation),
             b.cmd("Word Count…", Cmd::WordCount),
             sep(),
@@ -528,6 +544,45 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
         toc_items.push(b.cmd("Reply to Annotation", Cmd::ReplyToAnnotation));
         toc_items.push(b.cmd("Resolve Annotation", Cmd::ResolveAnnotation));
         toc_items.push(b.cmd("Delete Annotation", Cmd::DeleteAnnotation));
+        toc_items.push(Item::separator());
+    }
+    // The system's Look Up for the word here, first, as Mac apps put it.
+    #[cfg(target_os = "macos")]
+    if let Some((s, e)) = view.word_at_caret() {
+        let word = &view.doc.main.paras[s.para].text[s.offset..e.offset];
+        let short: String = word.chars().take(30).collect();
+        toc_items.insert(
+            0,
+            b.cmd(&format!("Look Up \u{201c}{short}\u{201d}"), Cmd::LookUp),
+        );
+        toc_items.insert(1, Item::separator());
+    }
+    // In a table: add a row or a column next to the selected cells.
+    if view.current_pap().in_table {
+        toc_items.push(b.cmd("Insert Row Above", Cmd::InsertRowAbove));
+        toc_items.push(b.cmd("Insert Row Below", Cmd::InsertRowBelow));
+        toc_items.push(b.cmd("Insert Column Left", Cmd::InsertColumnLeft));
+        toc_items.push(b.cmd("Insert Column Right", Cmd::InsertColumnRight));
+        toc_items.push(Item::separator());
+        let now = view.cell_alignment();
+        let items = crate::docview::CELL_ALIGNMENTS
+            .iter()
+            .enumerate()
+            .map(|(i, &(name, v, h))| {
+                b.item(name, Action::CellAlign(i))
+                    .checked(now == Some((v, h)))
+            })
+            .collect();
+        let align = Menu {
+            title: "Cell Alignment".into(),
+            items,
+        };
+        toc_items.push(b.item("Cell Alignment", Action::None).submenu(align));
+        toc_items.push(Item::separator());
+    }
+    // Selected tab or comma separated lines can become a table.
+    if crate::table_dialogs::convert_plan(view).is_some() {
+        toc_items.push(b.cmd("Convert to Table", Cmd::ConvertToTable));
         toc_items.push(Item::separator());
     }
     let menu = Menu {
@@ -738,16 +793,22 @@ mod tests {
     fn context_actions_follow_selection_and_clipboard_formats() {
         let mut view = DocView::new(quill_core::Document::new(), String::new());
         view.type_text("selected text");
+        // Cut, Copy, Paste and Paste as Text follow Look Up, on the Mac.
+        let cut = |m: &Menu| m.items.iter().position(|i| i.label == "Cut").unwrap();
         let (menu, _) = context_menu(&view, false, false);
-        assert!(menu.items[..4].iter().all(|i| !i.enabled));
+        let at = cut(&menu);
+        assert!(menu.items[at..at + 4].iter().all(|i| !i.enabled));
         view.sel = quill_core::Selection::new(
             quill_core::Position::new(0, 0),
             quill_core::Position::new(0, 8),
         );
         let (menu, actions) = context_menu(&view, true, false);
-        assert!(menu.items[..3].iter().all(|i| i.enabled));
-        assert!(!menu.items[3].enabled); // A picture cannot be pasted as text.
-        assert_eq!(actions[menu.items[0].id as usize], Action::Cmd(Cmd::Cut));
+        #[cfg(target_os = "macos")]
+        assert_eq!(menu.items[0].label, "Look Up \u{201c}selected\u{201d}");
+        let at = cut(&menu);
+        assert!(menu.items[at..at + 3].iter().all(|i| i.enabled));
+        assert!(!menu.items[at + 3].enabled); // A picture cannot be pasted as text.
+        assert_eq!(actions[menu.items[at].id as usize], Action::Cmd(Cmd::Cut));
         let insert = menu
             .items
             .iter()

@@ -215,10 +215,12 @@ pub struct HyphState {
 /// Tools > Hyphenation: the window on the first line that could take part
 /// of the next one's first word.
 pub fn hyphenation(view: &mut DocView) -> Result<(Dialog, HyphState), &'static str> {
-    if crate::language::hyphenator().is_none() {
-        return Err(
-            "The hyphenation patterns could not be found. Quill looks for them in the data folder beside the program.",
-        );
+    if !crate::language::can_hyphenate() {
+        return Err(if cfg!(target_os = "macos") {
+            "Hyphenation is not available for the system's language."
+        } else {
+            "The hyphenation patterns could not be found. Quill looks for them in the data folder beside the program."
+        });
     }
     let mut d = Dialog::new("Hyphenation", 460.0, 84.0);
     d.modeless = true;

@@ -60,6 +60,8 @@ pub mod color {
     pub const GRAY_DARK: u32 = 0x888888;
     /// The selection highlight seen in the reference setup.
     pub const HIGHLIGHT: u32 = 0xCCCCFF;
+    /// The outline around each selected table cell.
+    pub const CELL_OUTLINE: u32 = 0x6A9EEB;
     /// Flat buttons: the backing under the pointer, and the one held down
     /// or switched on.
     pub const HOVER: u32 = 0xCACACA;

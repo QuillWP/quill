@@ -286,6 +286,13 @@ impl Pattern {
         let mut it = text.chars().peekable();
         while let Some(c) = it.next() {
             let atom = match c {
+                // A line end typed or pasted into Find What is a paragraph
+                // mark, as ^p is; a CR LF pair is one.
+                '\n' | '\u{2029}' => Atom::Para,
+                '\r' => {
+                    it.next_if_eq(&'\n');
+                    Atom::Para
+                }
                 '?' => Atom::Any,
                 '^' => match it.next() {
                     None => Atom::Char('^'),
@@ -609,8 +616,20 @@ impl Replacement {
     pub fn new(text: &str, chp: CharSpec, pap: ParaSpec) -> Self {
         let mut pieces = Vec::new();
         let mut buf = String::new();
-        let mut it = text.chars();
+        let mut it = text.chars().peekable();
         while let Some(c) = it.next() {
+            // A line end typed or pasted into Replace With starts a new
+            // paragraph, as ^p does; a CR LF pair is one.
+            if matches!(c, '\n' | '\r' | '\u{2029}') {
+                if c == '\r' {
+                    it.next_if_eq(&'\n');
+                }
+                if !buf.is_empty() {
+                    pieces.push(Piece::Text(std::mem::take(&mut buf)));
+                }
+                pieces.push(Piece::Para);
+                continue;
+            }
             if c != '^' {
                 buf.push(c);
                 continue;
@@ -814,6 +833,54 @@ mod tests {
             find(&d.main, &case, p(0, 0), Direction::Down),
             Some((p(0, 15), p(0, 18)))
         );
+    }
+
+    #[test]
+    fn line_ends_in_find_what_and_replace_with_are_paragraph_marks() {
+        let spec = |text: &str| Replacement::new(text, CharSpec::default(), ParaSpec::default());
+        let x = Pattern::new("x", false, false, CharSpec::default(), ParaSpec::default());
+        for text in ["a\nb", "a\r\nb", "a\rb", "a\u{2029}b", "a^pb"] {
+            let mut d = doc(&["one x two x three"]);
+            let len = d.main.paras[0].len();
+            let n = replace_all(
+                &mut d,
+                StoryId::Main,
+                &x,
+                &spec(text),
+                p(0, 0),
+                p(0, len),
+                None,
+            );
+            assert_eq!(n, 2);
+            let paras: Vec<&str> = d.main.paras.iter().map(|q| q.text.as_str()).collect();
+            assert_eq!(paras, ["one a", "b two a", "b three"], "{text:?}");
+        }
+        // Two empty lines are two paragraph marks, a blank paragraph between.
+        for text in ["\n\n", "\r\n\r\n", "^p^p"] {
+            let mut d = doc(&["a x b"]);
+            let len = d.main.paras[0].len();
+            replace_all(
+                &mut d,
+                StoryId::Main,
+                &x,
+                &spec(text),
+                p(0, 0),
+                p(0, len),
+                None,
+            );
+            let paras: Vec<&str> = d.main.paras.iter().map(|q| q.text.as_str()).collect();
+            assert_eq!(paras, ["a ", "", " b"], "{text:?}");
+        }
+        // Find What reads them the same way.
+        let d = doc(&["first", "second"]);
+        for text in ["t\ns", "t\r\ns", "t\rs", "t\u{2029}s", "t^ps"] {
+            let pat = Pattern::new(text, false, false, CharSpec::default(), ParaSpec::default());
+            assert_eq!(
+                find(&d.main, &pat, p(0, 0), Direction::Down),
+                Some((p(0, 4), p(1, 1))),
+                "{text:?}"
+            );
+        }
     }
 
     #[test]

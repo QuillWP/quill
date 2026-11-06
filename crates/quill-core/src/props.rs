@@ -248,6 +248,17 @@ pub struct CellProps {
     pub borders: Borders,
     /// In tenths of a percent.
     pub shading: u16,
+    /// Where the cell's text sits when the row is taller than it.
+    pub valign: VAlign,
+}
+
+/// A cell's vertical alignment (Format > Table Cells).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum VAlign {
+    #[default]
+    Top,
+    Center,
+    Bottom,
 }
 
 /// How tall a table row is (Format > Table Cells > Height).
@@ -343,6 +354,11 @@ pub struct ParaProps {
     /// The paragraph is inside a table cell. Word marks every paragraph of
     /// a cell this way; the cell's last paragraph ends in a cell mark.
     pub in_table: bool,
+    /// How many tables deep the paragraph is inside its first one: 0 in an
+    /// ordinary table cell, 1 in a table inside a cell, and so on. Only
+    /// means something when `in_table` is set. This is Word's table depth
+    /// (RTF `\itap`) less one, kept on each paragraph rather than as a tree.
+    pub nest: u8,
     /// Format > Frame: the paragraph is placed on the page and the text
     /// flows round it. Neighboring paragraphs with the same frame share
     /// it.
@@ -437,12 +453,25 @@ impl Default for ParaProps {
             borders: Borders::default(),
             shading: 0,
             in_table: false,
+            nest: 0,
             frame: None,
         }
     }
 }
 
 impl ParaProps {
+    /// How many tables deep the paragraph is: 0 outside any table, 1 in an
+    /// ordinary cell, 2 in a table inside a cell.
+    pub fn level(&self) -> u8 {
+        if self.in_table { self.nest + 1 } else { 0 }
+    }
+
+    /// Put the paragraph `level` tables deep (0 takes it out of tables).
+    pub fn set_level(&mut self, level: u8) {
+        self.in_table = level > 0;
+        self.nest = level.saturating_sub(1);
+    }
+
     /// Add or replace a tab stop, keeping the list sorted.
     pub fn set_tab(&mut self, tab: TabStop) {
         self.tabs.retain(|t| t.pos != tab.pos);

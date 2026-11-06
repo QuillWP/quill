@@ -47,11 +47,22 @@ impl RichContent {
         let mut doc = Document::new();
         doc.fonts = self.fonts.clone();
         doc.styles = self.styles.clone();
-        if let Some(first) = self.fragment.paras.first() {
+        // A fragment that starts in a table goes into an ordinary paragraph:
+        // inside a table cell, pasting would turn the table into text.
+        let table = self.fragment.paras.first().is_some_and(|p| p.pap.in_table);
+        if let Some(first) = self.fragment.paras.first()
+            && !table
+        {
             doc.main.paras[0] = Paragraph::new(first.pap.clone(), first.mark_chp);
         }
         doc.insert_fragment(StoryId::Main, Position::new(0, 0), &self.fragment);
-        if self.fragment.ends_with_mark && doc.main.paras.len() > 1 {
+        // The paragraph a table needs after it is not part of the copy.
+        let trailing = if table {
+            doc.main.paras.last().is_some_and(|p| !p.pap.in_table)
+        } else {
+            self.fragment.ends_with_mark
+        };
+        if trailing && doc.main.paras.len() > 1 {
             doc.main.paras.pop();
         }
         doc.forget_history();
@@ -163,5 +174,30 @@ mod tests {
         target.undo();
         assert!(target.main.paras[0].is_empty());
         assert_eq!(target.styles.styles.len(), count - 1);
+    }
+
+    #[test]
+    fn copied_table_keeps_its_rows_for_other_programs() {
+        let mut d = Document::new();
+        d.insert_table(StoryId::Main, Position::new(0, 0), 2, 2, 6000);
+        let chp = d.styles.get(0).chp;
+        for (para, text) in [(0, "a"), (1, "b"), (3, "c"), (4, "")] {
+            d.main.paras[para].insert(0, text, chp);
+        }
+        let last = d.main.paras.len() - 1;
+        let frag = d.copy(
+            StoryId::Main,
+            Position::new(0, 0),
+            Position::new(last, d.main.paras[last].len()),
+        );
+        assert_eq!(frag.plain_text(), "a\tb\nc\t\n");
+        let doc = RichContent::new(&d, frag).document();
+        let html = quill_formats::html::write_clipboard(&doc);
+        assert_eq!(html.matches("<tr>").count(), 2);
+        assert_eq!(html.matches("<td").count(), 4);
+        let rtf =
+            String::from_utf8_lossy(&quill_formats::rtf::write_clipboard(&doc, false)).into_owned();
+        assert_eq!(rtf.matches("\\trowd").count(), 2);
+        assert!(rtf.contains("\\cell"));
     }
 }

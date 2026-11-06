@@ -83,34 +83,45 @@ impl WinState {
             return;
         }
         let percent = (percent.clamp(MIN, MAX) * 100.0).round() / 100.0;
+        let old = self.document_zoom;
         self.document_zoom = (percent / 100.0) as f32;
         self.zoom_edit = None;
         self.view.status = None;
+        let new = self.document_zoom;
+        self.main_view_mut().zoom_around_center(old, new);
         crate::settings::update(|s| s.document_zoom = percent);
     }
 
-    /// Zoom by `factor` about the pointer, `cy` down the window, as a pinch
-    /// or ⌘-scroll does: the line under the pointer stays under it. `save`
-    /// keeps the new zoom for next time; a gesture saves once, at its end.
-    pub(super) fn zoom_at(&mut self, factor: f64, cy: f32, save: bool) {
+    /// Zoom In (`step` 1) or Out (-1) to the next 10% mark, or back to
+    /// 100% (0).
+    pub(super) fn zoom_step(&mut self, step: i8) {
+        let now = self.document_zoom as f64 * 100.0;
+        let percent = match step {
+            0 => 100.0,
+            s if s > 0 => ((now + 0.5) / 10.0).floor() * 10.0 + 10.0,
+            _ => ((now - 0.5) / 10.0).ceil() * 10.0 - 10.0,
+        };
+        self.apply_zoom(percent.clamp(MIN, MAX));
+    }
+
+    /// Zoom by `factor` about the middle of the window, as a pinch or
+    /// ⌘-scroll does: the part of the document in the middle of the window
+    /// stays there. `save` keeps the new zoom for next time; a gesture saves
+    /// once, at its end.
+    pub(super) fn zoom_by(&mut self, factor: f64, save: bool) {
         let old = self.document_zoom;
         let percent = (old as f64 * 100.0 * factor).clamp(MIN, MAX);
         if !percent.is_finite() {
             return;
         }
-        let new = (percent / 100.0) as f32;
         if save {
             self.apply_zoom(percent);
         } else {
-            self.document_zoom = new;
+            self.document_zoom = (percent / 100.0) as f32;
             self.zoom_edit = None;
+            let new = self.document_zoom;
+            self.main_view_mut().zoom_around_center(old, new);
         }
-        let new = self.document_zoom;
-        let v = self.main_view_mut();
-        // How far below the top of the text the pointer is, in document
-        // units, before and after.
-        let below = (cy / old - v.area.y).max(0.0);
-        v.scroll_y = (v.scroll_y + below - below * old / new).max(0.0);
     }
 
     pub(super) fn commit_zoom(&mut self) -> bool {
@@ -477,20 +488,84 @@ mod tests {
         assert_eq!(view.exec(Cmd::SavePdf, false, &mut clip), Effect::SavePdf);
     }
     #[test]
-    fn pinch_zoom_keeps_the_line_under_the_pointer() {
+    fn zoom_keys_step_to_the_next_ten_percent() {
+        crate::settings::update(|s| *s = crate::settings::Settings::default());
+        let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+        let mut clip = Clipboard::new();
+        let key = |c: char, shift: bool| {
+            command_map::lookup(
+                &Key::Character(c.to_string().into()),
+                Some(c),
+                Mods {
+                    cmd: true,
+                    shift,
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(key('=', false), Some(Cmd::ZoomIn));
+        assert_eq!(key('-', false), Some(Cmd::ZoomOut));
+        assert_eq!(key('0', false), Some(Cmd::Zoom100));
+        assert_eq!(key('=', true), Some(Cmd::Superscript));
+        assert_eq!(key('-', true), Some(Cmd::Subscript));
+        let pct = |s: &WinState| (s.document_zoom * 100.0).round() as i32;
+        state.document_zoom = 1.0;
+        assert_eq!(
+            state.view.exec(Cmd::ZoomIn, false, &mut clip),
+            Effect::Zoom(1)
+        );
+        state.zoom_step(1);
+        assert_eq!(pct(&state), 110);
+        state.document_zoom = 0.75;
+        state.zoom_step(1);
+        assert_eq!(pct(&state), 80);
+        state.document_zoom = 0.75;
+        state.zoom_step(-1);
+        assert_eq!(pct(&state), 70);
+        state.zoom_step(0);
+        assert_eq!(pct(&state), 100);
+        state.document_zoom = 0.1;
+        state.zoom_step(-1);
+        assert_eq!(pct(&state), 10);
+        crate::settings::update(|s| *s = crate::settings::Settings::default());
+    }
+
+    #[test]
+    fn wheel_and_pinch_zoom_keep_the_middle_of_the_window_in_place() {
         let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
         state.document_zoom = 1.0;
-        state.view.area.y = 40.0;
+        state.view.area = Rect::new(0.0, 40.0, 800.0, 600.0);
         state.view.scroll_y = 100.0;
-        let under = |s: &WinState, cy: f32| cy / s.document_zoom - s.view.area.y + s.view.scroll_y;
-        let before = under(&state, 300.0);
-        state.zoom_at(2.0, 300.0, false);
+        // The spot of the document in the middle of the window.
+        let middle = |s: &WinState| s.view.scroll_y + s.view.area.h / 2.0;
+        let before = middle(&state);
+        state.zoom_by(2.0, false);
         assert!((state.document_zoom - 2.0).abs() < 1e-6);
-        // The view's top edge stays put on screen, so its document-unit
-        // position halves with the zoom.
-        state.view.area.y = 20.0;
-        assert!((under(&state, 300.0) - before).abs() < 1e-3);
-        state.zoom_at(1000.0, 300.0, false);
+        // The window shows half as much of the document at twice the zoom.
+        state.view.area = Rect::new(0.0, 20.0, 400.0, 300.0);
+        assert!((middle(&state) - before).abs() < 1e-3);
+        state.zoom_by(0.5, false);
+        state.view.area = Rect::new(0.0, 40.0, 800.0, 600.0);
+        assert!((middle(&state) - before).abs() < 1e-3);
+        state.zoom_by(1000.0, false);
         assert!((state.document_zoom as f64 * 100.0 - MAX).abs() < 1e-3);
+    }
+
+    #[test]
+    fn zoom_steps_presets_and_typed_values_keep_the_middle_too() {
+        let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+        state.document_zoom = 1.0;
+        state.view.area = Rect::new(0.0, 40.0, 800.0, 600.0);
+        state.view.scroll_y = 5000.0;
+        let before = state.view.scroll_y + state.view.area.h / 2.0;
+        state.zoom_step(1);
+        let z = state.document_zoom;
+        state.view.area = Rect::new(0.0, 40.0 / z, 800.0 / z, 600.0 / z);
+        assert!((state.view.scroll_y + state.view.area.h / 2.0 - before).abs() < 1e-2);
+        state.apply_zoom(250.0);
+        let z = state.document_zoom;
+        state.view.area = Rect::new(0.0, 40.0 / z, 800.0 / z, 600.0 / z);
+        assert!((state.view.scroll_y + state.view.area.h / 2.0 - before).abs() < 1e-2);
+        crate::settings::update(|s| *s = crate::settings::Settings::default());
     }
 }

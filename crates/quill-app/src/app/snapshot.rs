@@ -133,6 +133,7 @@ pub fn snapshot(
                     Effect::ReplyToAnnotation => st.annotation_command(true),
                     Effect::ResolveAnnotation => st.annotation_command(false),
                     Effect::DeleteAnnotation => st.delete_annotation(),
+                    Effect::Zoom(step) => st.zoom_step(step),
                     _ => {}
                 },
                 None => eprintln!("quill: unknown command {arg}"),
@@ -191,6 +192,18 @@ pub fn snapshot(
                 v.sel = quill_core::Selection::caret(at);
                 let sel = v.sel;
                 v.doc.commit(sel);
+            }
+            // Open the color palette, starting on a color as an HTML code
+            // (palette:#336699), or its editor (editcolor:#336699).
+            "palette" => {
+                let start = crate::palette::parse_hex(arg);
+                let (d, ps) = crate::palette::palette(start);
+                st.dialogs.push((Which::Palette(ps), d));
+            }
+            "editcolor" => {
+                let start = crate::palette::parse_hex(arg).unwrap_or(quill_core::props::Rgb::BLACK);
+                let (d, es) = crate::palette::editor(start, crate::palette::Target::Add);
+                st.dialogs.push((Which::EditColor(es), d));
             }
             "pdf" => {
                 // Write every page to a PDF file: pdf:/path/out.pdf.

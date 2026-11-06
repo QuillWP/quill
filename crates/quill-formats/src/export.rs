@@ -37,14 +37,19 @@ pub enum Block<'a> {
     Table(Vec<Row>),
 }
 
-pub fn blocks(paras: &[Paragraph]) -> Vec<Block<'_>> {
+/// The paragraphs of a story, or of a cell that is `level` tables deep, as
+/// paragraphs and the tables made by those deeper. Row indexes are into
+/// `paras`.
+pub fn blocks_at(paras: &[Paragraph], level: u8) -> Vec<Block<'_>> {
     let mut result = Vec::new();
     let mut i = 0;
     while i < paras.len() {
-        if let Some(row) = quill_core::table::row_at(paras, i) {
+        if paras[i].pap.level() > level
+            && let Some(row) = quill_core::table::row_at_level(paras, i, level + 1)
+        {
             let mut rows = vec![row];
             i = rows.last().unwrap().end + 1;
-            while let Some(row) = quill_core::table::row_at(paras, i) {
+            while let Some(row) = quill_core::table::row_at_level(paras, i, level + 1) {
                 i = row.end + 1;
                 rows.push(row);
             }

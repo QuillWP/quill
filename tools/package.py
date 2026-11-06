@@ -115,9 +115,12 @@ def build(check: bool) -> Path:
     raise ValueError("Cargo did not report a Quill executable.")
 
 
-def copy_common(destination: Path) -> None:
+def copy_common(destination: Path, mac: bool = False) -> None:
+    # The Mac hyphenates with the system's own patterns, so its build
+    # leaves Quill's copy (and its license) out.
+    skip = [".DS_Store"] + (["hyph_en_US.pat", "README_hyph_en_US.txt"] if mac else [])
     shutil.copytree(ROOT / "data", destination / "data",
-                    ignore=shutil.ignore_patterns(".DS_Store"))
+                    ignore=shutil.ignore_patterns(*skip))
     for name in ("README.md", "LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES.txt"):
         shutil.copy2(ROOT / name, destination / name)
 
@@ -161,7 +164,7 @@ def mac_package(executable: Path, output: Path, version: str, arch: str) -> Path
         resources = contents / "Resources"
         resources.mkdir()
         shutil.copy2(executable, contents / "MacOS/quill")
-        copy_common(resources)
+        copy_common(resources, mac=True)
         run("sips", "-s", "format", "icns", str(ROOT / "assets/quill.png"),
             "--out", str(resources / "Quill.icns"))
         info = plistlib.loads((ROOT / "tools/Info.plist").read_bytes())

@@ -4,6 +4,7 @@
 use crate::report::{self as notes, ImportReport};
 use crate::xml::{Element, Node};
 use quill_core::document::FootnotePosition;
+use quill_core::limits::MAX_TABLE_LEVEL;
 use quill_core::para::{Mark, Paragraph, chars};
 use quill_core::props::{
     Align, BorderLine, BorderStyle, CellProps, CharProps, LineSpacing, ParaProps, Rgb, RowHeight,
@@ -113,6 +114,8 @@ enum Charset {
 #[derive(Clone)]
 struct State {
     dest: Dest,
+    /// Inside `\nesttableprops`: how deep the table being defined is.
+    std_level: u8,
     chp: CharProps,
     /// The RTF number of the font in use, for its character set.
     font: i32,
@@ -195,7 +198,12 @@ struct Reader {
     pending_atn: Option<u32>,
     annotations: HashMap<u32, Vec<Paragraph>>,
     row_data: String,
-    pending_row: Option<RowProps>,
+    /// Quill's own exact row records, by table depth less one: a nested
+    /// table's comes while its outer row's is still waiting.
+    pending_rows: Vec<Option<RowProps>>,
+    /// The row definition in RTF's own words (`\trowd` to the last
+    /// `\cellx`), for rows another program wrote.
+    std_rows: Vec<StdRow>,
     /// A header/footer destination being read, and the body text it
     /// interrupted.
     header: Option<HeaderRead>,
@@ -277,7 +285,8 @@ fn read_into(data: &[u8], report: &mut ImportReport) -> Result<Document, String>
         pending_atn: None,
         annotations: HashMap::new(),
         row_data: String::new(),
-        pending_row: None,
+        pending_rows: vec![None; MAX_TABLE_LEVEL as usize],
+        std_rows: (0..MAX_TABLE_LEVEL).map(|_| StdRow::default()).collect(),
         header: None,
         stored_text: 0,
         paragraphs: 0,
@@ -291,6 +300,7 @@ fn read_into(data: &[u8], report: &mut ImportReport) -> Result<Document, String>
         math_group: false,
         page_size: (None, None),
         st: State {
+            std_level: 0,
             dest: Dest::Text,
             font: 0,
             chp: CharProps {
@@ -972,7 +982,8 @@ impl Reader {
                     .push((id, self.style_based, self.style_next));
             }
             Dest::RowData => {
-                self.pending_row = parse_row_data(self.row_data.trim());
+                let level = self.table_level();
+                self.pending_rows[level] = parse_row_data(self.row_data.trim());
                 self.row_data.clear();
             }
             Dest::OldProps => {
@@ -1091,6 +1102,31 @@ impl Reader {
         }
     }
 
+    /// Which row definition words apply to: 0 for the outer table, 1 inside
+    /// a `\nesttableprops` group for a table in a cell, and so on.
+    fn table_level(&self) -> usize {
+        (self.st.std_level.max(1) - 1) as usize
+    }
+
+    /// `\row` (level 0) or `\nestrow`: the empty paragraph that ends a row,
+    /// carrying the row's settings. Quill's own exact record wins over the
+    /// standard words.
+    fn end_row(&mut self, level: usize) {
+        let level = level.min(self.pending_rows.len() - 1);
+        self.para = Paragraph::new(ParaProps::default(), self.st.chp);
+        if level > 0 && self.pap.level() < level as u8 + 1 {
+            self.pap_mut().set_level(level as u8 + 1);
+        }
+        self.end_paragraph(Mark::RowEnd);
+        let standard = self.std_rows[level].finish();
+        if let (Some(row), Some(p)) = (
+            self.pending_rows[level].take().or(standard),
+            self.paras.last_mut(),
+        ) {
+            p.row = Some(Box::new(row));
+        }
+    }
+
     fn end_paragraph(&mut self, mark: Mark) {
         if self.paragraphs >= MAX_PARAGRAPHS {
             self.error = Some("The RTF file contains too many paragraphs.");
@@ -1114,6 +1150,14 @@ impl Reader {
     fn word(&mut self, w: &str, p: Option<i32>) {
         let v = p.unwrap_or(0);
         let on = p.is_none_or(|v| v != 0);
+        let level = self.table_level();
+        if w == "trowd" {
+            self.std_rows[level] = StdRow::start();
+            return;
+        }
+        if self.st.dest != Dest::Math && self.std_rows[level].word(w, v) {
+            return;
+        }
         if self.st.dest == Dest::Math {
             // The font still says what character set bytes are in.
             if w == "f" {
@@ -1255,7 +1299,6 @@ impl Reader {
                 self.report.note(notes::INDEX_ENTRIES);
                 return self.st.dest = Dest::Skip;
             }
-            "itap" if v >= 2 => self.report.note(notes::NESTED_TABLES),
             "pgwsxn" | "pghsxn" => {
                 let first = if w == "pgwsxn" {
                     &mut self.page_size.0
@@ -1618,11 +1661,22 @@ impl Reader {
             "ftnstart" => self.doc.props.footnote_start = v.clamp(1, 32767) as u16,
             "ftnrstpg" => self.doc.props.footnote_restart_each_page = true,
             "cell" => self.end_paragraph(Mark::CellEnd),
-            "row" => {
-                self.para = Paragraph::new(ParaProps::default(), self.st.chp);
-                self.end_paragraph(Mark::RowEnd);
-                if let (Some(row), Some(p)) = (self.pending_row.take(), self.paras.last_mut()) {
-                    p.row = Some(Box::new(row));
+            "row" => self.end_row(0),
+            "nestcell" => {
+                if self.pap.level() < 2 {
+                    self.pap_mut().set_level(2);
+                }
+                self.end_paragraph(Mark::CellEnd);
+            }
+            "nestrow" => self.end_row(self.table_level().max(1)),
+            // The row definition of a table inside a cell, which ends in
+            // its `\nestrow`; and the copy for programs that cannot nest.
+            "nesttableprops" => self.st.std_level = self.pap.level().clamp(2, MAX_TABLE_LEVEL),
+            "nonesttables" => self.st.dest = Dest::Skip,
+            "itap" => {
+                let level = v.clamp(0, MAX_TABLE_LEVEL as i32) as u8;
+                if level > 0 {
+                    self.pap_mut().set_level(level);
                 }
             }
             "line" => self.ch(chars::LINE_BREAK),
@@ -1932,6 +1986,8 @@ fn known_destination(word: &str) -> bool {
             | "quillatndate"
             | "quillversion"
             | "quillrow"
+            | "nesttableprops"
+            | "nonesttables"
             | "header"
             | "headerr"
             | "footer"
@@ -1953,6 +2009,105 @@ fn parse_border_style(n: i32) -> Option<BorderStyle> {
         5 => BorderStyle::Double,
         _ => return None,
     })
+}
+
+/// A row as the standard RTF words define it: settings for the row, then
+/// each cell's settings followed by its right edge in `\cellx`.
+#[derive(Default)]
+struct StdRow {
+    gap: i32,
+    left: i32,
+    height: RowHeight,
+    align: Align,
+    cells: Vec<CellProps>,
+    /// The cell being defined, and the border its `\brdr...` words are for
+    /// (0 top, 1 bottom, 2 left, 3 right).
+    cell: CellProps,
+    border: Option<u8>,
+    /// The right edge of the last cell defined.
+    edge: i32,
+}
+
+impl StdRow {
+    fn start() -> StdRow {
+        StdRow::default()
+    }
+
+    /// Take a word of the definition. False if it is not one.
+    fn word(&mut self, w: &str, v: i32) -> bool {
+        let style = match w {
+            "brdrs" => Some(BorderStyle::Single),
+            "brdrth" => Some(BorderStyle::Thick),
+            "brdrdb" => Some(BorderStyle::Double),
+            "brdrdot" | "brdrdash" => Some(BorderStyle::Dotted),
+            "brdrhair" => Some(BorderStyle::Hairline),
+            "brdrnil" | "brdrnone" => Some(BorderStyle::None),
+            _ => None,
+        };
+        if let (Some(style), Some(edge)) = (style, self.border) {
+            let b = &mut self.cell.borders;
+            let line = match edge {
+                0 => &mut b.top,
+                1 => &mut b.bottom,
+                2 => &mut b.left,
+                _ => &mut b.right,
+            };
+            line.style = style;
+            return true;
+        }
+        match w {
+            "trgaph" => self.gap = v.clamp(0, 2000),
+            "trleft" => {
+                self.left = v;
+                self.edge = v;
+            }
+            "trrh" => {
+                self.height = match v {
+                    0 => RowHeight::Auto,
+                    v if v < 0 => RowHeight::Exactly(-v),
+                    v => RowHeight::AtLeast(v),
+                }
+            }
+            "trql" => self.align = Align::Left,
+            "trqc" => self.align = Align::Center,
+            "trqr" => self.align = Align::Right,
+            "clvertalt" => self.cell.valign = quill_core::props::VAlign::Top,
+            "clvertalc" => self.cell.valign = quill_core::props::VAlign::Center,
+            "clvertalb" => self.cell.valign = quill_core::props::VAlign::Bottom,
+            "clbrdrt" => self.border = Some(0),
+            "clbrdrb" => self.border = Some(1),
+            "clbrdrl" => self.border = Some(2),
+            "clbrdrr" => self.border = Some(3),
+            // In hundredths of a percent; Quill keeps tenths.
+            "clshdng" => self.cell.shading = (v / 10).clamp(0, 1000) as u16,
+            "cellx" => {
+                if self.cells.len() < MAX_TABLE_ENTRIES {
+                    let mut cell = std::mem::take(&mut self.cell);
+                    cell.width = (v - self.edge).max(144);
+                    self.cells.push(cell);
+                }
+                self.edge = v;
+                self.border = None;
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// The row, once its cells have been read. None without any.
+    fn finish(&mut self) -> Option<RowProps> {
+        let done = std::mem::replace(self, StdRow::start());
+        if done.cells.is_empty() {
+            return None;
+        }
+        Some(RowProps {
+            cells: done.cells,
+            gap: done.gap,
+            indent: done.left + done.gap / 2,
+            height: done.height,
+            align: done.align,
+        })
+    }
 }
 
 fn parse_row_data(data: &str) -> Option<RowProps> {
@@ -1988,7 +2143,8 @@ fn parse_row_data(data: &str) -> Option<RowProps> {
             .map(str::parse)
             .collect::<Result<_, _>>()
             .ok()?;
-        if v.len() != 13 || v[0] < 0 || !(0..=1000).contains(&v[1]) {
+        // A 14th number, written only when not Top, is the vertical alignment.
+        if !(13..=14).contains(&v.len()) || v[0] < 0 || !(0..=1000).contains(&v[1]) {
             return None;
         }
         let mut borders = quill_core::props::Borders {
@@ -2009,6 +2165,11 @@ fn parse_row_data(data: &str) -> Option<RowProps> {
             width: v[0],
             shading: v[1] as u16,
             borders,
+            valign: match v.get(13) {
+                Some(1) => quill_core::props::VAlign::Center,
+                Some(2) => quill_core::props::VAlign::Bottom,
+                _ => quill_core::props::VAlign::Top,
+            },
         });
     }
     if cells.is_empty() {
@@ -2115,6 +2276,29 @@ mod tests {
         let old = read(br"{\rtf1{\fonttbl{\f0 Arial;\f1 Courier;}}{\f1 y}\par}").unwrap();
         let chp = old.main.paras[0].chp_of_char(0);
         assert_eq!(old.font_name(chp.font), "Courier");
+    }
+
+    #[test]
+    fn rows_from_other_programs_keep_cell_widths_alignment_borders_and_shading() {
+        use quill_core::props::VAlign;
+        let rtf = br"{\rtf1 \trowd\trgaph108\trleft-108\clvertalc\clbrdrt\brdrs\clbrdrb\brdrth\clshdng5000\cellx3000\clvertalb\cellx7000 \pard\intbl a\cell b\cell\row \pard end\par}";
+        let doc = read(rtf).unwrap();
+        let row = quill_core::table::row_at(&doc.main.paras, 0).unwrap();
+        let p = quill_core::table::row_props(&doc.main.paras, &row, 9000);
+        assert_eq!(p.cells.len(), 2);
+        assert_eq!((p.cells[0].width, p.cells[1].width), (3108, 4000));
+        assert_eq!(p.gap, 108);
+        assert_eq!(p.indent, -54);
+        assert_eq!(p.cells[0].valign, VAlign::Center);
+        assert_eq!(p.cells[1].valign, VAlign::Bottom);
+        assert_eq!(p.cells[0].borders.top.style, BorderStyle::Single);
+        assert_eq!(p.cells[0].borders.bottom.style, BorderStyle::Thick);
+        assert_eq!(p.cells[0].borders.left.style, BorderStyle::None);
+        assert_eq!(p.cells[0].shading, 500);
+        assert_eq!(p.cells[1].shading, 0);
+        // The paragraph after the row did not take the cell borders.
+        let last = doc.main.paras.last().unwrap();
+        assert!(last.pap.borders.is_none());
     }
 
     #[test]

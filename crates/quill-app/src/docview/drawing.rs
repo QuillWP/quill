@@ -291,6 +291,9 @@ impl Gridlines {
 /// A table row's furniture: cell shading, the on-screen gridlines (when
 /// Preferences shows them) and cell borders. The row's top left is at
 /// (`ox`, `top`), `ox` being the left margin.
+/// Draw a table row's shading and lines. The `selected` cells are filled
+/// with `highlight` in place of their shading, under the lines.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn draw_row(
     c: &mut dyn Surface,
     row: &RowGeom,
@@ -298,16 +301,18 @@ pub(super) fn draw_row(
     top: f32,
     height: f32,
     grid: Option<Gridlines>,
+    selected: std::ops::RangeInclusive<usize>,
+    highlight: u32,
 ) {
     let bottom = top + height;
     for (k, &(_, _, x0, x1)) in row.cells.iter().enumerate() {
         let cell = &row.props.cells[k];
-        if cell.shading > 0 {
+        let area = Rect::new(ox + x0, top, x1 - x0, height);
+        if selected.contains(&k) {
+            c.fill(area, highlight);
+        } else if cell.shading > 0 {
             let v = (255.0 * (1.0 - cell.shading as f32 / 1000.0)).round() as u32;
-            c.fill(
-                Rect::new(ox + x0, top, x1 - x0, height),
-                v << 16 | v << 8 | v,
-            );
+            c.fill(area, v << 16 | v << 8 | v);
         }
     }
     if let Some(g) = grid {
@@ -675,22 +680,50 @@ impl DocView {
     ) {
         let (s, e) = self.sel.range();
         let gridlines = Gridlines::current().filter(|_| c.screen());
-        for b in &self.blocks[self.block_at(top)..] {
-            if b.top > bottom {
-                break;
+        let cells = self.cell_block().filter(|_| c.screen());
+        let hl = if focused {
+            color::HIGHLIGHT
+        } else {
+            color::GRAY
+        };
+        // Where a row is drawn: a row carried over pages is closed off
+        // where each page cuts it.
+        let row_span = |b: &Block| {
+            if self.page_view {
+                // The closing line goes just inside the page's share,
+                // where its clip still shows it.
+                let cut = b.top + b.height > bottom + 0.01;
+                let end = if cut { bottom - 1.0 } else { b.top + b.height };
+                (b.top.max(top), end)
+            } else {
+                (b.top, b.top + b.height)
             }
+        };
+        let blocks = || {
+            self.blocks[self.block_at(top)..]
+                .iter()
+                .take_while(move |b| b.top <= bottom)
+        };
+        for b in blocks() {
             if let Some(row) = &b.row {
-                // A row carried over pages is closed off where each page cuts it.
-                let (y0, y1) = if self.page_view {
-                    // The closing line goes just inside the page's share,
-                    // where its clip still shows it.
-                    let cut = b.top + b.height > bottom + 0.01;
-                    let end = if cut { bottom - 1.0 } else { b.top + b.height };
-                    (b.top.max(top), end)
-                } else {
-                    (b.top, b.top + b.height)
-                };
-                draw_row(c, row, ox, oy + y0, (y1 - y0).max(0.0), gridlines);
+                let (y0, y1) = row_span(b);
+                // Selected cells are filled whole, in place of any shading.
+                #[allow(clippy::reversed_empty_ranges)]
+                let selected = cells
+                    .as_ref()
+                    .and_then(|block| {
+                        let r = block.rows.iter().find(|r| r.first == b.first)?;
+                        Some(block.columns(r))
+                    })
+                    .unwrap_or(1..=0);
+                let h = (y1 - y0).max(0.0);
+                draw_row(c, row, ox, oy + y0, h, gridlines, selected, hl);
+                // Tables in its cells, outer ones first so inner shading
+                // and lines go over them.
+                for n in &row.nested {
+                    #[allow(clippy::reversed_empty_ranges)]
+                    draw_row(c, &n.geom, ox, oy + n.top, n.height, gridlines, 1..=0, hl);
+                }
             }
             // Outline view may show only a block's first line.
             let clipped =
@@ -707,6 +740,7 @@ impl DocView {
                 let picture = self.selected_picture().is_some();
                 if c.screen()
                     && !self.sel.is_empty()
+                    && cells.is_none()
                     && !picture
                     && para >= s.para
                     && para <= e.para
@@ -724,6 +758,37 @@ impl DocView {
             }
             if clipped {
                 c.pop_clip();
+            }
+        }
+        // Each selected cell is outlined just outside its borders, after
+        // every row so neighboring rows don't paint over the outlines.
+        if let Some(block) = &cells {
+            let edge = if focused {
+                color::CELL_OUTLINE
+            } else {
+                color::GRAY_DARK
+            };
+            let t = c.hair();
+            for b in blocks() {
+                let Some(row) = &b.row else {
+                    continue;
+                };
+                let Some(r) = block.rows.iter().find(|r| r.first == b.first) else {
+                    continue;
+                };
+                let (y0, y1) = row_span(b);
+                for k in block.columns(r) {
+                    let (_, _, x0, x1) = row.cells[k];
+                    // Border lines start on the cell's edges and run right
+                    // and down by a hairline.
+                    let outside = Rect::new(
+                        ox + x0 - t,
+                        oy + y0 - t,
+                        x1 - x0 + 3.0 * t,
+                        (y1 - y0).max(0.0) + 3.0 * t,
+                    );
+                    c.frame(outside, edge);
+                }
             }
         }
         self.draw_frames(c, fonts, cache, focused, ox, oy, top, bottom);

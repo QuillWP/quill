@@ -287,6 +287,8 @@ struct Reader<'a> {
     /// in the main text, so these go on the note's mark.
     note_comments: Option<Vec<&'a Element>>,
     in_table: bool,
+    /// How many tables deep the cell being read is: 0 outside any table.
+    table_depth: u8,
     /// Text of frames and shapes, to follow the paragraph being read.
     pending: Vec<Paragraph>,
     /// Floating pictures and text boxes as framed paragraphs, to go before
@@ -347,6 +349,7 @@ fn build<'a>(
         main: true,
         note_comments: None,
         in_table: false,
+        table_depth: 0,
         pending: Vec::new(),
         floating: Vec::new(),
         in_box: 0,
@@ -1064,7 +1067,7 @@ impl<'a> Reader<'a> {
                     out.append(&mut self.pending);
                 }
             }
-            "table" => self.read_table(child, out, in_table),
+            "table" => self.read_table(child, out),
             "section" => self.read_section(child, out, in_table),
             "frame" if self.frame_math(child).is_some() => {
                 self.report.note(notes::EQUATIONS);
@@ -1938,13 +1941,13 @@ impl<'a> Reader<'a> {
         }
     }
 
-    fn read_table(&mut self, t: &'a Element, out: &mut Vec<Paragraph>, nested: bool) {
+    fn read_table(&mut self, t: &'a Element, out: &mut Vec<Paragraph>) {
         let mut rows = Vec::new();
         Self::table_rows(t, &mut rows);
-        if nested {
+        if self.table_depth >= quill_core::limits::MAX_TABLE_LEVEL {
             self.report.note(notes::NESTED_TABLES);
-            // Tables do not nest in the original: the inner table's text becomes
-            // paragraphs of the outer cell.
+            // Past the depth Quill keeps, the inner table's text becomes
+            // paragraphs of the cell it is in.
             for row in rows {
                 for cell in row.children_named("table-cell") {
                     self.read_block(cell, out, true);
@@ -1952,6 +1955,7 @@ impl<'a> Reader<'a> {
             }
             return;
         }
+        self.table_depth += 1;
         let props = t
             .attr("style-name")
             .and_then(|s| self.style("table", s))
@@ -2032,6 +2036,12 @@ impl<'a> Reader<'a> {
                     }
                     let start = out.len();
                     self.read_block(cell, out, true);
+                    // Paragraphs read in a cell are in a table; this deep.
+                    for p in &mut out[start..] {
+                        if p.pap.in_table && p.pap.level() < self.table_depth {
+                            p.pap.set_level(self.table_depth);
+                        }
+                    }
                     if out.len() == start && full {
                         // Nothing to add to the last cell.
                         if let Some(last) = out.last_mut() {
@@ -2039,10 +2049,14 @@ impl<'a> Reader<'a> {
                         }
                         continue;
                     }
-                    if out.len() == start {
+                    // A cell ends in a paragraph of its own, even after a
+                    // table in it.
+                    if out.len() == start
+                        || out.last().is_some_and(|p| p.pap.level() > self.table_depth)
+                    {
                         let n = self.doc.styles.get(0);
                         let mut p = Paragraph::new(n.pap.clone(), n.chp);
-                        p.pap.in_table = true;
+                        p.pap.set_level(self.table_depth);
                         out.push(p);
                     }
                     let last = out.last_mut().unwrap();
@@ -2059,6 +2073,11 @@ impl<'a> Reader<'a> {
                         shading: cp
                             .and_then(|p| p.attr("background-color"))
                             .map_or(0, shading),
+                        valign: match cp.and_then(|p| p.attr("vertical-align")) {
+                            Some("middle") => quill_core::props::VAlign::Center,
+                            Some("bottom") => quill_core::props::VAlign::Bottom,
+                            _ => quill_core::props::VAlign::Top,
+                        },
                     });
                 }
             }
@@ -2085,7 +2104,7 @@ impl<'a> Reader<'a> {
             let gap = gap.unwrap_or(114);
             let n = self.doc.styles.get(0);
             let mut row_end = Paragraph::new(n.pap.clone(), row_chp);
-            row_end.pap.in_table = true;
+            row_end.pap.set_level(self.table_depth);
             row_end.mark = Mark::RowEnd;
             row_end.row = Some(Box::new(RowProps {
                 cells,
@@ -2100,6 +2119,7 @@ impl<'a> Reader<'a> {
             }));
             out.push(row_end);
         }
+        self.table_depth -= 1;
     }
 
     /// A section in columns becomes a Word section of its own; any other

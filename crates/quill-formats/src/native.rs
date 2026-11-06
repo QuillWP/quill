@@ -34,7 +34,7 @@ use quill_core::document::{
 use quill_core::notes::AnnotationInfo;
 use quill_core::props::{
     BorderLine, BorderStyle, Borders, CellProps, Frame, FrameH, FrameRel, FrameV, RowHeight,
-    RowProps, TabLeader,
+    RowProps, TabLeader, VAlign,
 };
 use quill_core::{
     Align, CharProps, Crop, Document, ImageFormat, LineSpacing, Mark, Object, ParaProps, Paragraph,
@@ -420,6 +420,7 @@ fn pap(o: &mut Out, p: &ParaProps) {
         borders: b,
         shading,
         in_table,
+        nest,
         frame: fr,
     } = p;
     o.uint(1, *style as u64);
@@ -471,6 +472,9 @@ fn pap(o: &mut Out, p: &ParaProps) {
     o.nest(14, |o| borders(o, b));
     o.uint(15, *shading as u64);
     o.flag(16, *in_table);
+    if *nest > 0 {
+        o.uint(18, *nest as u64);
+    }
     if let Some(f) = fr {
         o.nest(17, |o| frame(o, f));
     }
@@ -489,11 +493,18 @@ fn row(o: &mut Out, r: &RowProps) {
             width,
             borders: b,
             shading,
+            valign,
         } = c;
         o.nest(1, |o| {
             o.int(1, *width as i64);
             o.nest(2, |o| borders(o, b));
             o.uint(3, *shading as u64);
+            // Top, the default, is left out, as older files had it.
+            match valign {
+                VAlign::Top => {}
+                VAlign::Center => o.uint(4, 1),
+                VAlign::Bottom => o.uint(4, 2),
+            }
         });
     }
     o.int(2, *gap as i64);
@@ -1068,6 +1079,7 @@ fn read_pap(b: &[u8]) -> Result<ParaProps, Damaged> {
             14 => p.borders = read_borders(f)?,
             15 => p.shading = u16_of(f)?,
             16 => p.in_table = flag(f)?,
+            18 => p.nest = u16_of(f)?.min(quill_core::limits::MAX_TABLE_LEVEL as u16 - 1) as u8,
             17 => p.frame = Some(read_frame(f)?),
             _ => {}
         }
@@ -1092,6 +1104,13 @@ fn read_row(b: &[u8]) -> Result<RowProps, Damaged> {
                         1 => c.width = i32_of(f)?,
                         2 => c.borders = read_borders(f)?,
                         3 => c.shading = u16_of(f)?,
+                        4 => {
+                            c.valign = match u16_of(f)? {
+                                1 => VAlign::Center,
+                                2 => VAlign::Bottom,
+                                _ => VAlign::Top,
+                            }
+                        }
                         _ => {}
                     }
                 }

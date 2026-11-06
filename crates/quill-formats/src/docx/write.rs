@@ -1159,12 +1159,14 @@ fn document_body(doc: &Document, ids: &[String]) -> String {
 }
 
 /// A table: its grid (every cell edge in any row), then the rows with each
-/// cell's width, span, borders and shading.
-fn table(doc: &Document, ids: &[String], paras: &[Paragraph], out: &mut String) {
+/// cell's width, span, borders and shading. `paras` are those of the table
+/// and what is in its cells, and the table is in a cell `outer` tables
+/// deep (0 for one in the body).
+fn table(doc: &Document, ids: &[String], paras: &[Paragraph], outer: u8, out: &mut String) {
     let text_width = doc.props.text_width();
     let mut rows = Vec::new();
     let mut i = 0;
-    while let Some(r) = quill_core::table::row_at(paras, i) {
+    while let Some(r) = quill_core::table::row_at_level(paras, i, outer + 1) {
         i = r.end + 1;
         let props = quill_core::table::row_props(paras, &r, text_width);
         rows.push((r, props));
@@ -1279,10 +1281,13 @@ fn table(doc: &Document, ids: &[String], paras: &[Paragraph], out: &mut String) 
                     shading_val(cell.shading)
                 );
             }
-            out.push_str("</w:tcPr>");
-            for p in &paras[a..=b] {
-                paragraph(doc, ids, p, out);
+            match cell.valign {
+                quill_core::props::VAlign::Top => {}
+                quill_core::props::VAlign::Center => out.push_str(r#"<w:vAlign w:val="center"/>"#),
+                quill_core::props::VAlign::Bottom => out.push_str(r#"<w:vAlign w:val="bottom"/>"#),
             }
+            out.push_str("</w:tcPr>");
+            blocks_at(doc, ids, &paras[a..=b], outer + 1, out);
             out.push_str("</w:tc>");
         }
         out.push_str("</w:tr>");
@@ -1292,9 +1297,15 @@ fn table(doc: &Document, ids: &[String], paras: &[Paragraph], out: &mut String) 
 
 /// Paragraphs and tables.
 fn blocks(doc: &Document, ids: &[String], paras: &[Paragraph], out: &mut String) {
+    blocks_at(doc, ids, paras, 0, out);
+}
+
+/// The paragraphs of a story or cell that is `level` tables deep. Those
+/// deeper make tables in it.
+fn blocks_at(doc: &Document, ids: &[String], paras: &[Paragraph], level: u8, out: &mut String) {
     let mut i = 0;
     while i < paras.len() {
-        if !paras[i].pap.in_table {
+        if paras[i].pap.level() <= level {
             paragraph(doc, ids, &paras[i], out);
             i += 1;
             continue;
@@ -1302,10 +1313,10 @@ fn blocks(doc: &Document, ids: &[String], paras: &[Paragraph], out: &mut String)
         // A table: rows end at row marks, cells at cell marks.
         let start = i;
         let mut end = i;
-        while end < paras.len() && paras[end].pap.in_table {
+        while end < paras.len() && paras[end].pap.level() > level {
             end += 1;
         }
-        table(doc, ids, &paras[start..end], out);
+        table(doc, ids, &paras[start..end], level, out);
         i = end;
     }
 }

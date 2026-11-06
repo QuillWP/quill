@@ -62,6 +62,17 @@ impl Clipboard {
         }
     }
 
+    /// A clipboard that never touches the system's, so tests running side
+    /// by side do not copy over one another.
+    #[cfg(test)]
+    pub fn without_system() -> Self {
+        Clipboard {
+            system: None,
+            rich: None,
+            local_text: None,
+        }
+    }
+
     /// What Paste would paste, as a fragment (plain text from another
     /// application becomes paragraphs in the default format).
     pub fn fragment(&mut self) -> Option<Fragment> {
