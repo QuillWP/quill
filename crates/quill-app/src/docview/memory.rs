@@ -154,18 +154,26 @@ impl DocView {
     }
 
     /// Paragraphs whose text lies between continuous y `y0` and `y1`.
+    ///
+    /// The tops are in order except inside a table row, where each cell's
+    /// paragraphs start again at the row's top. So the search by top finds
+    /// the place, and the range then takes in the whole row at each end: a
+    /// row never splits across pages, so it is never more than a page.
     fn paras_between(&self, y0: f32, y1: f32) -> std::ops::Range<usize> {
         let n = self.layouts.len();
         if self.tops.len() != n + 1 {
             return 0..n;
         }
-        // Table cells side by side can make the tops step back a little;
-        // a few paragraphs either way covers it.
+        // The paragraph before the first top inside the window may reach
+        // into it, so it comes too.
         let a = self.tops[..n]
             .partition_point(|&t| t < y0)
-            .saturating_sub(4);
-        let b = (self.tops[..n].partition_point(|&t| t <= y1) + 4).min(n);
-        a..b.max(a)
+            .saturating_sub(1);
+        let b = self.tops[..n].partition_point(|&t| t <= y1).min(n);
+        let paras = &self.doc.main.paras;
+        let a = merged_start(paras, row_start(paras, a.min(n.saturating_sub(1))));
+        let b = row_end(paras, b.max(a));
+        a..b.min(n).max(a)
     }
 
     /// Lay out again what `draw` is about to draw, and drop the glyphs
@@ -239,8 +247,163 @@ impl DocView {
     }
 }
 
+/// Whether `p` ends a row of the outermost table.
+fn ends_outer_row(p: &quill_core::Paragraph) -> bool {
+    p.mark == quill_core::Mark::RowEnd && p.pap.nest == 0
+}
+
+/// The first paragraph of the table row that paragraph `i` is in, or `i`
+/// itself when it is not in a table.
+fn row_start(paras: &[quill_core::Paragraph], mut i: usize) -> usize {
+    while i > 0
+        && paras.get(i).is_some_and(|p| p.pap.in_table)
+        && paras[i - 1].pap.in_table
+        && !ends_outer_row(&paras[i - 1])
+    {
+        i -= 1;
+    }
+    i
+}
+
+/// The first paragraph of the row where the cells merged down into the
+/// row starting at `i` begin. Their text is in that row, but is drawn as
+/// far down as the merge goes, so it is needed wherever the merge shows.
+fn merged_start(paras: &[quill_core::Paragraph], mut i: usize) -> usize {
+    let continues = |row_end: usize| {
+        paras[row_end].row.as_ref().is_some_and(|r| {
+            r.cells
+                .iter()
+                .any(|c| c.vmerge == quill_core::VMerge::Continue)
+        })
+    };
+    while i > 0 && paras[i].pap.in_table && paras[i - 1].pap.in_table {
+        let end = row_end(paras, i).saturating_sub(1);
+        if !ends_outer_row(&paras[end]) || !continues(end) {
+            break;
+        }
+        i = row_start(paras, i - 1);
+    }
+    i
+}
+
+/// One past the last paragraph of the table row that paragraph `i` starts
+/// in or follows, or `i` itself when it is not in a table.
+fn row_end(paras: &[quill_core::Paragraph], i: usize) -> usize {
+    let mut j = i;
+    if !paras.get(j).is_some_and(|p| p.pap.in_table) {
+        return i;
+    }
+    while j < paras.len() && paras[j].pap.in_table && !ends_outer_row(&paras[j]) {
+        j += 1;
+    }
+    (j + 1).min(paras.len())
+}
+
 #[cfg(test)]
 mod tests {
+    use quill_core::{CharProps, Mark, ParaProps, Paragraph};
+
+    fn cell_para(mark: Mark) -> Paragraph {
+        let pap = ParaProps {
+            in_table: true,
+            ..Default::default()
+        };
+        let mut p = Paragraph::with_text("x", CharProps::default(), pap);
+        p.mark = mark;
+        p
+    }
+
+    #[test]
+    fn the_range_takes_in_the_whole_table_row_that_the_window_touches() {
+        // 200 ordinary paragraphs, then one row of two cells (the first
+        // holds ten paragraphs, the second one), then 200 more.
+        let plain = || Paragraph::with_text("x", CharProps::default(), ParaProps::default());
+        let mut paras: Vec<Paragraph> = (0..200).map(|_| plain()).collect();
+        let row_first = paras.len();
+        for _ in 0..9 {
+            paras.push(cell_para(Mark::Paragraph));
+        }
+        paras.push(cell_para(Mark::CellEnd));
+        paras.push(cell_para(Mark::CellEnd));
+        paras.push(cell_para(Mark::RowEnd));
+        let row_last = paras.len() - 1;
+        paras.extend((0..200).map(|_| plain()));
+        let n = paras.len();
+        // Tops: ten points a paragraph, but the second cell starts again
+        // at the row's top, and the paragraphs after it carry on from the
+        // tall cell.
+        let mut tops = Vec::new();
+        let mut y = 0.0;
+        for i in 0..n {
+            if i == row_first + 10 {
+                y = tops[row_first];
+            }
+            if i == row_last {
+                y = tops[row_first] + 100.0;
+            }
+            tops.push(y);
+            y += 10.0;
+        }
+        tops.push(y);
+        let mut v = DocView::new(quill_core::Document::new(), "t".into());
+        v.doc.main.paras = paras;
+        v.layouts = (0..n).map(|_| None).collect();
+        v.tops = tops.clone();
+        // A window over the middle of the tall cell.
+        let (y0, y1) = (tops[row_first] + 40.0, tops[row_first] + 60.0);
+        let range = v.paras_between(y0, y1);
+        assert!(
+            range.start <= row_first && range.end > row_last,
+            "{range:?} does not hold the row {row_first}..={row_last}"
+        );
+        // Away from tables, it is just the paragraphs in view and the one
+        // before them.
+        let range = v.paras_between(tops[20], tops[25]);
+        assert_eq!(range, 19..26);
+    }
+
+    #[test]
+    fn the_range_takes_in_the_row_a_merged_cell_starts_in() {
+        use quill_core::{RowProps, VMerge};
+        // Three rows of two cells; the first cell of the first row is
+        // merged down through the other two, and its text is long.
+        let plain = || Paragraph::with_text("x", CharProps::default(), ParaProps::default());
+        let mut paras: Vec<Paragraph> = (0..50).map(|_| plain()).collect();
+        let first_row = paras.len();
+        for merge in [VMerge::Restart, VMerge::Continue, VMerge::Continue] {
+            paras.push(cell_para(Mark::CellEnd));
+            paras.push(cell_para(Mark::CellEnd));
+            let mut end = cell_para(Mark::RowEnd);
+            let mut row = RowProps::even(2, 8640);
+            row.cells[0].vmerge = merge;
+            end.row = Some(Box::new(row));
+            paras.push(end);
+        }
+        let last_row = paras.len() - 3;
+        paras.extend((0..50).map(|_| plain()));
+        let n = paras.len();
+        let mut tops: Vec<f32> = (0..=n).map(|i| i as f32 * 10.0).collect();
+        // The rows sit 100 points apart, the merged text filling them.
+        for r in 0..3 {
+            for k in 0..3 {
+                tops[first_row + 3 * r + k] = 500.0 + 100.0 * r as f32;
+            }
+        }
+        for (i, t) in tops.iter_mut().enumerate().skip(last_row + 3) {
+            *t = 800.0 + 10.0 * (i - last_row - 3) as f32;
+        }
+        let mut v = DocView::new(quill_core::Document::new(), "t".into());
+        v.doc.main.paras = paras;
+        v.layouts = (0..n).map(|_| None).collect();
+        v.tops = tops;
+        // A window over the last row only.
+        let range = v.paras_between(720.0, 790.0);
+        assert!(
+            range.start <= first_row,
+            "{range:?} misses the merge's first row"
+        );
+    }
+
     use super::*;
     use crate::canvas::Rect;
     use quill_core::{Position, Selection};

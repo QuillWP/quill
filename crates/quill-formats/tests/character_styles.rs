@@ -190,7 +190,7 @@ fn linked() -> (Document, u16) {
         )
         .unwrap();
     let (pap, own) = (d.styles.get(heading).pap.clone(), d.styles.get(heading).chp);
-    d.redefine_style_linked(StoryId::Main, heading, pap, own, callout);
+    d.redefine_style_linked(heading, pap, own, callout);
     (d, heading)
 }
 

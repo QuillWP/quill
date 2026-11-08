@@ -29,6 +29,11 @@ arboard = { version = "3.6", default-features = false }
 ab_glyph_rasterizer = "0.1.10"
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 zune-jpeg = { version = "0.5", default-features = false, features = ["std"] }
+# Edit > Advanced > Grep, Regex Search and Sed. Trimmed: no speed tables, and
+# only the Unicode data that \w, \d, \b and (?i) need. That adds about 430 KB
+# to the release binary (the full default feature set adds about 1 MB). Do not
+# turn features back on without re-measuring; see docs/regex-size.md.
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 
 # Native Open and Save dialogs. Linux uses GTK, which desktops already
 # have, rather than the portal backend's async runtime.

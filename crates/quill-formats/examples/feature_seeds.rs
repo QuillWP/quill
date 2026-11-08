@@ -138,7 +138,7 @@ fn link_headings(doc: &mut Document, ids: &[u16]) {
         };
         let s = doc.styles.get(style);
         let (pap, own) = (s.pap.clone(), s.own());
-        doc.redefine_style_linked(StoryId::Main, style, pap, own, ids[k % ids.len()]);
+        doc.redefine_style_linked(style, pap, own, ids[k % ids.len()]);
         if k == 0 {
             let derived = doc.add_style(
                 "Heading Derived",
@@ -191,7 +191,7 @@ fn built() -> Vec<(String, Document)> {
         if let Some(style) = doc.styles.find(&format!("heading {level}")) {
             let s = doc.styles.get(style);
             let (pap, own) = (s.pap.clone(), s.own());
-            doc.redefine_style_linked(StoryId::Main, style, pap, own, ids[level % ids.len()]);
+            doc.redefine_style_linked(style, pap, own, ids[level % ids.len()]);
         }
     }
     contents(&mut doc);
@@ -229,7 +229,7 @@ fn variants(doc: Document) -> Vec<(&'static str, Document)> {
     let mut normal = linked.clone();
     let s = normal.styles.get(0);
     let (pap, own) = (s.pap.clone(), s.own());
-    normal.redefine_style_linked(StoryId::Main, 0, pap, own, ids[1]);
+    normal.redefine_style_linked(0, pap, own, ids[1]);
     vec![("linked", linked), ("deleted", deleted), ("normal", normal)]
 }
 

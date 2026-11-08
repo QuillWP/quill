@@ -3,6 +3,8 @@
 // window. Debug builds keep the console for their diagnostic output.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod advanced;
+mod advanced_dialog;
 mod app;
 mod bars;
 mod border_dialog;

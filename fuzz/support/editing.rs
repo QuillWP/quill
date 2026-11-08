@@ -51,6 +51,7 @@ pub fn exercise(data: &[u8]) {
     exercise_plain(data);
     let mut doc = quill_core::text::from_plain_text("First café\nSecond \u{1f980} paragraph");
     doc.forget_history();
+    let start = doc.clone();
     let mut undo = Vec::new();
     let mut redo = Vec::new();
     for op in data.as_chunks::<6>().0.iter().take(96) {
@@ -204,6 +205,42 @@ pub fn exercise(data: &[u8]) {
         assert_eq!(doc.redo_label().is_some(), !redo.is_empty());
     }
     round_trip::check_supported(&doc);
+    save_anyway(start, &doc);
+}
+
+/// Save Anyway makes a document what its file holds as one step: from the
+/// starting document, matching the finished one must give exactly its
+/// parts, Undo must give back the start, and Redo the finished one again.
+fn save_anyway(mut first: Document, saved: &Document) {
+    // The font table only grows, so the start's ids are a prefix of the
+    // finished one's; give it the whole table as a file would have.
+    first.fonts = saved.fonts.clone();
+    first.forget_history();
+    let original = round_trip::snapshot(&first);
+    let same = |a: &Document, b: &Document| {
+        a.main == b.main
+            && a.notes == b.notes
+            && a.annotations == b.annotations
+            && a.headers == b.headers
+            && a.styles == b.styles
+            && a.props == b.props
+            && a.section == b.section
+    };
+    let sel = Selection::default();
+    assert!(first.match_saved(saved, "Save Anyway", sel));
+    assert!(
+        same(&first, saved),
+        "Save Anyway must show what the file holds"
+    );
+    valid(&first);
+    first.undo();
+    assert_eq!(
+        round_trip::snapshot(&first),
+        original,
+        "Undo must take Save Anyway back"
+    );
+    first.redo();
+    assert!(same(&first, saved), "Redo must bring Save Anyway back");
 }
 
 /// Independent String model: a wrong insert/delete must fail even if all file

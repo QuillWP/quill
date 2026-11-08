@@ -68,7 +68,7 @@ pub fn paint_paragraph(
                     let size = glyph_size(chp, &p.text, g.offset as usize, st.size);
                     draw_styled_glyph(c, fonts, cache, g.face, g.id, size, ox + g.x, y, chp, col);
                 }
-                Kind::Field(n) => {
+                Kind::Field => {
                     // An annotation mark: the balloon, the initials in it.
                     let balloon = p.text[g.offset as usize..].starts_with(chars::ANNOTATION);
                     // In the comments pane the mark is only the line saying
@@ -88,7 +88,7 @@ pub fn paint_paragraph(
                         ..*chp
                     };
                     let chp = if balloon { &plain } else { chp };
-                    for fg in l.fields.get(n as usize).into_iter().flatten() {
+                    for fg in l.field_glyphs(g.offset) {
                         // The pane's line saying who wrote a comment is gray;
                         // the initials and number in a balloon are not.
                         let caption = card;
@@ -564,11 +564,30 @@ impl DocView {
             }
             let oy = area.y + TEXT_TOP - self.scroll_y;
             let top = self.scroll_y - TEXT_TOP;
-            self.draw_text(c, fonts, cache, focused, ox, oy, top, top + area.h);
+            self.draw_text(c, fonts, cache, focused, ox, oy, top, top + area.h, false);
+            let (sel_from, sel_to) = self.sel.range();
+            let hl = if focused {
+                color::HIGHLIGHT
+            } else {
+                color::GRAY
+            };
             for (first, _) in self.secs.iter().skip(1) {
                 // In the middle of the room left for it.
                 let y = oy + self.tops[*first] - SECTION_PAD / 2.0;
                 if y >= area.y && y <= area.bottom() + 4.0 {
+                    // The mark ends the paragraph before it, so a selection
+                    // reaching from there into the next one includes it.
+                    if !self.sel.is_empty() && sel_from.para < *first && sel_to.para >= *first {
+                        c.fill(
+                            Rect::new(
+                                area.x + 2.0,
+                                y - SECTION_PAD / 2.0,
+                                area.right() - area.x - 2.0,
+                                SECTION_PAD,
+                            ),
+                            hl,
+                        );
+                    }
                     self.draw_section_mark(
                         c,
                         fonts,
@@ -684,7 +703,7 @@ impl DocView {
             let band = Rect::new(left, top + mt + b.top, pw, (to - from).max(0.0) + 0.5);
             c.push_clip(band);
             let oy = top + mt + b.top - from;
-            self.draw_text(c, fonts, cache, focused, ox + b.x, oy, from, to);
+            self.draw_text(c, fonts, cache, focused, ox + b.x, oy, from, to, true);
             if (to - end).abs() < 0.01 && c.screen() {
                 c.fill(
                     Rect::new(ox + b.x + 1.0, oy + end + 2.0, 12.0, 1.5),
@@ -693,12 +712,15 @@ impl DocView {
             }
             c.pop_clip();
         }
+        self.draw_page_frames(c, fonts, cache, focused, k, ox, top + mt);
         self.draw_page_notes(c, fonts, cache, k, ox, top + mt);
         self.draw_line_numbers(c, fonts, cache, k, ox, top + mt);
     }
 
     /// Draw the paragraphs between document y `top` and `bottom`, with
-    /// document (0, 0) at window (`ox`, `oy`).
+    /// document (0, 0) at window (`ox`, `oy`). `on_page` is set when this
+    /// is one page's share of the text: boxes are closed off where the page
+    /// cuts them, and frames are left to draw_page.
     #[allow(clippy::too_many_arguments)]
     fn draw_text(
         &self,
@@ -710,6 +732,7 @@ impl DocView {
         oy: f32,
         top: f32,
         bottom: f32,
+        on_page: bool,
     ) {
         let (s, e) = self.sel.range();
         let gridlines = Gridlines::current().filter(|_| c.screen());
@@ -748,10 +771,12 @@ impl DocView {
         {
             first -= 1;
         }
+        // On a page, a block that starts where this share ends belongs to
+        // the next page, though its top border would show in the clip.
         let blocks = || {
-            self.blocks[first..]
-                .iter()
-                .take_while(move |b| b.top <= bottom)
+            self.blocks[first..].iter().take_while(move |b| {
+                b.top <= bottom && !(on_page && b.top >= bottom && b.top > top)
+            })
         };
         for b in blocks() {
             if let Some(row) = &b.row {
@@ -784,7 +809,12 @@ impl DocView {
                 let l = self.layout(para);
                 let (px, py) = (ox + self.xs[para], oy + self.tops[para]);
                 if let Some(bx) = &l.border {
-                    draw_border_box(c, bx, px, py);
+                    let bx = if on_page {
+                        self.cut_box(para, bx, top, bottom)
+                    } else {
+                        *bx
+                    };
+                    draw_border_box(c, &bx, px, py);
                 }
                 let picture = self.selected_picture().is_some();
                 if !missing.is_empty() {
@@ -862,8 +892,51 @@ impl DocView {
                 }
             }
         }
-        self.draw_frames(c, fonts, cache, focused, ox, oy, top, bottom);
+        if !on_page {
+            self.draw_frames(c, fonts, cache, focused, ox, oy, top, bottom);
+        }
         self.draw_end_notes(c, fonts, cache, ox, oy, top, bottom);
+    }
+
+    /// Paragraph `para`'s box as a page holding document y `top` to
+    /// `bottom` shows it. A box with sides that runs over a page break is
+    /// closed off on each page, with its own top and bottom lines, as
+    /// table rows are.
+    fn cut_box(&self, para: usize, bx: &BorderBox, top: f32, bottom: f32) -> BorderBox {
+        let mut bx = *bx;
+        if bx.left_line == BorderStyle::None && bx.right_line == BorderStyle::None {
+            return bx;
+        }
+        let paras = &self.doc.main.paras;
+        let borders = &paras[para].pap.borders;
+        let joins = Joins::around(paras, para);
+        let y = self.tops[para];
+        let starts_above = y + bx.top < top - 0.01;
+        let joined_above = joins.above && y >= top - 0.01 && self.tops[para - 1] < top - 0.01;
+        if (starts_above || joined_above) && borders.top.style != BorderStyle::None {
+            bx.top_line = borders.top.style;
+            bx.colors[0] = borders.top.color;
+            bx.top = bx.top.max(top - y) + border_width(bx.top_line);
+        }
+        let ends_below = y + bx.bottom > bottom + 0.01;
+        let joined_below = joins.below && self.tops[para + 1] >= bottom - 0.01;
+        if (ends_below || joined_below) && borders.bottom.style != BorderStyle::None {
+            bx.bottom_line = borders.bottom.style;
+            bx.colors[1] = borders.bottom.color;
+            // Just inside the page's share, where its clip still shows it.
+            bx.bottom = bx.bottom.min(bottom - y) - border_width(bx.bottom_line);
+        }
+        bx
+    }
+
+    /// How wide paragraph `para` was laid out: its column, or its table
+    /// cell, which is narrower than the text area.
+    fn para_width(&self, para: usize) -> f32 {
+        self.widths
+            .get(para)
+            .copied()
+            .filter(|&w| w > 0.0)
+            .unwrap_or(self.laid_out_width)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -890,7 +963,7 @@ impl DocView {
         } else {
             color::GRAY
         };
-        Self::fill_chars(c, l, ox, py, from, to, text_len, hl);
+        Self::fill_chars(c, l, ox, py, from, to, text_len, self.para_width(para), hl);
     }
 
     /// The font ids to mark on screen: those not installed, when View >
@@ -918,7 +991,17 @@ impl DocView {
         let p = &self.doc.main.paras[para];
         for (from, to, chp) in p.run_bounds() {
             if missing.contains(&chp.font) {
-                Self::fill_chars(c, l, ox, py, from, to, p.len(), MISSING_FONT);
+                Self::fill_chars(
+                    c,
+                    l,
+                    ox,
+                    py,
+                    from,
+                    to,
+                    p.len(),
+                    self.para_width(para),
+                    MISSING_FONT,
+                );
             }
         }
     }
@@ -933,12 +1016,24 @@ impl DocView {
         from: usize,
         to: usize,
         text_len: usize,
+        width: f32,
         hl: u32,
     ) {
         for (li, line) in l.lines.iter().enumerate() {
             let last = li + 1 == l.lines.len();
             let (ls, le) = (line.start, if last { text_len + 1 } else { line.end });
             if to <= ls || from >= le {
+                continue;
+            }
+            // A page break has a line to itself and no width of its own:
+            // when it is selected, the whole line shows it.
+            if line.hard_break && line.end - line.start == 1 {
+                if from <= ls && to > ls {
+                    // To the right edge of the paragraph's own column or
+                    // cell, and no further.
+                    let w = (width - line.left).max(0.0);
+                    c.fill(Rect::new(ox + line.left, py + line.top, w, line.height), hl);
+                }
                 continue;
             }
             let x0 = if from > ls {
@@ -985,22 +1080,16 @@ impl DocView {
         self.draw_spelling(c, para, l, ox, py);
         if !self.page_view && c.screen() {
             let face = l.glyphs.last().map(|g| g.face).unwrap_or_default();
-            for (line, y) in l
-                .lines
-                .iter()
-                .filter(|line| line.hard_break)
-                .zip(manual_page_break_rule_ys(l, py))
-            {
-                // The break can follow text on this very line. Start the
-                // guide after that text instead of striking through it.
-                let start = ox + line.end_x + 8.0;
+            for y in manual_page_break_rule_ys(l, py) {
+                // The break has its own line, so the guide runs the width
+                // of the text area, as a section break's does.
                 draw_break_rule(
                     c,
                     fonts,
                     cache,
                     face,
-                    start.min(ox + self.laid_out_width),
-                    ox + self.laid_out_width,
+                    ox,
+                    ox + self.para_width(para),
                     y,
                     "Page Break",
                     false,
@@ -1082,5 +1171,182 @@ mod break_tests {
                 false,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod page_cut_tests {
+    use super::*;
+    use quill_core::props::{BorderLine, Frame, FrameH, FrameRel, FrameV};
+
+    /// Records the fills and glyphs a page shows: those inside its clips.
+    #[derive(Default)]
+    struct Shown {
+        clips: Vec<Rect>,
+        fills: Vec<Rect>,
+        glyphs: Vec<(f32, f32)>,
+    }
+
+    impl Shown {
+        fn visible(&self, x: f32, y: f32) -> bool {
+            self.clips
+                .iter()
+                .all(|c| x >= c.x && x <= c.right() && y >= c.y && y <= c.bottom())
+        }
+        fn rules(&self) -> Vec<Rect> {
+            self.fills.iter().copied().filter(|r| r.w > r.h).collect()
+        }
+    }
+
+    impl Surface for Shown {
+        fn screen(&self) -> bool {
+            false
+        }
+        fn hair(&self) -> f32 {
+            0.5
+        }
+        fn fill(&mut self, r: Rect, _: u32) {
+            if self.visible(r.x + r.w / 2.0, r.y + r.h / 2.0) {
+                self.fills.push(r);
+            }
+        }
+        fn glyph(
+            &mut self,
+            _: &Fonts,
+            _: &mut GlyphCache,
+            _: quill_layout::FaceKey,
+            _: quill_layout::GlyphId,
+            _: f32,
+            x: f32,
+            baseline: f32,
+            _: u32,
+        ) {
+            if self.visible(x, baseline) {
+                self.glyphs.push((x, baseline));
+            }
+        }
+        fn push_clip(&mut self, r: Rect) {
+            self.clips.push(r);
+        }
+        fn pop_clip(&mut self) {
+            self.clips.pop();
+        }
+        fn picture(&mut self, _: &quill_core::Picture, _: Rect) {}
+    }
+
+    const FILLER: &str =
+        "Filler text that takes up room on the page so the next thing lands near the bottom. ";
+
+    /// Seven paragraphs of filler, then `rest`, laid out in Page Layout on
+    /// a page that leaves `room` points after the filler.
+    fn view_with(rest: &[String], room: f32, fonts: &mut Fonts) -> DocView {
+        let mut text: Vec<String> = (0..7).map(|_| FILLER.repeat(6)).collect();
+        text.extend(rest.iter().cloned());
+        text.push("After.".into());
+        let mut doc = quill_core::text::from_plain_text(&text.join("\n"));
+        for p in &mut doc.main.paras[..7] {
+            p.pap.after = 200;
+        }
+        let mut view = DocView::new(doc, "Cut".into());
+        view.page_view = true;
+        view.area = Rect::new(0.0, 0.0, 900.0, 700.0);
+        view.update_layout(fonts);
+        let p = &mut view.doc.props;
+        p.page_height = p.margin_top + p.margin_bottom + ((view.tops[7] + room) * 20.0) as i32;
+        view.update_layout(fonts);
+        view
+    }
+
+    /// Lay out again after changing paragraph properties.
+    fn relayout(view: &mut DocView, fonts: &mut Fonts) {
+        view.layouts.clear();
+        view.update_layout(fonts);
+    }
+
+    fn page(view: &DocView, fonts: &Fonts, k: usize) -> Shown {
+        let mut s = Shown::default();
+        view.draw_page(&mut s, fonts, &mut GlyphCache::new(), false, k, 0.0, 0.0);
+        s
+    }
+
+    fn line() -> BorderLine {
+        BorderLine {
+            style: BorderStyle::Single,
+            space: 80,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_box_over_a_page_break_is_closed_on_both_pages() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let lines: Vec<String> = (1..=8).map(|k| format!("Line {k} in the box.")).collect();
+        let mut view = view_with(&lines, 60.0, &mut fonts);
+        for p in &mut view.doc.main.paras[7..15] {
+            p.pap.borders.top = line();
+            p.pap.borders.bottom = line();
+            p.pap.borders.left = line();
+            p.pap.borders.right = line();
+        }
+        relayout(&mut view, &mut fonts);
+        assert_eq!(view.pages.len(), 2);
+        let first = view.pages[1].para;
+        assert!(first > 7 && first < 15, "the box runs over the break");
+        // Each page shows a top and a bottom edge across the box.
+        for k in 0..2 {
+            assert_eq!(page(&view, &fonts, k).rules().len(), 2, "page {}", k + 1);
+        }
+    }
+
+    #[test]
+    fn a_ruled_paragraph_moved_to_the_next_page_leaves_no_rule_behind() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let rest = vec!["A ruled paragraph. ".repeat(12)];
+        let mut view = view_with(&rest, 30.0, &mut fonts);
+        let ruled = &mut view.doc.main.paras[7].pap;
+        ruled.keep_together = true;
+        ruled.before = 200;
+        ruled.borders.top = line();
+        ruled.borders.bottom = line();
+        relayout(&mut view, &mut fonts);
+        assert_eq!(view.pages[1].para, 7, "the ruled paragraph starts page 2");
+        assert!(page(&view, &fonts, 0).rules().is_empty());
+        assert_eq!(page(&view, &fonts, 1).rules().len(), 2);
+    }
+
+    #[test]
+    fn a_frame_from_its_paragraph_moves_whole_to_the_next_page() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let rest = vec!["A framed paragraph. ".repeat(20), FILLER.repeat(6)];
+        let mut view = view_with(&rest, 30.0, &mut fonts);
+        view.doc.main.paras[7].pap.frame = Some(Frame {
+            h: FrameH::Right,
+            v: FrameV::At(0),
+            v_rel: FrameRel::Column,
+            width: Some(2880),
+            ..Default::default()
+        });
+        relayout(&mut view, &mut fonts);
+        let f = view.frames[0];
+        // Placed where its paragraph is, which is too near the foot of
+        // page 1 for it, so at the top of page 2.
+        assert_eq!(view.on_page(f.y).0, 1);
+        assert_eq!(view.on_page(f.y).2, 0.0);
+        // Every line of it shows on page 2, though page 2 holds little text.
+        let lines = view.layout(7).lines.len();
+        let shown = page(&view, &fonts, 1);
+        let rows: std::collections::BTreeSet<i32> = shown
+            .glyphs
+            .iter()
+            .filter(|g| g.0 > 300.0)
+            .map(|g| g.1.round() as i32)
+            .collect();
+        assert_eq!(rows.len(), lines);
     }
 }

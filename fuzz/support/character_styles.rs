@@ -216,7 +216,7 @@ pub fn exercise(data: &[u8]) {
                                 linked
                             }
                         };
-                        doc.redefine_style_linked(MAIN, heading, pap, own, character);
+                        doc.redefine_style_linked(heading, pap, own, character);
                     }
                     12 => {
                         let from = doc.font_id("Missing");

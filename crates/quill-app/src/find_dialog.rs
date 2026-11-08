@@ -192,7 +192,7 @@ pub fn update(st: &mut FindState, d: &mut Dialog, view: &DocView) {
     s.whole_word = d.is_on("whole");
     s.dir = d.selected("dir");
     let font = |f| view.doc.font_name(f).to_string();
-    let style = |id| view.doc.styles.get(id).name.clone();
+    let style = |id| view.doc.styles.get(id).display_name();
     let describe = |c: &CharSpec, p: &ParaSpec| {
         let a = c.describe(&font);
         let b = p.describe(&style);
@@ -476,11 +476,11 @@ pub fn read_character_spec(d: &Dialog, view: &mut DocView) -> Option<CharSpec> {
     if !font.is_empty() {
         s.font = Some(view.doc.font_id(&font));
     }
+    // Left empty, the size is not part of the search; typed, it has to be
+    // a size the Character dialog would take.
     let size = d.field_text("size");
-    let size = size.trim().trim_end_matches("pt").trim();
-    if !size.is_empty() {
-        let v: f32 = size.parse().ok()?;
-        s.size = Some((v * 2.0).round() as u16);
+    if !size.trim().is_empty() {
+        s.size = Some(crate::format_dialogs::parse_font_size(&size)?);
     }
     s.underline = d
         .selected("underline")
@@ -571,7 +571,7 @@ pub fn read_paragraph_spec(d: &Dialog) -> Option<ParaSpec> {
     // The popup has a blank "any" choice before the Paragraph dialog's.
     s.line = match d.selected("line") {
         0 => None,
-        rule => crate::format_dialogs::read_line_rule(d, rule - 1)?,
+        rule => crate::format_dialogs::read_line_rule(d, rule - 1, LineSpacing::Auto)?,
     };
     s.page_break_before = d.check3_state("pagebreak");
     s.keep_with_next = d.check3_state("keepnext");
@@ -583,7 +583,7 @@ pub fn read_paragraph_spec(d: &Dialog) -> Option<ParaSpec> {
 pub fn style_spec(view: &DocView, spec: &ParaSpec) -> Dialog {
     let mut d = Dialog::new("Style", 300.0, 70.0);
     let mut names: Vec<String> = vec![String::new()];
-    names.extend(view.doc.styles.styles.iter().map(|s| s.name.clone()));
+    names.extend(view.doc.styles.styles.iter().map(|s| s.display_name()));
     let sel = spec.style.map_or(0, |s| s as usize + 1);
     d.text("Style:", 12.0, 12.0);
     d.popup_owned("style", names, sel, 64.0, 10.0, 140.0);

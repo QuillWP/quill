@@ -53,6 +53,9 @@ impl WinState {
             id,
             DialogId::Find
                 | DialogId::Replace
+                | DialogId::Grep
+                | DialogId::RegexSearch
+                | DialogId::Sed
                 | DialogId::Glossary
                 | DialogId::ShowClipboard
                 | DialogId::Spelling
@@ -98,6 +101,15 @@ impl WinState {
                 (d, Which::Find(st))
             }
             DialogId::GoTo => (crate::find_dialog::go_to(&self.view), Which::GoTo),
+            DialogId::Grep => {
+                let (d, st) = crate::advanced_dialog::grep(&self.view);
+                (d, Which::Grep(st))
+            }
+            DialogId::RegexSearch => (
+                crate::advanced_dialog::regex_search(&self.view, false),
+                Which::RegexSearch(false),
+            ),
+            DialogId::Sed => (crate::advanced_dialog::sed(&self.view), Which::Sed),
             DialogId::Glossary => {
                 let (d, st) = crate::glossary::dialog(&self.view);
                 (d, Which::Glossary(st))
@@ -172,10 +184,10 @@ impl WinState {
             DialogId::Section => (crate::page_dialogs::section(&self.view), Which::Section),
             DialogId::Print => (crate::page_dialogs::print(self.main_view()), Which::Print),
             DialogId::Preferences => (
-                crate::prefs_dialog::preferences(0, env.font_names),
+                crate::prefs_dialog::preferences(0, env.font_families),
                 Which::Preferences {
                     panel: 0,
-                    fonts: env.font_names.to_vec(),
+                    families: env.font_families.to_vec(),
                     original: Box::new(crate::settings::get()),
                     draft: Box::new(crate::settings::get()),
                 },
@@ -183,11 +195,11 @@ impl WinState {
             DialogId::DefaultFont => (
                 crate::prefs_dialog::preferences(
                     crate::prefs_dialog::DEFAULT_FONT_PANEL,
-                    env.font_names,
+                    env.font_families,
                 ),
                 Which::Preferences {
                     panel: crate::prefs_dialog::DEFAULT_FONT_PANEL,
-                    fonts: env.font_names.to_vec(),
+                    families: env.font_families.to_vec(),
                     original: Box::new(crate::settings::get()),
                     draft: Box::new(crate::settings::get()),
                 },
@@ -195,11 +207,11 @@ impl WinState {
             DialogId::ToolbarPreferences => (
                 crate::prefs_dialog::preferences(
                     crate::prefs_dialog::TOOLBAR_PANEL,
-                    env.font_names,
+                    env.font_families,
                 ),
                 Which::Preferences {
                     panel: crate::prefs_dialog::TOOLBAR_PANEL,
-                    fonts: env.font_names.to_vec(),
+                    families: env.font_families.to_vec(),
                     original: Box::new(crate::settings::get()),
                     draft: Box::new(crate::settings::get()),
                 },
@@ -775,6 +787,55 @@ impl WinState {
                 }
                 _ => {}
             },
+            Which::Grep(st) => match o {
+                Outcome::Ok | Outcome::Button("search") => {
+                    crate::advanced_dialog::grep_search(st, d, &self.view);
+                }
+                Outcome::Changed("hits") | Outcome::Button("go") => {
+                    crate::advanced_dialog::grep_go(st, d, &mut self.view);
+                }
+                Outcome::Changed(_) => {
+                    crate::advanced_dialog::grep_search(st, d, &self.view);
+                }
+                Outcome::Cancel => {
+                    self.dialogs.pop();
+                }
+                _ => {}
+            },
+            Which::RegexSearch(replace) => match o {
+                Outcome::Ok | Outcome::Button("findnext") => {
+                    if d.is_enabled("findnext") {
+                        crate::advanced_dialog::rx_find_next(d, &mut self.view, *replace);
+                    }
+                }
+                Outcome::Button("mode") => {
+                    *replace = !*replace;
+                    crate::advanced_dialog::rx_switch(d, &self.view, *replace);
+                }
+                Outcome::Button("replace") if *replace => {
+                    crate::advanced_dialog::rx_replace(d, &mut self.view);
+                }
+                Outcome::Button("replaceall") if *replace => {
+                    crate::advanced_dialog::rx_replace_all(d, &mut self.view);
+                }
+                Outcome::Changed(_) => crate::advanced_dialog::rx_check(d, *replace),
+                Outcome::Cancel => {
+                    self.dialogs.pop();
+                }
+                _ => {}
+            },
+            Which::Sed => match o {
+                Outcome::Ok | Outcome::Button("apply") => {
+                    if d.is_enabled("apply") {
+                        let _ = crate::advanced_dialog::sed_apply(d, &mut self.view);
+                    }
+                }
+                Outcome::Changed("script") => crate::advanced_dialog::sed_check(d),
+                Outcome::Cancel => {
+                    self.dialogs.pop();
+                }
+                _ => {}
+            },
             Which::Glossary(st) => {
                 let close = match o {
                     Outcome::Cancel => true,
@@ -837,12 +898,12 @@ impl WinState {
                     Action::Options => {
                         let d = crate::prefs_dialog::preferences(
                             crate::prefs_dialog::SPELLING_PANEL,
-                            &self.font_names,
+                            &self.font_families,
                         );
                         self.dialogs.push((
                             Which::Preferences {
                                 panel: crate::prefs_dialog::SPELLING_PANEL,
-                                fonts: self.font_names.clone(),
+                                families: self.font_families.clone(),
                                 original: Box::new(crate::settings::get()),
                                 draft: Box::new(crate::settings::get()),
                             },
@@ -1321,19 +1382,19 @@ impl WinState {
                 }
                 Which::Preferences {
                     panel,
-                    fonts,
+                    families,
                     draft,
                     ..
                 } if crate::prefs_dialog::is_folder_button(id) => {
                     crate::prefs_dialog::changed_in(*panel, d, id, draft);
                     crate::prefs_dialog::folder_button(id, draft);
                     let origin = d.origin;
-                    *d = crate::prefs_dialog::preferences_with(*panel, fonts, draft);
+                    *d = crate::prefs_dialog::preferences_with(*panel, families, draft);
                     d.origin = origin;
                 }
                 Which::Preferences {
                     panel,
-                    fonts,
+                    families,
                     draft,
                     ..
                 } if matches!(id, "dictionary_new" | "dictionary_choose") => {
@@ -1350,7 +1411,7 @@ impl WinState {
                         ),
                     }
                     let origin = d.origin;
-                    *d = crate::prefs_dialog::preferences_with(*panel, fonts, draft);
+                    *d = crate::prefs_dialog::preferences_with(*panel, families, draft);
                     d.origin = origin;
                 }
                 Which::CharacterStyles if matches!(id, "new" | "edit") => {

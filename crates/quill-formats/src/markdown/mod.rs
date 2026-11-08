@@ -37,6 +37,24 @@ pub(crate) fn list_label_of(text: &str) -> Option<(bool, String)> {
     write::list_label(text)
 }
 
+/// Take a paragraph out of one level of quote: the indent and rule a
+/// Markdown quote gives it. False if it is not in a quote.
+pub fn leave_quote(pap: &mut quill_core::ParaProps) -> bool {
+    use quill_core::props::BorderStyle;
+    let rule = &mut pap.borders.left;
+    if rule.style == BorderStyle::None {
+        return false;
+    }
+    let depth = (rule.space / read::QUOTE_GAP).clamp(1, 8);
+    if depth == 1 {
+        *rule = Default::default();
+    } else {
+        rule.space = read::QUOTE_GAP * (depth - 1);
+    }
+    pap.left = (pap.left - read::QUOTE_INDENT).max(0);
+    true
+}
+
 /// A document holding `text` as it stands, one paragraph per line, in a
 /// fixed-width font: what View > Markdown > Source edits.
 pub fn source_document(text: &str) -> Document {
@@ -65,6 +83,23 @@ pub fn source_text(doc: &Document) -> String {
 mod tests {
     use super::*;
     use quill_core::para::chars;
+
+    #[test]
+    fn leaving_a_quote_takes_off_one_level() {
+        let (doc, _) = read("> > deep\n", None);
+        let mut pap = doc.main.paras[0].pap.clone();
+        assert!(leave_quote(&mut pap));
+        let mut one = Document::new();
+        one.main.paras[0].pap = pap.clone();
+        one.main.paras[0].insert(0, "deep", one.styles.get(0).chp);
+        assert_eq!(write(&one).trim(), "> deep");
+        assert!(leave_quote(&mut pap));
+        assert_eq!(
+            (pap.left, pap.borders.left.style),
+            (0, quill_core::props::BorderStyle::None)
+        );
+        assert!(!leave_quote(&mut pap));
+    }
 
     fn texts(doc: &Document) -> Vec<String> {
         doc.main.paras.iter().map(|p| p.text.clone()).collect()

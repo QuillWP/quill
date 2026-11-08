@@ -75,6 +75,7 @@ const UI: &str = quill_layout::fonts::UI_FONT;
 pub enum Hit {
     FontPopup,
     SizePopup,
+    ColorPopup,
     Bold,
     Italic,
     Underline,
@@ -133,6 +134,7 @@ fn formatting_toolbar_items() -> Vec<(Hit, Rect)> {
     lay(&[
         (Hit::FontPopup, 112.0, 0.0),
         (Hit::SizePopup, 52.0, 8.0),
+        (Hit::ColorPopup, 40.0, 8.0),
         (Hit::Tool("Up"), 18.0, 8.0),
         (Hit::Tool("Down"), 18.0, 0.0),
         (Hit::Bold, 16.0, 12.0),
@@ -201,6 +203,7 @@ pub fn tip(hit: Hit) -> Option<String> {
     let (name, cmd) = match hit {
         Hit::FontPopup => ("Font", None),
         Hit::SizePopup => ("Font Size", None),
+        Hit::ColorPopup => ("Font Color", None),
         Hit::StylePopup => ("Style", None),
         Hit::Bold => ("Bold", Some(Cmd::Bold)),
         Hit::Italic => ("Italic", Some(Cmd::Italic)),
@@ -384,6 +387,14 @@ pub fn draw_formatting_toolbar(
                 popup_field(c, label, r, &format_size(s.chp.size), hot);
                 continue;
             }
+            Hit::ColorPopup => {
+                // A swatch of the selection's color in place of a name.
+                popup_field(c, label, r, "", hot);
+                let swatch = Rect::new(r.x + 5.0, r.y + 4.0, r.w - 22.0, r.h - 8.0);
+                c.fill(swatch, darker(line_color()));
+                c.fill(swatch.inset(1.0), s.chp.color.0);
+                continue;
+            }
             Hit::Bold => (BOLD, s.chp.bold, true),
             Hit::Italic => (ITALIC, s.chp.italic, true),
             Hit::Underline => (
@@ -407,7 +418,7 @@ pub fn draw_formatting_toolbar(
 
 /// What the paragraph toolbar shows: the paragraph's formatting.
 pub struct ParagraphToolbarState<'a> {
-    pub style: &'a str,
+    pub style: std::borrow::Cow<'a, str>,
     pub pap: &'a ParaProps,
     /// The kind of tab a click on the ruler sets.
     pub tab_type: TabAlign,
@@ -451,7 +462,7 @@ pub fn draw_paragraph_toolbar(
         let hot = hover == Some(hit);
         let (spec, on, live) = match hit {
             Hit::StylePopup => {
-                popup_field(c, label, r, s.style, hot);
+                popup_field(c, label, r, &s.style, hot);
                 continue;
             }
             Hit::Align(a) => {

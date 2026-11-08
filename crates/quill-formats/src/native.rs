@@ -1443,7 +1443,39 @@ fn read_paragraph(b: &[u8]) -> Result<Paragraph, Damaged> {
     Ok(p)
 }
 
+/// How many stories may sit inside one another while reading. A real file
+/// needs two: the main text, and the headers of a section in it. A file
+/// that nests further is damaged, and reading it any deeper would run out
+/// of stack and take the whole program down.
+const MAX_STORY_DEPTH: usize = 8;
+
+thread_local! {
+    static STORY_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts one story being read; the count drops again when it is done.
+struct DepthGuard;
+
+impl DepthGuard {
+    fn enter() -> Result<DepthGuard, Damaged> {
+        STORY_DEPTH.with(|d| {
+            if d.get() >= MAX_STORY_DEPTH {
+                return Err(Damaged);
+            }
+            d.set(d.get() + 1);
+            Ok(DepthGuard)
+        })
+    }
+}
+
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        STORY_DEPTH.with(|d| d.set(d.get() - 1));
+    }
+}
+
 fn read_story(b: &[u8]) -> Result<Story, Damaged> {
+    let _depth = DepthGuard::enter()?;
     let mut paras = Vec::new();
     for (tag, f) in fields(b)? {
         if tag == 1 {
@@ -1752,4 +1784,43 @@ fn repair(doc: &mut Document) {
         }
     }
     fix_story(&mut doc.main);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(tag: u32, body: &[u8]) -> Vec<u8> {
+        let mut o = Out::default();
+        o.bytes(tag, body);
+        o.0
+    }
+
+    /// A story whose only paragraph has a section whose headers hold a
+    /// story of the same kind, `levels` times over.
+    fn nested_story(levels: usize) -> Vec<u8> {
+        let mut story = Vec::new();
+        for _ in 0..levels {
+            let entry = field(2, &story);
+            let set = field(1, &entry);
+            let section = field(16, &set);
+            let para = field(7, &section);
+            story = field(1, &para);
+        }
+        story
+    }
+
+    #[test]
+    fn stories_nested_without_end_are_damaged_not_a_crash() {
+        // A real file nests two deep; a few more still read.
+        assert!(read_story(&nested_story(2)).is_ok());
+        assert!(read_story(&nested_story(MAX_STORY_DEPTH - 1)).is_ok());
+        // A crafted one that nests thousands deep is refused, on a small
+        // stack as well as a large one.
+        let deep = nested_story(5_000);
+        assert!(deep.len() < 100_000);
+        assert!(read_story(&deep).is_err());
+        // The count went back to zero, so the next file reads as usual.
+        assert!(read_story(&nested_story(2)).is_ok());
+    }
 }

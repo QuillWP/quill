@@ -102,9 +102,9 @@ pub enum Kind {
     /// Collapsed hidden text.
     Hidden,
     Object,
-    /// A page number, date or time field: its value's glyphs are
-    /// `ParaLayout::fields[n]`.
-    Field(u16),
+    /// A page number, date, time, note or annotation mark: its value's
+    /// glyphs are in `ParaLayout::fields`, under the glyph's offset.
+    Field,
 }
 
 /// One character placed on a line.
@@ -118,7 +118,7 @@ pub struct Glyph {
     pub face: FaceKey,
     pub kind: Kind,
     /// Index into `ParaLayout::styles`.
-    pub style: u16,
+    pub style: u32,
 }
 
 /// Drawing attributes shared by a run of glyphs.
@@ -257,8 +257,10 @@ pub struct FieldGlyph {
 
 #[derive(Clone, Debug, Default)]
 pub struct ParaLayout {
-    /// The glyphs of each field's value.
-    pub fields: Vec<Vec<FieldGlyph>>,
+    /// The glyphs of each field's value, by the field's offset in the
+    /// text, in order. Kept by offset rather than numbered in the glyph, so
+    /// a paragraph can have any number and a glyph stays small.
+    pub fields: Vec<(u32, Vec<FieldGlyph>)>,
     /// The border box, if the paragraph has borders or shading.
     pub border: Option<BorderBox>,
     /// Every character, placed. Empty while `stripped`.
@@ -289,7 +291,7 @@ struct Item {
     face: FaceKey,
     advance: f32,
     kind: Kind,
-    style: u16,
+    style: u32,
     ascent: f32,
     descent: f32,
     gap: f32,
@@ -478,6 +480,10 @@ pub fn layout_paragraph_joined(
         let ends_with_break = line_glyphs
             .last()
             .is_some_and(|g| g.kind == Kind::LineBreak);
+        let goes_on = ends_with_break
+            || line_glyphs
+                .last()
+                .is_some_and(|g| g.kind == Kind::PageBreak);
         let slack = (right_edge - content_end).max(0.0);
         let has_tab = line_glyphs.iter().any(|g| matches!(g.kind, Kind::Tab(_)));
         let shift = match pap.align {
@@ -571,7 +577,11 @@ pub fn layout_paragraph_joined(
         last_height = height;
         first_line = false;
         i = end;
-        if i >= items.len() {
+        // A paragraph that ends with a line or page break has one more,
+        // empty line after it, where the text goes on and the caret sits.
+        // After a page break that line starts the next page, so a break at
+        // the very end of a document still shows a page after it.
+        if i >= items.len() && !goes_on {
             break;
         }
     }
@@ -692,6 +702,9 @@ fn break_line(
             return (k + 1, false);
         }
         match item.kind {
+            // A page break stands on a line of its own: the text before it
+            // ends its line, and the text after starts the next one.
+            Kind::PageBreak if k > i => return (k, false),
             Kind::LineBreak | Kind::PageBreak => return (k + 1, false),
             Kind::Space => {
                 // Spaces never push a line over; they hang in the margin.
@@ -809,16 +822,19 @@ fn finish_tab(
     }
 }
 
-fn style_for(styles: &mut Vec<GlyphStyle>, chp: CharProps) -> u16 {
+/// The look for `chp`: its index in `styles`, adding it if it is new. A
+/// paragraph has fewer looks than runs, and far fewer runs than a `u32`
+/// counts (`quill_core::limits::MAX_RUNS`).
+fn style_for(styles: &mut Vec<GlyphStyle>, chp: CharProps) -> u32 {
     if let Some(i) = styles.iter().position(|s| s.chp == chp) {
-        return i as u16;
+        return i as u32;
     }
     styles.push(GlyphStyle {
         size: chp.size as f32 / 2.0,
         raise: chp.position as f32 / 20.0,
         chp,
     });
-    (styles.len() - 1) as u16
+    (styles.len() - 1) as u32
 }
 
 fn measure(
@@ -827,7 +843,7 @@ fn measure(
     fonts: &mut Fonts,
     opts: &LayoutOptions,
     styles: &mut Vec<GlyphStyle>,
-    fields: &mut Vec<Vec<FieldGlyph>>,
+    fields: &mut Vec<(u32, Vec<FieldGlyph>)>,
 ) -> Vec<Item> {
     let mut items = Vec::with_capacity(para.text.len());
     for (start, end, chp) in para.run_bounds() {
@@ -861,7 +877,7 @@ fn measure(
                     | chars::FIELD_DATE
                     | chars::FIELD_TIME
                     | chars::FOOTNOTE
-                    | chars::ANNOTATION => Kind::Field(fields.len() as u16),
+                    | chars::ANNOTATION => Kind::Field,
                     _ => Kind::Text,
                 }
             };
@@ -912,7 +928,7 @@ fn measure(
                 ascent = ascent.max(h);
             }
             let mut break_after = false;
-            if let Kind::Field(_) = kind {
+            if kind == Kind::Field {
                 let value = match c {
                     chars::FIELD_PAGE => opts.page_format.text(opts.page_number),
                     chars::FIELD_DATE => opts.date.clone(),
@@ -992,7 +1008,7 @@ fn measure(
                         x + 6.0
                     };
                 }
-                fields.push(glyphs);
+                fields.push((offset, glyphs));
                 advance = if balloon { end } else { x };
                 if balloon && !card {
                     ascent = ascent.max(20.0);
@@ -1154,6 +1170,13 @@ impl ParaLayout {
     }
 
     /// The glyphs of `line`: none if they were stripped, never a panic.
+    /// The glyphs of the value of the field at byte `offset`.
+    pub fn field_glyphs(&self, offset: u32) -> &[FieldGlyph] {
+        self.fields
+            .binary_search_by_key(&offset, |f| f.0)
+            .map_or(&[], |k| &self.fields[k].1)
+    }
+
     pub fn line_glyphs(&self, line: &Line) -> &[Glyph] {
         self.glyphs.get(line.first..line.last).unwrap_or(&[])
     }
@@ -1209,5 +1232,27 @@ impl ParaLayout {
             }
         }
         self.lines.len().saturating_sub(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_paragraph_can_have_more_looks_than_a_u16_counts() {
+        let mut styles = Vec::new();
+        let look = |n: usize| CharProps {
+            color: quill_core::Rgb(n as u32),
+            ..Default::default()
+        };
+        let past = u16::MAX as usize + 50;
+        let indexes: Vec<u32> = (0..past).map(|n| style_for(&mut styles, look(n))).collect();
+        // Every look keeps its own index, and a repeat finds it.
+        assert_eq!(styles.len(), past);
+        assert!(indexes.iter().enumerate().all(|(n, &i)| i as usize == n));
+        assert_eq!(style_for(&mut styles, look(past - 1)), past as u32 - 1);
+        // A glyph is no bigger for it.
+        assert_eq!(std::mem::size_of::<Glyph>(), 24);
     }
 }

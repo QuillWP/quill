@@ -152,25 +152,51 @@ fn paste_grid(content: Clip, doc: &mut Document) -> Vec<Vec<Piece>> {
             if !fragment.paras.first().is_some_and(|p| p.pap.in_table) {
                 return vec![vec![Piece::Rich(fragment)]];
             }
+            // Only the marks of the table that was copied end its cells
+            // and rows; a table inside one of its cells has deeper ones,
+            // and they stay inside the cell. The copied table is the
+            // shallowest one in the fragment: its first paragraph can be in
+            // a table nested at the start of the first cell.
+            let outer = fragment
+                .paras
+                .iter()
+                .filter(|p| p.pap.in_table)
+                .map(|p| p.pap.level())
+                .min()
+                .unwrap_or(1);
             let mut rows: Vec<Vec<Piece>> = vec![Vec::new()];
             let mut cell: Vec<Paragraph> = Vec::new();
-            for p in fragment.paras {
+            for p in &fragment.paras {
+                let ours = p.pap.level() <= outer;
                 match p.mark {
-                    Mark::RowEnd => {
+                    Mark::RowEnd if ours => {
                         cell.clear();
                         rows.push(Vec::new());
                     }
-                    Mark::CellEnd => {
-                        cell.push(p);
+                    Mark::CellEnd if ours => {
+                        cell.push(p.clone());
+                        let paras = std::mem::take(&mut cell);
+                        // The cell takes the notes its own text refers to.
+                        let mut notes = Vec::new();
+                        for kind in quill_core::notes::NoteKind::ALL {
+                            let ids = quill_core::notes::ref_ids(&paras, kind);
+                            notes.extend(
+                                fragment
+                                    .notes
+                                    .iter()
+                                    .filter(|n| n.kind == kind && ids.contains(&n.id))
+                                    .cloned(),
+                            );
+                        }
                         let piece = Fragment {
-                            paras: std::mem::take(&mut cell),
+                            paras,
                             ends_with_mark: false,
                             objects: fragment.objects.clone(),
-                            notes: Vec::new(),
+                            notes,
                         };
                         rows.last_mut().expect("a row").push(Piece::Rich(piece));
                     }
-                    _ => cell.push(p),
+                    _ => cell.push(p.clone()),
                 }
             }
             rows.retain(|r| !r.is_empty());
@@ -310,5 +336,87 @@ impl DocView {
         }
         let sel = self.sel;
         self.finish_edit(sel);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quill_core::{CharProps, ParaProps};
+
+    fn para(text: &str, mark: Mark, nest: u8) -> Paragraph {
+        let pap = ParaProps {
+            in_table: true,
+            nest,
+            ..Default::default()
+        };
+        let mut p = Paragraph::with_text(text, CharProps::default(), pap);
+        p.mark = mark;
+        p
+    }
+
+    #[test]
+    fn a_table_inside_a_cell_stays_in_that_cell_when_pasted() {
+        // Two cells in one row. The first holds some text, then a table of
+        // its own (one cell), then more text.
+        let paras = vec![
+            para("before", Mark::Paragraph, 0),
+            para("inner", Mark::CellEnd, 1),
+            para("", Mark::RowEnd, 1),
+            para("after", Mark::CellEnd, 0),
+            para("second", Mark::CellEnd, 0),
+            para("", Mark::RowEnd, 0),
+        ];
+        let doc = Document::new();
+        let fragment = Fragment {
+            paras,
+            ends_with_mark: true,
+            objects: Vec::new(),
+            notes: Vec::new(),
+        };
+        let rich = crate::docview::clipboard::RichContent::new(&doc, fragment);
+        let mut target = Document::new();
+        let grid = paste_grid(Clip::Rich(rich), &mut target);
+        assert_eq!(grid.len(), 1);
+        let sizes: Vec<usize> = grid[0]
+            .iter()
+            .map(|piece| match piece {
+                Piece::Rich(f) => f.paras.len(),
+                Piece::Text(_) => 0,
+            })
+            .collect();
+        assert_eq!(sizes, [4, 1]);
+    }
+
+    #[test]
+    fn a_table_at_the_start_of_the_first_cell_stays_in_that_cell() {
+        // The first cell opens with a table of its own, so the fragment's
+        // first paragraph is one level deeper than the rows copied.
+        let paras = vec![
+            para("inner", Mark::CellEnd, 1),
+            para("", Mark::RowEnd, 1),
+            para("after", Mark::CellEnd, 0),
+            para("second", Mark::CellEnd, 0),
+            para("", Mark::RowEnd, 0),
+        ];
+        let doc = Document::new();
+        let fragment = Fragment {
+            paras,
+            ends_with_mark: true,
+            objects: Vec::new(),
+            notes: Vec::new(),
+        };
+        let rich = crate::docview::clipboard::RichContent::new(&doc, fragment);
+        let mut target = Document::new();
+        let grid = paste_grid(Clip::Rich(rich), &mut target);
+        assert_eq!(grid.len(), 1, "one row, as copied");
+        let sizes: Vec<usize> = grid[0]
+            .iter()
+            .map(|piece| match piece {
+                Piece::Rich(f) => f.paras.len(),
+                Piece::Text(_) => 0,
+            })
+            .collect();
+        assert_eq!(sizes, [3, 1]);
     }
 }

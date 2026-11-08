@@ -46,6 +46,20 @@ pub const MAX_PARAGRAPHS: usize = 250_000;
 pub const MAX_CHARACTERS: usize = 32 << 20;
 pub const MAX_RUNS: usize = 1_000_000;
 
+/// The most picture files (each picture's own data, and its preview when it
+/// has one) a document may use. Every one is an entry in a .qwp or .docx
+/// archive, and the archive reader accepts 16,384 entries in all, which
+/// leaves room for the document's other parts. Without this a document
+/// could be built that saves but cannot be opened again.
+pub const MAX_PICTURES: usize = 4_000;
+
+/// The most header and footer stories a document may have: six for the
+/// first section, and six for each later section with its own. A .docx
+/// file writes each as a part, and each part that may show a picture
+/// with a list of its own, so with `MAX_PICTURES` these stay well inside
+/// the archive reader's 16,384 entries.
+pub const MAX_HEADERS: usize = 4_800;
+
 /// How big a document is: its paragraphs, characters and runs of
 /// character formatting, across every story.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -53,6 +67,13 @@ pub struct Size {
     pub paragraphs: usize,
     pub characters: usize,
     pub runs: usize,
+    /// Distinct picture files in use. A picture shown at two sizes uses
+    /// one file, and pictures with the same bytes in two separate copies
+    /// count twice, so this is never fewer than the files a save writes.
+    pub pictures: usize,
+    /// Header and footer stories: those of the first section and of each
+    /// section with its own.
+    pub headers: usize,
 }
 
 impl Size {
@@ -64,6 +85,8 @@ impl Size {
         over(self.paragraphs, MAX_PARAGRAPHS, "paragraphs")
             .or_else(|| over(self.characters, MAX_CHARACTERS, "characters"))
             .or_else(|| over(self.runs, MAX_RUNS, "changes of formatting"))
+            .or_else(|| over(self.pictures, MAX_PICTURES, "pictures"))
+            .or_else(|| over(self.headers, MAX_HEADERS, "headers and footers"))
     }
 
     /// The size of plain text, counted without building any paragraphs.
@@ -72,6 +95,8 @@ impl Size {
             paragraphs: text.bytes().filter(|&b| b == b'\n').count() + 1,
             characters: text.chars().count(),
             runs: 1,
+            pictures: 0,
+            headers: 0,
         }
     }
 }
@@ -288,16 +313,29 @@ impl Document {
             .filter_map(|p| p.section.as_ref()?.headers.as_ref())
             .chain(self.section.headers.as_ref())
             .flat_map(|h| h.iter());
+        let mut size = Size {
+            headers: self.headers.len() + section_headers.clone().count(),
+            ..Size::default()
+        };
         let stories = [&self.main, &self.notes, &self.annotations]
             .into_iter()
             .chain(&self.headers)
             .chain(section_headers);
-        let mut size = Size::default();
+        let mut files = std::collections::HashSet::new();
         for p in stories.flat_map(|s| &s.paras) {
             size.paragraphs += 1;
             size.characters += p.text.chars().count();
             size.runs += p.runs.len();
+            for r in p.runs.iter().filter(|r| r.chp.object != 0) {
+                if let Some(pic) = self.picture(r.chp.object) {
+                    files.insert(pic.data.as_ptr() as usize);
+                    if let Some(preview) = &pic.preview {
+                        files.insert(preview.as_ptr() as usize);
+                    }
+                }
+            }
         }
+        size.pictures = files.len();
         size
     }
 
@@ -316,8 +354,12 @@ impl Document {
             let s = &mut self.styles.styles[k];
             clip_name(&mut s.name);
             s.pap.keep_in_bounds();
-            s.chp.keep_in_bounds();
-            s.own_chp.keep_in_bounds();
+            // A paragraph style's formatting has no character style of its
+            // own (that is `character`), so no overrides of one either.
+            for c in [&mut s.chp, &mut s.own_chp] {
+                c.character_style = 0;
+                c.keep_in_bounds();
+            }
             // A link to a style that is not there goes; a link that is
             // decides what the style looks like.
             if s.character as usize > characters {

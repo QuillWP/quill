@@ -319,7 +319,7 @@ fn kitchen_sink() -> Document {
             },
         )
     };
-    doc.redefine_style(StoryId::Main, h3, pap, chp);
+    doc.redefine_style(h3, pap, chp);
 
     // 10 and 11: the other line spacings.
     doc.format_paras(StoryId::Main, 10, 10, |p| {
@@ -1010,4 +1010,60 @@ fn the_same_picture_twice_keeps_a_run_each() {
     ] {
         assert_eq!(back.main.paras[0].runs.len(), 2);
     }
+}
+
+/// The pictures in a story, as their file bytes, in order. Only object
+/// characters count: a note's mark also carries an id in its run.
+fn story_pictures(doc: &Document, story: &Story) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for p in &story.paras {
+        for (at, c) in p.text.char_indices() {
+            if c == chars::OBJECT
+                && let Some(pic) = doc.picture(p.chp_of_char(at).object)
+            {
+                out.push(pic.data.to_vec());
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn docx_keeps_pictures_in_footnotes_and_comments() {
+    let mut doc = quill_core::text::from_plain_text("Body text");
+    let base = doc.main.paras[0].mark_chp;
+    let pictures = [png(3, 2), png(5, 4), png(7, 3)];
+    let at = Position::new(0, 0);
+    let main = Picture::from_bytes(pictures[0].clone()).unwrap();
+    doc.insert_picture(StoryId::Main, at, main, base);
+
+    let end = doc.main.paras[0].len();
+    let note = doc.insert_note(Position::new(0, end), base, None);
+    let end = doc.main.paras[0].len();
+    let remark = doc.insert_annotation(
+        Position::new(0, end),
+        base,
+        AnnotationInfo {
+            initials: "LK".into(),
+            author: "Lucas".into(),
+            date: "2026-10-15".into(),
+            ..Default::default()
+        },
+    );
+    let at = doc.note_text_start(note).unwrap();
+    let chp = doc.notes.paras[at.para].mark_chp;
+    let pic = Picture::from_bytes(pictures[1].clone()).unwrap();
+    doc.insert_picture(StoryId::Notes, at, pic, chp);
+    let at = doc.annotation_text_start(remark).unwrap();
+    let chp = doc.annotations.paras[at.para].mark_chp;
+    let pic = Picture::from_bytes(pictures[2].clone()).unwrap();
+    doc.insert_picture(StoryId::Annotations, at, pic, chp);
+
+    let back = quill_formats::docx::read(&quill_formats::docx::write(&doc, SECS)).unwrap();
+    assert_eq!(story_pictures(&back, &back.main), [pictures[0].clone()]);
+    assert_eq!(story_pictures(&back, &back.notes), [pictures[1].clone()]);
+    assert_eq!(
+        story_pictures(&back, &back.annotations),
+        [pictures[2].clone()]
+    );
 }

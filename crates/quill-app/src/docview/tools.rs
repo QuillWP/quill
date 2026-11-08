@@ -68,6 +68,176 @@ impl DocView {
         n
     }
 
+    /// The paragraphs as Grep, Regex Search and Sed read them: text that
+    /// tracked changes have deleted is marked, so it is never matched.
+    pub fn search_lines(&self) -> Vec<crate::advanced::Line<'_>> {
+        self.doc
+            .main
+            .paras
+            .iter()
+            .map(|p| {
+                let mut deleted: Vec<(usize, usize)> = Vec::new();
+                for (start, end, chp) in p.run_bounds() {
+                    if !quill_core::revision::is_deleted(chp.rev) {
+                        continue;
+                    }
+                    match deleted.last_mut() {
+                        Some(last) if last.1 == start => last.1 = end,
+                        _ => deleted.push((start, end)),
+                    }
+                }
+                crate::advanced::Line {
+                    text: &p.text,
+                    deleted,
+                }
+            })
+            .collect()
+    }
+
+    /// Run a Sed script on the document, or on the selection, as one
+    /// undoable step. Each command works on the text the one before it
+    /// left. Returns the number of changes and shows it in the status bar,
+    /// or why the script was not run.
+    pub fn sed(
+        &mut self,
+        script: &crate::advanced::Sed,
+        in_selection: bool,
+    ) -> Result<usize, String> {
+        self.run_script("Sed", script, in_selection)
+    }
+
+    /// Run a script as one undoable step named `label`. A script that would
+    /// leave the document too large for Quill to save changes nothing, and
+    /// leaves Undo and Redo as they were.
+    pub fn run_script(
+        &mut self,
+        label: &'static str,
+        script: &crate::advanced::Sed,
+        in_selection: bool,
+    ) -> Result<usize, String> {
+        use quill_core::find::FromEnd;
+        let (from, to) = if in_selection {
+            self.sel.range()
+        } else {
+            let story = &self.doc.main;
+            (story.start(), story.end())
+        };
+        let from = (from.para, from.offset);
+        let end = FromEnd::new(&self.doc.main, to);
+        let saved = self.sel;
+        // A tracked change keeps the text it replaces, struck through.
+        let keeps_old = self.doc.props.track_changes;
+        let mut began = false;
+        let mut count = 0;
+        let mut refused = None;
+        for index in 0..script.command_count() {
+            let to = end.get(&self.doc.main);
+            let room = crate::advanced::Room::left(self.doc.size(), keeps_old);
+            let edits = {
+                let lines = self.search_lines();
+                script.edits_within(index, &lines, (from, (to.para, to.offset)), room)
+            };
+            let edits = match edits {
+                Ok(edits) => edits,
+                Err(why) => {
+                    refused = Some(why);
+                    break;
+                }
+            };
+            if edits.is_empty() {
+                continue;
+            }
+            if !began {
+                self.doc.begin(label, saved);
+                began = true;
+            }
+            // Last first, so the offsets of the earlier ones stay true.
+            for edit in edits.iter().rev() {
+                self.apply_sed_edit(edit);
+            }
+            count += edits.len();
+            // What the edits made, formatting included, against the limits.
+            if let Some(why) = self.doc.size().too_large() {
+                refused = Some(why);
+                break;
+            }
+        }
+        if let Some(why) = refused {
+            // All or nothing: take back what the earlier commands did,
+            // without touching Undo or Redo.
+            if began {
+                self.doc.abandon();
+                self.sel = saved;
+                self.clamp_selection();
+            }
+            let message =
+                format!("Quill didn't change anything: the document would be too large ({why}).");
+            self.status = Some(message.clone());
+            return Err(message);
+        }
+        if !began {
+            self.status = Some("No Changes".to_string());
+            return Ok(0);
+        }
+        self.clamp_selection();
+        let sel = self.sel;
+        self.finish_edit(sel);
+        self.status = Some(match count {
+            1 => "1 Change".to_string(),
+            n => format!("{n} Changes"),
+        });
+        Ok(count)
+    }
+
+    /// One Sed change: the new text takes the format of the text it
+    /// replaces, and a new line in it starts a new paragraph.
+    fn apply_sed_edit(&mut self, edit: &crate::advanced::Edit) -> Position {
+        let start = Position::new(edit.para, edit.start);
+        let end = Position::new(edit.para, edit.end);
+        let p = &self.doc.main.paras[edit.para];
+        let chp = if edit.start < p.len() {
+            p.chp_of_char(edit.start)
+        } else {
+            p.chp_at(edit.start)
+        };
+        let mut at = if edit.start < edit.end {
+            self.doc.delete(MAIN, start, end)
+        } else {
+            start
+        };
+        for (i, part) in edit.text.split('\n').enumerate() {
+            if i > 0 {
+                at = self.doc.split_paragraph(MAIN, at);
+            }
+            if !part.is_empty() {
+                at = self.doc.insert_text(MAIN, at, part, chp);
+            }
+        }
+        at
+    }
+
+    /// Replace one match for Regex Search, as an undoable step. The
+    /// insertion point ends after the new text.
+    pub fn replace_edit(&mut self, edit: &crate::advanced::Edit) -> Result<(), String> {
+        // Not if the document would then be too large to save. The
+        // replacement is made and measured, formatting and tracked
+        // deletion included, and taken back if it is.
+        let saved = self.sel;
+        self.doc.begin("Replace", saved);
+        let at = self.apply_sed_edit(edit);
+        if let Some(why) = self.doc.size().too_large() {
+            self.doc.abandon();
+            self.sel = saved;
+            self.clamp_selection();
+            let message = format!("Quill didn't replace: the document would be too large ({why}).");
+            self.status = Some(message.clone());
+            return Err(message);
+        }
+        self.finish_edit(Selection::caret(at));
+        self.status = Some("1 Change".to_string());
+        Ok(())
+    }
+
     /// Go To: put the insertion point at the top of page `page` (from 0).
     pub fn go_to_page(&mut self, page: usize) {
         let Some(ps) = self.pages.get(page).copied() else {

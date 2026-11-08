@@ -3,7 +3,7 @@
 source ZIP for any build host.
 
 By default the app is built inside the build folder (target/release/Quill.app,
-or target/debug/Quill.app with --debug). --dist makes the packages in dist/.
+or target/debug/Quill Debug.app with --debug). --dist makes the packages in dist/.
 
 Python 3.11+, standard library only. Run --help for options.
 """
@@ -146,7 +146,7 @@ def unix_modes(info: tarfile.TarInfo) -> tarfile.TarInfo:
 
 
 def portable_package(executable: Path, output: Path, version: str,
-                     system: str, arch: str, label: str = "") -> Path:
+                     system: str, arch: str, label: str = "", debug: bool = False) -> Path:
     name = f"quill-{version}-{system}-{arch}{label}"
     suffix = ".zip" if system == "windows" else ".tar.gz"
     destination = output / (name + suffix)
@@ -157,10 +157,13 @@ def portable_package(executable: Path, output: Path, version: str,
         copy_common(stage)
         shutil.copy2(ROOT / "assets/quill.png", stage / "quill.png")
         for asset in ("quill.ico", "quill-document.png", "quill-document.ico", "quill-mime.xml", "quill-about.jpg"):
+            # A debug package must not register itself as Quill for .qwp.
+            if debug and asset == "quill-mime.xml":
+                continue
             source = ROOT / ("tools" if asset.endswith(".xml") else "assets") / asset
             if source.is_file():
                 shutil.copy2(source, stage / asset)
-        if system == "linux":
+        if system == "linux" and not debug:
             shutil.copy2(ROOT / "tools/quill.desktop", stage / "quill.desktop")
             shutil.copy2(ROOT / "tools/install-linux.sh", stage / "install-linux.sh")
         archive = Path(tmp) / destination.name
@@ -176,7 +179,7 @@ def portable_package(executable: Path, output: Path, version: str,
     return destination
 
 
-def mac_app(executable: Path, app: Path, version: str, identity: str | None) -> None:
+def mac_app(executable: Path, app: Path, version: str, identity: str | None, debug: bool = False) -> None:
     contents = app / "Contents"
     (contents / "MacOS").mkdir(parents=True)
     resources = contents / "Resources"
@@ -188,6 +191,15 @@ def mac_app(executable: Path, app: Path, version: str, identity: str | None) -> 
     shutil.copy2(ROOT / "assets/quill-about.jpg", resources / "quill-about.jpg")
     info = plistlib.loads((ROOT / "tools/Info.plist").read_bytes())
     info["CFBundleVersion"] = info["CFBundleShortVersionString"] = version
+    if debug:
+        # A different app to macOS: its own name, its own bundle id (so its
+        # defaults are separate) and no claim on any document type, so the
+        # installed Quill keeps opening the files.
+        info["CFBundleName"] = "Quill Debug"
+        info["CFBundleDisplayName"] = "Quill Debug"
+        info["CFBundleIdentifier"] = "com.quillwp.Quill.debug"
+        info.pop("CFBundleDocumentTypes", None)
+        info.pop("UTExportedTypeDeclarations", None)
     (contents / "Info.plist").write_bytes(plistlib.dumps(info))
     if identity:
         run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, str(app))
@@ -204,12 +216,13 @@ def replace_app(staged: Path, app: Path) -> None:
     shutil.move(str(staged), str(app))
 
 
-def dev_app(executable: Path, version: str, system: str) -> Path:
+def dev_app(executable: Path, version: str, system: str, debug: bool = False) -> Path:
     """Put a runnable app beside the build, in target/<profile>/."""
     if system != "macos":
         # Off the Mac the bare program finds its data in the source tree.
         return executable
-    app = executable.parent / "Quill.app"
+    name = "Quill Debug.app" if debug else "Quill.app"
+    app = executable.parent / name
     # Replacing the app under a running copy would pull it out from under
     # him. lsof finds the program however it was started.
     binary = app / "Contents/MacOS/quill"
@@ -218,24 +231,28 @@ def dev_app(executable: Path, version: str, system: str) -> Path:
         if running.stdout.strip():
             raise ValueError(f"Quit Quill first: it is running from {app}")
     with tempfile.TemporaryDirectory(prefix=".qwp-app-", dir=executable.parent) as tmp:
-        staged = Path(tmp) / "Quill.app"
-        mac_app(executable, staged, version, os.environ.get("MACOS_SIGN_IDENTITY"))
+        staged = Path(tmp) / name
+        mac_app(executable, staged, version, os.environ.get("MACOS_SIGN_IDENTITY"), debug)
         replace_app(staged, app)
     return app
 
 
-def mac_package(executable: Path, output: Path, version: str, arch: str, label: str = "") -> Path:
+def mac_package(executable: Path, output: Path, version: str, arch: str, label: str = "",
+                debug: bool = False) -> Path:
     identity = os.environ.get("MACOS_SIGN_IDENTITY")
     notary = os.environ.get("MACOS_NOTARY_PROFILE")
     destination = output / f"Quill-{version}-macos-{arch}{label}.dmg"
     with tempfile.TemporaryDirectory(prefix=".qwp-package-", dir=output) as tmp:
         root = Path(tmp)
         image_root = root / "image"
-        app = image_root / "Quill.app"
-        mac_app(executable, app, version, identity)
+        # A debug package is a different app: its own name, bundle id and
+        # disk image, so it never replaces or passes for the real one.
+        name = "Quill Debug" if debug else "Quill"
+        app = image_root / f"{name}.app"
+        mac_app(executable, app, version, identity, debug)
         (image_root / "Applications").symlink_to("/Applications")
         image = root / destination.name
-        run("hdiutil", "create", "-quiet", "-volname", "Quill", "-srcfolder", str(image_root),
+        run("hdiutil", "create", "-quiet", "-volname", name, "-srcfolder", str(image_root),
             "-ov", "-format", "UDZO", str(image))
         run("hdiutil", "verify", "-quiet", str(image))
         if notary:
@@ -245,7 +262,7 @@ def mac_package(executable: Path, output: Path, version: str, arch: str, label: 
             run("xcrun", "stapler", "staple", str(image))
             run("xcrun", "stapler", "validate", str(image))
         # Publish only after staging/signing succeeds; preserve other packages.
-        replace_app(app, output / "Quill.app")
+        replace_app(app, output / f"{name}.app")
         image.replace(destination)
     return destination
 
@@ -282,15 +299,15 @@ def main() -> int:
     run(sys.executable, str(ROOT / "tools/generate-notices.py"),
         "--target", target, "--output", str(PACKAGE_NOTICES))
     if not args.dist:
-        print(f"App: {dev_app(executable, version, system)}")
+        print(f"App: {dev_app(executable, version, system, args.debug)}")
         if args.with_source:
             source_package(ROOT, output, version)
         return 0
     arch = target.split("-")[0]
     if system == "macos":
-        package = mac_package(executable, output, version, arch, label)
+        package = mac_package(executable, output, version, arch, label, args.debug)
     else:
-        package = portable_package(executable, output, version, system, arch, label)
+        package = portable_package(executable, output, version, system, arch, label, args.debug)
     print(f"Package: {package} ({package.stat().st_size / 1024**2:.2f} MiB)")
     if args.with_source:
         source_package(ROOT, output, version)

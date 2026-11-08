@@ -49,9 +49,16 @@ impl ApplicationPreferences {
         let top = self.state.dialogs.last().map(|(_, d)| d);
         let depth = self.state.dialogs.len();
         if !matches!((&self.native, top), (Some(n), Some(d)) if n.matches(depth, d)) {
+            // Changing the Show panel rebuilds the window; keep it where
+            // the person moved it.
+            let top_left = match (&self.native, top) {
+                (Some(native), Some(dialog)) => native.top_left_for(dialog),
+                _ => None,
+            };
             self.native = None;
             if let Some(dialog) = top {
-                self.native = crate::mac_dialog::NativeDialog::show_standalone(depth, dialog);
+                self.native =
+                    crate::mac_dialog::NativeDialog::show_standalone(depth, dialog, top_left);
             }
         }
         if let (Some(native), Some(dialog)) = (&mut self.native, top) {

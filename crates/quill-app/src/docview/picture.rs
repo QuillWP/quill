@@ -87,13 +87,20 @@ impl DocView {
                 if !self.room_for(quill_core::limits::Size::of_text(&text)) {
                     return;
                 }
-                // Plain text takes the format of the insertion point.
+                // Plain text takes the format of the insertion point, or
+                // in Markdown source the source's own.
                 self.doc.begin("Paste", self.sel);
                 let at = self.delete_selection();
-                let chp = self.doc.main.paras[at.para].chp_at(at.offset);
+                let chp = if self.in_markdown_source() {
+                    self.doc.styles.get(0).chp
+                } else {
+                    self.doc.main.paras[at.para].chp_at(at.offset)
+                };
                 let end = self.doc.insert_plain(super::MAIN, at, &text, chp);
                 self.finish_edit(quill_core::Selection::caret(end));
             }
+            // Markdown source holds text only.
+            Form::Picture if self.in_markdown_source() => {}
             Form::Picture => {
                 if let Some(pic) =
                     crate::paste_special::clipboard_image().and_then(quill_formats::images::picture)
@@ -118,6 +125,7 @@ impl DocView {
             .unwrap_or_else(|| self.doc.main.paras[at.para].chp_at(at.offset));
         let end = self.doc.insert_picture(MAIN, at, pic, chp);
         self.finish_edit(Selection::caret(end));
+        self.undo_if_too_large("insert the picture");
     }
 
     /// The picture whose character starts at `at`.
@@ -394,6 +402,32 @@ impl DocView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn png_numbered(i: usize) -> Picture {
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x40\0\0\0\x30\x08\x02\0\0\0".to_vec();
+        png.extend_from_slice(format!("number {i}").as_bytes());
+        Picture::from_bytes(png).unwrap()
+    }
+
+    #[test]
+    fn a_picture_that_would_pass_the_limit_is_not_inserted() {
+        use quill_core::limits::MAX_PICTURES;
+        let mut doc = quill_core::Document::new();
+        let chp = doc.main.paras[0].chp_at(0);
+        for i in 0..MAX_PICTURES {
+            let at = Position::new(0, 0);
+            doc.insert_picture(MAIN, at, png_numbered(i), chp);
+        }
+        // Start with no history, so Undo takes back only the new picture.
+        doc.forget_history();
+        let mut v = DocView::new(doc, "Pic".into());
+        let before = v.doc.main.paras[0].text.clone();
+        v.set_selection(Selection::caret(Position::new(0, 0)));
+        v.insert_picture(png_numbered(MAX_PICTURES));
+        assert!(v.doc.main.paras[0].text == before);
+        assert_eq!(v.doc.size().pictures, MAX_PICTURES);
+        assert!(v.status.as_deref().is_some_and(|s| s.contains("too large")));
+    }
 
     #[test]
     fn the_pointer_finds_the_handles_of_the_selected_picture() {

@@ -55,7 +55,7 @@ pub enum Which {
     /// The panel showing, and the fonts for the Default Font panel.
     Preferences {
         panel: usize,
-        fonts: Vec<String>,
+        families: Vec<quill_layout::FontFamilyInfo>,
         original: Box<crate::settings::Settings>,
         draft: Box<crate::settings::Settings>,
     },
@@ -67,6 +67,10 @@ pub enum Which {
         kind: u8,
     },
     GoTo,
+    Grep(crate::advanced_dialog::GrepState),
+    /// Regex Search; true while the Replace part is showing.
+    RegexSearch(bool),
+    Sed,
     Glossary(crate::glossary::GlossaryState),
     /// The counts and which of them are shown.
     WordCount(crate::tool_dialogs::Counts, [bool; 4]),
@@ -175,7 +179,7 @@ pub fn changed(which: &mut Which, d: &mut Dialog, view: &DocView, id: &str) {
         Which::TableLayout => crate::table_dialogs::table_layout_changed(d),
         Which::Preferences {
             panel,
-            fonts,
+            families,
             draft,
             ..
         } => {
@@ -185,9 +189,16 @@ pub fn changed(which: &mut Which, d: &mut Dialog, view: &DocView, id: &str) {
                 if selected != *panel {
                     *panel = selected;
                     let origin = d.origin;
-                    *d = crate::prefs_dialog::preferences_with(selected, fonts, draft);
+                    *d = crate::prefs_dialog::preferences_with(selected, families, draft);
                     d.origin = origin;
                 }
+            } else if id == "font" {
+                // The Style pop-up lists the new family's faces.
+                crate::prefs_dialog::changed_in(*panel, d, id, draft);
+                crate::prefs_dialog::font_changed(families, draft);
+                let origin = d.origin;
+                *d = crate::prefs_dialog::preferences_with(*panel, families, draft);
+                d.origin = origin;
             } else {
                 crate::prefs_dialog::changed_in(*panel, d, id, draft);
             }
@@ -566,23 +577,23 @@ pub fn character_changed(d: &mut Dialog, id: &str) {
 }
 
 /// The character format the dialog describes, starting from `base`.
+/// A font size typed in a dialog, in half-points. It has to be a real
+/// number of points from 1 to 1638: "nan", "inf", a negative number or a
+/// huge one is no size, and None says so.
+pub fn parse_font_size(text: &str) -> Option<u16> {
+    let size: f32 = text.trim().trim_end_matches("pt").trim().parse().ok()?;
+    (1.0..=1638.0)
+        .contains(&size)
+        .then(|| (size * 2.0).round() as u16)
+}
+
 pub fn read_character(d: &Dialog, base: &CharProps, view: &mut DocView) -> Option<CharProps> {
     let mut c = *base;
     let font = d.selected_text("font");
     if !font.is_empty() {
         c.font = view.doc.font_id(&font);
     }
-    let size: f32 = d
-        .field_text("size")
-        .trim()
-        .trim_end_matches("pt")
-        .trim()
-        .parse()
-        .ok()?;
-    if !(1.0..=1638.0).contains(&size) {
-        return None;
-    }
-    c.size = (size * 2.0).round() as u16;
+    c.size = parse_font_size(&d.field_text("size"))?;
     c.underline = UNDERLINE_KINDS[d.selected("underline").min(4)];
     // A color button says what it shows; with a popup, More Colors… with
     // nothing picked leaves the color as it was.
@@ -631,10 +642,17 @@ pub fn lines(m: u16) -> String {
 }
 
 /// Read the Line popup choice `rule` (an index into `LINE_RULES`) and
-/// its "line_by" field. None means the field could not be read.
-pub fn read_line_rule(d: &Dialog, rule: usize) -> Option<Option<LineSpacing>> {
+/// its "line_by" field. None means the field could not be read. `old` is
+/// the spacing the dialog showed: the field is rounded (241 shows as
+/// "1 li"), so text left as shown gives that exact value back.
+pub fn read_line_rule(d: &Dialog, rule: usize, old: LineSpacing) -> Option<Option<LineSpacing>> {
     let text = d.field_text("line_by");
     if rule == 3 {
+        if let LineSpacing::Multiple(m) = old
+            && text.trim() == lines(m)
+        {
+            return Some(Some(old));
+        }
         let m = units::parse(&text, "li")?.abs();
         return Some(Some(match m {
             0 => LineSpacing::Auto,
@@ -724,7 +742,7 @@ pub fn read_paragraph(d: &Dialog, base: &ParaProps) -> Option<ParaProps> {
     let len = |id, old| units::parse_length_from(&d.field_text(id), old);
     p.before = len("before", base.before)?.max(0);
     p.after = len("after", base.after)?.max(0);
-    p.line = read_line_rule(d, d.selected("line"))?.unwrap_or_default();
+    p.line = read_line_rule(d, d.selected("line"), base.line)?.unwrap_or_default();
     p.left = len("left", base.left)?;
     p.right = len("right", base.right)?;
     p.first = len("first", base.first)?;
@@ -832,6 +850,9 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
         | Which::CharacterStyleEdit(_)
         | Which::FindFormat { .. }
         | Which::GoTo
+        | Which::Grep(_)
+        | Which::RegexSearch(_)
+        | Which::Sed
         | Which::Glossary(_)
         | Which::WordCount(..)
         | Which::ChangeCase
@@ -887,6 +908,21 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_typed_font_size_has_to_be_a_real_size() {
+        assert_eq!(parse_font_size("12"), Some(24));
+        assert_eq!(parse_font_size(" 10.5 pt "), Some(21));
+        assert_eq!(parse_font_size("1"), Some(2));
+        assert_eq!(parse_font_size("1638"), Some(3276));
+        // Not numbers of points, and not sizes saturating casts would fix.
+        for bad in [
+            "", "pt", "abc", "nan", "NaN", "inf", "-inf", "infinity", "0", "-12", "0.4", "1638.5",
+            "99999",
+        ] {
+            assert_eq!(parse_font_size(bad), None, "{bad:?}");
+        }
+    }
+
     use super::*;
     use quill_core::{Document, Position, Selection};
 
@@ -928,6 +964,9 @@ mod tests {
             LineSpacing::Exactly(280),
             LineSpacing::Multiple(360),
             LineSpacing::Multiple(276),
+            // Shown as "1 li", which would read back as 240.
+            LineSpacing::Multiple(241),
+            LineSpacing::Multiple(245),
         ] {
             let mut v = view("Some text");
             v.doc.main.paras[0].pap.line = line;
@@ -937,6 +976,13 @@ mod tests {
         }
         assert_eq!(lines(360), "1.5 li");
         assert_eq!(lines(480), "2 li");
+        // Typing a different value still changes it.
+        let mut v = view("Some text");
+        v.doc.main.paras[0].pap.line = LineSpacing::Multiple(241);
+        let (mut d, mut which) = paragraph(&v);
+        d.set_field("line_by", "1.5 li");
+        assert!(apply(&mut which, &mut d, &mut v));
+        assert_eq!(v.doc.main.paras[0].pap.line, LineSpacing::Multiple(360));
     }
 
     #[test]

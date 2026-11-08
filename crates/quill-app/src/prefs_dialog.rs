@@ -10,7 +10,7 @@ const PANELS: [&str; 8] = [
     "General",
     "View",
     "Open And Save",
-    "Default Font",
+    "Fonts",
     "Spelling",
     "Toolbar",
     "Advanced",
@@ -80,12 +80,16 @@ const SIZES: [&str; 11] = [
     "9", "10", "12", "14", "18", "24", "36", "48", "60", "72", "96",
 ];
 
-/// The Preferences window showing `panel`, with `fonts` for Default Font.
-pub fn preferences(panel: usize, fonts: &[String]) -> Dialog {
-    preferences_with(panel, fonts, &settings::get())
+/// The Preferences window showing `panel`, with `families` for Default Font.
+pub fn preferences(panel: usize, families: &[quill_layout::FontFamilyInfo]) -> Dialog {
+    preferences_with(panel, families, &settings::get())
 }
 
-pub fn preferences_with(panel: usize, fonts: &[String], s: &settings::Settings) -> Dialog {
+pub fn preferences_with(
+    panel: usize,
+    families: &[quill_layout::FontFamilyInfo],
+    s: &settings::Settings,
+) -> Dialog {
     let height = if panel == ADVANCED_PANEL {
         480.0
     } else {
@@ -412,15 +416,47 @@ pub fn preferences_with(panel: usize, fonts: &[String], s: &settings::Settings) 
         }
         _ => {
             d.text("Default Font:", 11.0, 43.0);
-            let mut list: Vec<String> = fonts.to_vec();
-            if !list.iter().any(|f| f.eq_ignore_ascii_case(&s.font)) {
-                list.insert(0, s.font.clone());
+            // Each row previews its face. Bold and Italic are in the Style
+            // pop-up beside it, which lists the faces the chosen family
+            // has. A saved font that is not installed stays listed first
+            // so saving does not change it.
+            let mut list = families.to_vec();
+            if !list.iter().any(|f| f.name.eq_ignore_ascii_case(&s.font)) {
+                list.insert(
+                    0,
+                    quill_layout::FontFamilyInfo {
+                        name: s.font.clone(),
+                        draws_name: false,
+                        variants: vec![quill_layout::FontVariant {
+                            bold: false,
+                            italic: false,
+                        }],
+                    },
+                );
             }
             let at = list
                 .iter()
-                .position(|f| f.eq_ignore_ascii_case(&s.font))
+                .position(|f| f.name.eq_ignore_ascii_case(&s.font))
                 .unwrap_or(0);
-            d.popup_owned("font", list, at, 12.0, 61.0, 276.0);
+            let style = faces(list.get(at));
+            let plain: Vec<quill_layout::FontFamilyInfo> = list
+                .iter()
+                .map(|f| quill_layout::FontFamilyInfo {
+                    variants: vec![quill_layout::FontVariant {
+                        bold: false,
+                        italic: false,
+                    }],
+                    ..f.clone()
+                })
+                .collect();
+            d.font_popup("font", &plain, at, 12.0, 61.0, 180.0);
+            d.text("Style:", 198.0, 43.0);
+            let names: Vec<&str> = style.iter().map(|&f| face_name(f)).collect();
+            let chosen = style
+                .iter()
+                .position(|&f| f == (s.font_bold, s.font_italic))
+                .unwrap_or(0);
+            d.popup("style", &names, chosen, 198.0, 61.0, 98.0);
             d.text("Default Size:", 304.0, 43.0);
             d.field("size", &crate::bars::format_size(s.size), 302.0, 61.0, 46.0);
             let at = SIZES
@@ -527,6 +563,44 @@ pub fn folder_button(id: &str, s: &mut settings::Settings) {
                  without these fonts or when the folder is switched off.",
             );
         }
+    }
+}
+
+/// Every face a Style pop-up can offer, in the order it lists them, as
+/// (bold, italic).
+const FACES: [(bool, bool); 4] = [(false, false), (true, false), (false, true), (true, true)];
+
+fn face_name(face: (bool, bool)) -> &'static str {
+    match face {
+        (false, false) => "Normal",
+        (true, false) => "Bold",
+        (false, true) => "Italic",
+        (true, true) => "Bold Italic",
+    }
+}
+
+/// The faces `family` has, for its Style pop-up: always Normal, then any
+/// of Bold, Italic and Bold Italic it has.
+fn faces(family: Option<&quill_layout::FontFamilyInfo>) -> Vec<(bool, bool)> {
+    FACES
+        .into_iter()
+        .filter(|&f| {
+            f == (false, false)
+                || family.is_some_and(|fam| fam.variants.iter().any(|v| (v.bold, v.italic) == f))
+        })
+        .collect()
+}
+
+/// After the Default Font's family changes: a face the new family does not
+/// have goes back to Normal. The window is then built again so its Style
+/// pop-up lists the new family's faces.
+pub fn font_changed(families: &[quill_layout::FontFamilyInfo], s: &mut settings::Settings) {
+    let family = families
+        .iter()
+        .find(|f| f.name.eq_ignore_ascii_case(&s.font));
+    if !faces(family).contains(&(s.font_bold, s.font_italic)) {
+        s.font_bold = false;
+        s.font_italic = false;
     }
 }
 
@@ -647,6 +721,14 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
                 if !font.is_empty() {
                     s.font = font;
                 }
+                // The face chosen in the Style pop-up.
+                if let Some(&(bold, italic)) = FACES
+                    .iter()
+                    .find(|&&f| face_name(f) == d.selected_text("style"))
+                {
+                    s.font_bold = bold;
+                    s.font_italic = italic;
+                }
                 if let Some(z) = size.filter(|z| (1.0..=1638.0).contains(z)) {
                     s.size = (z * 2.0).round() as u16;
                 }
@@ -746,7 +828,10 @@ pub fn save(original: &mut settings::Settings, draft: &settings::Settings) {
             autosave_secs,
             recent_count,
             font,
+            font_bold,
+            font_italic,
             size,
+            document_zoom,
             custom_dictionary,
         );
         if draft.document.page_width != original.document.page_width {
@@ -754,6 +839,9 @@ pub fn save(original: &mut settings::Settings, draft: &settings::Settings) {
         }
         if draft.document.page_height != original.document.page_height {
             current.document.page_height = draft.document.page_height;
+        }
+        if draft.document.scripts != original.document.scripts {
+            current.document.scripts = draft.document.scripts;
         }
     });
     *original = draft.clone();
@@ -768,6 +856,114 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn family(name: &str) -> quill_layout::FontFamilyInfo {
+        quill_layout::FontFamilyInfo {
+            name: name.into(),
+            draws_name: true,
+            variants: vec![
+                quill_layout::FontVariant {
+                    bold: false,
+                    italic: false,
+                },
+                quill_layout::FontVariant {
+                    bold: true,
+                    italic: false,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn default_font_menu_lists_families_with_their_styles() {
+        settings::update(|s| *s = settings::Settings::default());
+        settings::update(|s| s.font = "Georgia".into());
+        let d = preferences(DEFAULT_FONT_PANEL, &[family("Arial"), family("Georgia")]);
+        assert_eq!(d.options("font"), ["Arial", "Georgia"]);
+        assert_eq!(d.selected_text("font"), "Georgia");
+        // A saved font that is not installed stays listed and selected.
+        settings::update(|s| s.font = "Gone Sans".into());
+        let d = preferences(DEFAULT_FONT_PANEL, &[family("Arial")]);
+        assert_eq!(d.options("font"), ["Gone Sans", "Arial"]);
+        assert_eq!(d.selected_text("font"), "Gone Sans");
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
+    fn saving_keeps_every_choice_the_font_panel_makes() {
+        settings::update(|s| *s = settings::Settings::default());
+        let families = [family("Arial"), family("Georgia")];
+        let mut original = settings::get();
+        let mut draft = original.clone();
+        let mut d = preferences_with(DEFAULT_FONT_PANEL, &families, &draft);
+        d.set_selected("font", 1);
+        changed_in(DEFAULT_FONT_PANEL, &mut d, "font", &mut draft);
+        let mut d = preferences_with(DEFAULT_FONT_PANEL, &families, &draft);
+        d.set_selected("style", 1);
+        d.set_field("raise", "40");
+        changed_in(DEFAULT_FONT_PANEL, &mut d, "save", &mut draft);
+        save(&mut original, &draft);
+        let s = settings::get();
+        assert_eq!(
+            (s.font.as_str(), s.font_bold, s.font_italic),
+            ("Georgia", true, false)
+        );
+        assert_eq!(s.document.scripts.raise, 40);
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
+    fn the_default_fonts_bold_and_italic_choices_are_kept_and_used() {
+        settings::update(|s| *s = settings::Settings::default());
+        let mut arial = family("Arial");
+        arial.variants.push(quill_layout::FontVariant {
+            bold: true,
+            italic: true,
+        });
+        let mut plain = family("Plain Sans");
+        plain.variants.truncate(1);
+        let families = [arial, family("Georgia"), plain];
+        let mut d = preferences(DEFAULT_FONT_PANEL, &families);
+        // The family pop-up has no submenus; the Style pop-up lists the
+        // chosen family's faces.
+        d.set_selected("font", 0);
+        settings::update(|s| font_changed(&families, s));
+        changed(DEFAULT_FONT_PANEL, &mut d, "font");
+        let mut d = preferences(DEFAULT_FONT_PANEL, &families);
+        assert_eq!(d.options("style"), ["Normal", "Bold", "Bold Italic"]);
+        d.set_selected("style", 2);
+        changed(DEFAULT_FONT_PANEL, &mut d, "style");
+        let s = settings::get();
+        assert_eq!(
+            (s.font.as_str(), s.font_bold, s.font_italic),
+            ("Arial", true, true)
+        );
+        // They are written to the settings file and read back.
+        let back = settings::Settings::from_text(&s.to_text());
+        assert_eq!((back.font_bold, back.font_italic), (true, true));
+        // New documents start in them: Normal, and a style based on it.
+        let doc = s.new_document();
+        let normal = doc.styles.get(0).chp;
+        assert!(normal.bold && normal.italic);
+        let note = doc.styles.find("footnote text").unwrap();
+        assert!(doc.styles.get(note).chp.italic);
+        // Changing only the size leaves the style as it was, and so does a
+        // window built again.
+        d.set_field("size", "14");
+        changed(DEFAULT_FONT_PANEL, &mut d, "size");
+        assert!(settings::get().font_bold);
+        let d = preferences(DEFAULT_FONT_PANEL, &families);
+        assert_eq!(d.selected_text("style"), "Bold Italic");
+        // A family with only one face takes the Style back to Normal.
+        let mut d = d;
+        d.set_selected("font", 2);
+        changed(DEFAULT_FONT_PANEL, &mut d, "font");
+        settings::update(|s| font_changed(&families, s));
+        assert!(!settings::get().font_bold && !settings::get().font_italic);
+        let d = preferences(DEFAULT_FONT_PANEL, &families);
+        assert_eq!(d.options("style"), ["Normal"]);
+        settings::update(|s| *s = settings::Settings::default());
+    }
 
     #[test]
     fn the_colors_panel_saves_a_named_color() {
@@ -867,7 +1063,7 @@ mod tests {
     #[test]
     fn every_panel_builds() {
         for p in 0..PANELS.len() {
-            let d = preferences(p, &["Arial".to_string()]);
+            let d = preferences(p, &[family("Arial")]);
             assert!(d.close_box);
             assert!(d.modeless);
             assert!(
@@ -929,7 +1125,7 @@ mod tests {
     #[test]
     fn superscript_and_subscript_amounts_are_set_in_default_font() {
         settings::update(|s| *s = settings::Settings::default());
-        let mut d = preferences(DEFAULT_FONT_PANEL, &["Georgia".into()]);
+        let mut d = preferences(DEFAULT_FONT_PANEL, &[family("Georgia")]);
         assert_eq!(d.field_text("raise"), "33");
         d.set_field("raise", "25");
         d.set_field("supsize", "100%");

@@ -705,6 +705,13 @@ impl Dialog {
         }
     }
 
+    /// A Bold and Italic choice in the font pop-up `id`: it sets the Bold
+    /// and Italic boxes, in the dialogs that have them.
+    pub fn set_font_variant(&mut self, bold: bool, italic: bool) {
+        self.set_on("bold", bold);
+        self.set_on("italic", italic);
+    }
+
     pub fn set_selected(&mut self, id: &str, value: usize) {
         if let Some(Item {
             kind: Kind::Popup { selected, .. },
@@ -1529,11 +1536,10 @@ impl Dialog {
             if let Kind::Popup { selected, .. } = &mut self.items[item].kind {
                 *selected = choice.option;
             }
-            if let Some(variant) = choice.variant {
-                self.set_on("bold", variant.bold);
-                self.set_on("italic", variant.italic);
-            }
             let id = self.items[item].id;
+            if let Some(variant) = choice.variant {
+                self.set_font_variant(variant.bold, variant.italic);
+            }
             self.popup = None;
             return Outcome::Changed(id);
         }

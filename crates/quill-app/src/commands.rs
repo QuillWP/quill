@@ -45,6 +45,9 @@ commands! {
     Replace,
     FindAgain,
     GoTo,
+    Grep,
+    RegexSearch,
+    Sed,
     GoBack,
     Glossary,
     InsertGlossaryEntry,
@@ -241,6 +244,71 @@ commands! {
 }
 
 impl Cmd {
+    /// Whether the command changes formatting: the Format, Font and style
+    /// commands and the dialogs they open. Markdown source is plain text in
+    /// one font, so these do nothing there.
+    pub fn changes_format(self) -> bool {
+        use Cmd::*;
+        matches!(
+            self,
+            CharacterDialog
+                | ParagraphDialog
+                | SectionDialog
+                | DocumentDialog
+                | BorderDialog
+                | TableCells
+                | TableLayout
+                | InsertRowAbove
+                | InsertRowBelow
+                | InsertColumnLeft
+                | InsertColumnRight
+                | InsertCellBefore
+                | InsertCellAfter
+                | DeleteRows
+                | DeleteColumns
+                | DeleteCells
+                | MergeCells
+                | SplitCell
+                | ReplaceFonts
+                | FrameDialog
+                | PictureProperties
+                | DropCap
+                | StyleDialog
+                | CharacterStylesDialog
+                | Bold
+                | Italic
+                | Underline
+                | WordUnderline
+                | DoubleUnderline
+                | DottedUnderline
+                | Strikethru
+                | Outline
+                | Shadow
+                | SmallCaps
+                | AllCaps
+                | Hidden
+                | Superscript
+                | Subscript
+                | PlainText
+                | FontSizeUp
+                | FontSizeDown
+                | LargerFontSize
+                | SmallerFontSize
+                | AlignLeft
+                | AlignCenter
+                | AlignRight
+                | Justify
+                | DoubleSpace
+                | SpaceBefore12
+                | NormalParagraph
+                | RevertToStyle
+                | FirstLineIndent
+                | HangingIndent
+                | Nest
+                | Unnest
+        )
+    }
+
     /// The command's name as the original lists it.
     pub fn name(self) -> &'static str {
         use Cmd::*;
@@ -298,6 +366,9 @@ impl Cmd {
             Replace => "Replace…",
             FindAgain => "Find Again",
             GoTo => "Go To…",
+            Grep => "Grep…",
+            RegexSearch => "Regex Search…",
+            Sed => "Sed…",
             GoBack => "Go Back",
             Glossary => "Glossary…",
             InsertGlossaryEntry => "Insert Glossary Entry",

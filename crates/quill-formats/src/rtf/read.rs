@@ -995,7 +995,13 @@ impl Reader {
                     return;
                 }
                 let mut pap = self.style_pap.clone();
-                let chp = self.st.chp;
+                // A style sheet opened after body text starts from that
+                // text's format, character style and its overrides included.
+                let chp = CharProps {
+                    character_style: 0,
+                    direct_format: 0,
+                    ..self.st.chp
+                };
                 let id = match self.doc.styles.find(&name) {
                     Some(id) => id,
                     None => self.doc.styles.add(&name, 0, pap.clone(), chp),
@@ -2449,6 +2455,20 @@ pub(crate) const CP1252: [char; 32] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_late_style_sheet_does_not_take_the_text_character_style() {
+        // Found by fuzzing: body text in a character style with bold of its
+        // own, then a style sheet. The paragraph style made there took the
+        // character style and its overrides. Pasted into another document,
+        // that number meant nothing, and a .qwp save could not keep them.
+        let rtf = b"{\\rtf{\\stylesheet{\\cs63 Strong;}}\\cs63\\b x{\\stylesheet{}Late}\\pard y}";
+        let mut doc = read(rtf).unwrap();
+        doc.keep_in_bounds();
+        let late = doc.styles.find("Late").unwrap();
+        let chp = doc.styles.get(late).chp;
+        assert_eq!((chp.character_style, chp.direct_format), (0, 0));
+    }
 
     #[test]
     fn refuses_broken_escapes_and_binary_data() {

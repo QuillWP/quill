@@ -208,6 +208,9 @@ pub struct Settings {
     pub quit_cleanly: bool,
     // Default Font
     pub font: String,
+    /// The Default Font's style: Bold and Italic choices from its menu.
+    pub font_bold: bool,
+    pub font_italic: bool,
     /// Half-points.
     pub size: u16,
     // Use As Default
@@ -266,7 +269,7 @@ pub struct Settings {
     pub keys_remove: Vec<(String, String)>,
 }
 
-/// An HTML color code, "#DDDDDD" or "DDDDDD", as 0xRRGGBB.
+/// A color written as six hex digits, "#DDDDDD" or "DDDDDD", as 0xRRGGBB.
 fn html_color(v: &str) -> Option<u32> {
     let hex = v.trim().trim_start_matches('#');
     (hex.len() == 6)
@@ -395,6 +398,8 @@ impl Default for Settings {
             last_session: Vec::new(),
             quit_cleanly: true,
             font: "Georgia".into(),
+            font_bold: false,
+            font_italic: false,
             size: 24,
             document: DocumentProps::default(),
             section: SectionProps::default(),
@@ -406,6 +411,16 @@ impl Settings {
     /// A new, empty document with these defaults.
     pub fn new_document(&self) -> Document {
         let mut d = Document::with_default_font(&self.font, self.size);
+        // A Bold or Italic Default Font is Normal's own style, so the
+        // styles based on Normal follow it.
+        if self.font_bold || self.font_italic {
+            let normal = d.styles.get(0);
+            let mut chp = normal.chp;
+            chp.bold = self.font_bold;
+            chp.italic = self.font_italic;
+            let pap = normal.pap.clone();
+            d.redefine_style(0, pap, chp);
+        }
         d.props = self.document.clone();
         d.section = self.section.clone();
         d.summary.author = self.name.clone();
@@ -557,10 +572,12 @@ impl Settings {
 
         section(
             &mut out,
-            "Default Font",
-            Some("Preferences > Default Font; size is in half-points"),
+            "Fonts",
+            Some("Preferences > Fonts; size is in half-points"),
         );
         put(&mut out, "font", self.font.clone());
+        put(&mut out, "font_bold", b(self.font_bold));
+        put(&mut out, "font_italic", b(self.font_italic));
         put(&mut out, "size", self.size.to_string());
         // New documents' superscript and subscript sizes, in percent.
         let sc = self.document.scripts;
@@ -841,7 +858,7 @@ impl Settings {
                 "named_color" => {
                     // A color with no name has nothing after its tab.
                     let (color, name) = v.split_once('\t').unwrap_or((v, ""));
-                    if let Some(color) = hex_color(color)
+                    if let Some(color) = html_color(color)
                         && s.named_colors.len() < MAX_NAMED_COLORS
                     {
                         s.named_colors.push((color, name.to_string()));
@@ -869,23 +886,23 @@ impl Settings {
                 "show_hidden" => s.show_hidden = flag,
                 "table_gridlines" => s.table_gridlines = flag,
                 "table_border_color" => {
-                    if let Some(c) = hex_color(v) {
+                    if let Some(c) = html_color(v) {
                         s.table_border_color = c;
                     }
                 }
                 "table_border_dotted" => s.table_border_dotted = flag,
                 "table_gridline_color" => {
-                    if let Some(c) = hex_color(v) {
+                    if let Some(c) = html_color(v) {
                         s.table_gridline_color = c;
                     }
                 }
                 "page_layout_color_page_border" => {
-                    if let Some(c) = hex_color(v) {
+                    if let Some(c) = html_color(v) {
                         s.page_layout_color_page_border = c;
                     }
                 }
                 "page_layout_color_background" => {
-                    if let Some(c) = hex_color(v) {
+                    if let Some(c) = html_color(v) {
                         s.page_layout_color_background = c;
                     }
                 }
@@ -947,6 +964,8 @@ impl Settings {
                 "interpret_rtf" => s.interpret_rtf = flag,
                 "make_backup" => s.make_backup = flag,
                 "font" if !v.is_empty() => s.font = v.into(),
+                "font_bold" => s.font_bold = flag,
+                "font_italic" => s.font_italic = flag,
                 "size" => s.size = v.parse().unwrap_or(24u16).clamp(2, 3276),
                 "superscript_raise" | "superscript_size" | "subscript_drop" | "subscript_size" => {
                     if let Ok(n) = v.trim().parse::<u16>() {
@@ -1054,34 +1073,49 @@ pub fn read_text(path: &std::path::Path) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "The file is not UTF-8 text.".to_string())
 }
 
+/// The name this copy of Quill keeps its files under. A debug build uses its
+/// own, so it never reads or overwrites the settings and recovery files of an
+/// installed Quill. `QUILL_PROFILE` picks another name for a test run.
+pub fn profile() -> String {
+    match std::env::var("QUILL_PROFILE") {
+        Ok(name) if !name.trim().is_empty() => name.trim().to_string(),
+        _ if cfg!(debug_assertions) => "Quill Debug".to_string(),
+        _ => "Quill".to_string(),
+    }
+}
+
 fn path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
+    let profile = profile();
     if cfg!(target_os = "macos") {
-        return Some(home?.join("Library/Preferences/Quill Settings"));
+        return Some(home?.join(format!("Library/Preferences/{profile} Settings")));
     }
     if cfg!(windows) {
         let base = std::env::var_os("APPDATA").map(PathBuf::from)?;
-        return Some(base.join("Quill/Quill Settings.txt"));
+        return Some(base.join(format!("{profile}/Quill Settings.txt")));
     }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| home.map(|h| h.join(".config")))?;
-    Some(base.join("quill/settings"))
+    let folder = profile.to_lowercase().replace(' ', "-");
+    Some(base.join(format!("{folder}/settings")))
 }
 
 /// Another file kept beside the settings (the glossary), when files are
-/// being written at all.
+/// being written at all. On the Mac `mac` is the file's name after the
+/// profile ("Glossary" becomes "Quill Glossary"); the other systems keep
+/// the profile in the folder name instead.
 pub fn sibling(mac: &str, windows: &str, other: &str) -> Option<PathBuf> {
     if !PERSIST.load(Ordering::Relaxed) {
         return None;
     }
     let dir = path()?.parent()?.to_path_buf();
     Some(dir.join(if cfg!(target_os = "macos") {
-        mac
+        format!("{} {mac}", profile())
     } else if cfg!(windows) {
-        windows
+        windows.to_string()
     } else {
-        other
+        other.to_string()
     }))
 }
 
@@ -1134,12 +1168,6 @@ pub fn with<R>(f: impl FnOnce(&Settings) -> R) -> R {
 }
 
 /// Change the settings and save them.
-/// A color written as six hex digits, with or without a leading #.
-fn hex_color(v: &str) -> Option<u32> {
-    let hex = v.trim().trim_start_matches('#');
-    (hex.len() == 6).then(|| u32::from_str_radix(hex, 16).ok())?
-}
-
 pub fn update(f: impl FnOnce(&mut Settings)) {
     let text = CURRENT.with(|c| {
         let mut s = c.borrow_mut();

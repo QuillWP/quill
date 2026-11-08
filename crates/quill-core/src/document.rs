@@ -591,6 +591,19 @@ pub fn blank_header(styles: &StyleSheet, id: StoryId) -> Story {
     Story::new(Paragraph::new(st.pap.clone(), st.chp))
 }
 
+/// `base` for a run that keeps what it is: a picture or note it stands for,
+/// the link it belongs to, the tracked change it is part of and the comment
+/// it is about. Reverting to a style resets how text looks, not these.
+fn keep_content(base: CharProps, old: &CharProps) -> CharProps {
+    CharProps {
+        object: old.object,
+        link: old.link,
+        rev: old.rev,
+        comment: old.comment,
+        ..base
+    }
+}
+
 impl Document {
     /// A new, empty document: one Normal paragraph in New York 12 pt, as
     /// File > New makes in the original.
@@ -837,15 +850,6 @@ impl Document {
     /// A fragment from another document (a glossary entry) with its fonts
     /// and styles, given by name, matched to this document's. Fonts it
     /// lacks are added; styles it lacks become Normal.
-    pub fn import_fragment(
-        &mut self,
-        frag: &Fragment,
-        fonts: &[String],
-        styles: &[String],
-    ) -> Fragment {
-        self.import_fragment_styled(frag, fonts, styles, &[])
-    }
-
     pub fn import_fragment_styled(
         &mut self,
         frag: &Fragment,
@@ -908,6 +912,67 @@ impl Document {
             inserted,
         });
         self.touch();
+    }
+
+    /// Whether `match_saved` can make the document `saved` as a step undo
+    /// can take back.
+    pub fn can_match_saved(&self, saved: &Document) -> bool {
+        saved.fonts == self.fonts
+            && saved.objects == self.objects
+            && saved.headers.len() == self.headers.len()
+    }
+
+    /// Make the document what `saved` is, as one undoable step, after a
+    /// save that did not keep it exactly. Only the paragraphs that differ
+    /// are replaced. Returns false, changing nothing, when the fonts or
+    /// pictures differ, since undo cannot put those back.
+    pub fn match_saved(&mut self, saved: &Document, label: &'static str, sel: Selection) -> bool {
+        if !self.can_match_saved(saved) {
+            return false;
+        }
+        self.commit_open();
+        self.begin(label, sel);
+        if saved.styles != self.styles {
+            self.record_sheet();
+            self.styles = saved.styles.clone();
+        }
+        if saved.section != self.section {
+            self.record_section();
+            self.section = saved.section.clone();
+        }
+        self.change_document_props(saved.props.clone());
+        let shown = std::mem::take(&mut self.header_section);
+        let stories = [StoryId::Main, StoryId::Notes, StoryId::Annotations]
+            .into_iter()
+            .chain(StoryId::HEADERS.into_iter().take(saved.headers.len()));
+        for id in stories {
+            let want = match id {
+                StoryId::Main => &saved.main,
+                StoryId::Notes => &saved.notes,
+                StoryId::Annotations => &saved.annotations,
+                _ => &saved.headers[id.header_index()],
+            };
+            let have = &self.story(id).paras;
+            let same = |(a, b): &(&Paragraph, &Paragraph)| a == b;
+            let front = have.iter().zip(&want.paras).take_while(same).count();
+            if front == have.len() && front == want.paras.len() {
+                continue;
+            }
+            let room = have.len().min(want.paras.len()) - front;
+            let back = have
+                .iter()
+                .rev()
+                .zip(want.paras.iter().rev())
+                .take(room)
+                .take_while(same)
+                .count();
+            let remove = have.len() - front - back;
+            let new = want.paras[front..want.paras.len() - back].to_vec();
+            self.splice(id, front, remove, new);
+        }
+        self.header_section = shown;
+        self.commit(sel);
+        true
     }
 
     /// Font id for `name`, adding it to the font table if new.
@@ -1134,6 +1199,18 @@ impl Document {
         Some(sel)
     }
 
+    /// Take back everything in the open step and drop it, leaving Undo
+    /// and Redo as they were before `begin`. For a change that turns out
+    /// not to be allowed partway through. A typing step that joined the
+    /// last one is taken back whole, so call this only on a step begun
+    /// with `begin`.
+    pub fn abandon(&mut self) {
+        if let Some(step) = self.history.open.take() {
+            self.apply_inverse(step);
+            self.history.can_coalesce = false;
+        }
+    }
+
     fn commit_open(&mut self) {
         if let Some(step) = &self.history.open {
             let sel = step.after;
@@ -1144,6 +1221,9 @@ impl Document {
     /// Apply a step's records backwards, returning the step that reverses
     /// it. Undo turns an undo step into a redo step and vice versa.
     fn apply_inverse(&mut self, step: Step) -> Step {
+        // A step can change the headers of several sections; the pane
+        // stays on the one it showed.
+        let shown = self.header_section;
         let mut records = Vec::with_capacity(step.records.len());
         for r in step.records.into_iter().rev() {
             if let Some(sheet) = r.sheet {
@@ -1234,6 +1314,7 @@ impl Document {
                 hf_section: r.hf_section,
             });
         }
+        self.header_section = shown;
         Step {
             label: step.label,
             records,
@@ -2097,15 +2178,19 @@ impl Document {
             .map(|p| {
                 let style = self.styles.get(p.pap.style);
                 let mut p = p.clone();
-                p.pap = style.pap.clone();
+                // How the paragraph looks goes back to the style's. What it
+                // is does not change: its place in a table stays.
+                let mut pap = style.pap.clone();
+                pap.style = p.pap.style;
+                pap.in_table = p.pap.in_table;
+                pap.nest = p.pap.nest;
+                p.pap = pap;
                 let base = style.chp;
                 let len = p.len();
                 p.format_range(0, len, &mut |c| {
-                    let object = c.object;
-                    *c = base;
-                    c.object = object;
+                    *c = keep_content(base, c);
                 });
-                p.mark_chp = base;
+                p.mark_chp = keep_content(base, &p.mark_chp);
                 p
             })
             .collect();
@@ -2327,9 +2412,7 @@ impl Document {
 
     /// Replace Fonts: text and styles in any font of `from` take font `to`.
     /// Call it with a step open. Undo restores the text and styles of the
-    /// body, notes and annotations. Headers and footers change outside it,
-    /// since a section sharing one with the section before would otherwise
-    /// be given its own copy.
+    /// body, notes, annotations and every section's headers and footers.
     pub fn replace_font(&mut self, from: &[u16], to: u16) {
         self.change_everywhere(0, |c| {
             if from.contains(&c.font) {
@@ -2363,19 +2446,50 @@ impl Document {
                 fix(&mut s.format.props);
             }
         }
-        for story in [StoryId::Main, StoryId::Notes, StoryId::Annotations] {
-            let last = self.story(story).paras.len() - 1;
-            let end = Position::new(last, self.story(story).paras[last].len());
-            // The definitions changed above, so a styled run still follows
-            // its style: this is not formatting by hand.
-            self.change_chars(story, Position::new(0, 0), end, false, &fix);
+        for (k, story) in self.every_story() {
+            self.in_header_section(k, |d| {
+                let last = d.story(story).paras.len() - 1;
+                let end = Position::new(last, d.story(story).paras[last].len());
+                // The definitions changed above, so a styled run still
+                // follows its style: this is not formatting by hand.
+                d.change_chars(story, Position::new(0, 0), end, false, &fix);
+            });
         }
-        for story in &mut self.headers {
-            for p in &mut story.paras {
-                p.runs.iter_mut().for_each(|r| fix(&mut r.chp));
-                fix(&mut p.mark_chp);
+        // The text of notes set aside for a reference that may be pasted
+        // back is not in a story, so it changes here.
+        for p in self.note_bank.values_mut().flatten() {
+            p.runs.iter_mut().for_each(|r| fix(&mut r.chp));
+            fix(&mut p.mark_chp);
+        }
+    }
+
+    /// Every story there is, each once: the body, the notes, the
+    /// annotations, and the headers and footers of each section that has
+    /// its own (the first always does). A header is named by its section
+    /// as well, since `StoryId::Header` alone means the one the header
+    /// pane shows. Run a change to one in `in_header_section`.
+    pub(crate) fn every_story(&self) -> Vec<(usize, StoryId)> {
+        let mut out = vec![
+            (0, StoryId::Main),
+            (0, StoryId::Notes),
+            (0, StoryId::Annotations),
+        ];
+        for k in 0..self.sections().len() {
+            if self.has_own_headers(k) {
+                out.extend(StoryId::HEADERS.map(|id| (k, id)));
             }
         }
+        out
+    }
+
+    /// Run `f` with the header stories standing for section `k`'s, then
+    /// put the pane's section back. Changes made in `f` are recorded
+    /// against section `k`, so undo puts them back there.
+    pub(crate) fn in_header_section<R>(&mut self, k: usize, f: impl FnOnce(&mut Self) -> R) -> R {
+        let shown = std::mem::replace(&mut self.header_section, k);
+        let out = f(self);
+        self.header_section = shown;
+        out
     }
 
     // ----- the style sheet -----
@@ -2458,16 +2572,15 @@ impl Document {
     /// based on it, follow, keeping whatever they set differently.
     /// Give style `id` new formatting. `chp` is the style's own character
     /// formatting; a linked character style stays linked and is laid over it.
-    pub fn redefine_style(&mut self, story: StoryId, id: StyleId, pap: ParaProps, chp: CharProps) {
+    pub fn redefine_style(&mut self, id: StyleId, pap: ParaProps, chp: CharProps) {
         self.record_sheet();
-        self.redefine(story, id, pap, chp, 0);
+        self.redefine(id, pap, chp, 0);
     }
 
     /// Redefine style `id` and link it to character style `character`, or
     /// unlink it with zero. `own` is the style's own character formatting.
     pub fn redefine_style_linked(
         &mut self,
-        story: StoryId,
         id: StyleId,
         pap: ParaProps,
         own: CharProps,
@@ -2483,7 +2596,7 @@ impl Document {
             0
         };
         self.styles.styles[id as usize].character = character;
-        self.redefine(story, id, pap, own, 0);
+        self.redefine(id, pap, own, 0);
     }
 
     /// Bring the paragraph styles linked to character style `character` up to
@@ -2493,12 +2606,12 @@ impl Document {
             let s = self.styles.get(k);
             if s.character == character {
                 let (pap, own) = (s.pap.clone(), s.own());
-                self.redefine(StoryId::Main, k, pap, own, 0);
+                self.redefine(k, pap, own, 0);
             }
         }
     }
 
-    fn redefine(&mut self, story: StoryId, id: StyleId, pap: ParaProps, own: CharProps, depth: u8) {
+    fn redefine(&mut self, id: StyleId, pap: ParaProps, own: CharProps, depth: u8) {
         let old = self.styles.get(id).clone();
         let mut pap = pap;
         pap.style = id;
@@ -2507,26 +2620,36 @@ impl Document {
         st.pap = pap.clone();
         st.own_chp = own;
         st.chp = chp;
-        // Restyle the paragraphs.
-        for i in 0..self.story(story).paras.len() {
-            let p = &self.story(story).paras[i];
-            if p.pap.style != id {
-                continue;
-            }
-            let mut p = p.clone();
+        // Restyle the paragraphs, in every story.
+        let restyle = |styles: &StyleSheet, p: &mut Paragraph| {
             p.pap = restyle_pap(&p.pap, &old.pap, &pap);
             let len = p.len();
             p.format_range(0, len, &mut |c| {
                 let before = *c;
                 *c = restyle_chp(*c, &old.chp, &chp);
-                self.styles.keep_character_format(before, c, chp);
+                styles.keep_character_format(before, c, chp);
             });
             let before = p.mark_chp;
             p.mark_chp = restyle_chp(p.mark_chp, &old.chp, &chp);
-            self.styles
-                .keep_character_format(before, &mut p.mark_chp, chp);
-            if p != self.story(story).paras[i] {
-                self.splice(story, i, 1, vec![p]);
+            styles.keep_character_format(before, &mut p.mark_chp, chp);
+        };
+        for (k, story) in self.every_story() {
+            self.in_header_section(k, |d| {
+                for i in 0..d.story(story).paras.len() {
+                    if d.story(story).paras[i].pap.style != id {
+                        continue;
+                    }
+                    let mut p = d.story(story).paras[i].clone();
+                    restyle(&d.styles, &mut p);
+                    if p != d.story(story).paras[i] {
+                        d.splice(story, i, 1, vec![p]);
+                    }
+                }
+            });
+        }
+        for p in self.note_bank.values_mut().flatten() {
+            if p.pap.style == id {
+                restyle(&self.styles, p);
             }
         }
         // Styles based on this one inherit the change.
@@ -2541,24 +2664,27 @@ impl Document {
             let dp = restyle_pap(&s.pap, &old.pap, &pap);
             // A based-on style follows what this one now looks like.
             let dc = restyle_chp(s.own(), &old.chp, &chp);
-            self.redefine(story, k, dp, dc, depth + 1);
+            self.redefine(k, dp, dc, depth + 1);
         }
     }
 
-    /// Delete a style the user defined. Its paragraphs go back to Normal.
-    pub fn delete_style(&mut self, story: StoryId, id: StyleId) {
+    /// Delete a style the user defined. Its paragraphs go back to Normal,
+    /// in every story: the numbers of the styles after it move down by one,
+    /// so a paragraph left alone anywhere would take another style.
+    pub fn delete_style(&mut self, id: StyleId) {
         if id == 0 || self.styles.get(id).builtin || id as usize >= self.styles.styles.len() {
             return;
         }
-        let n = self.story(story).paras.len();
-        let uses = self.story(story).paras.iter().any(|p| p.pap.style == id);
-        if uses {
-            // apply_style one paragraph at a time keeps hand formatting.
-            for i in 0..n {
-                if self.story(story).paras[i].pap.style == id {
-                    self.apply_style(story, i, i, 0);
+        let stories = self.every_story();
+        for &(k, story) in &stories {
+            self.in_header_section(k, |d| {
+                // apply_style one paragraph at a time keeps hand formatting.
+                for i in 0..d.story(story).paras.len() {
+                    if d.story(story).paras[i].pap.style == id {
+                        d.apply_style(story, i, i, 0);
+                    }
                 }
-            }
+            });
         }
         self.record_sheet();
         let gone = self.styles.styles.remove(id as usize);
@@ -2581,14 +2707,31 @@ impl Document {
             };
             st.pap.style = k as StyleId;
         }
-        for i in 0..n {
-            let s = self.story(story).paras[i].pap.style;
-            if s > id {
-                let mut p = self.story(story).paras[i].clone();
-                p.pap.style = s - 1;
-                self.splice(story, i, 1, vec![p]);
-            }
+        for &(k, story) in &stories {
+            self.in_header_section(k, |d| {
+                for i in 0..d.story(story).paras.len() {
+                    let s = d.story(story).paras[i].pap.style;
+                    if s > id {
+                        let mut p = d.story(story).paras[i].clone();
+                        p.pap.style = s - 1;
+                        d.splice(story, i, 1, vec![p]);
+                    }
+                }
+            });
         }
+        // The notes set aside for references that were deleted are not in
+        // a story.
+        let move_down = |p: &mut Paragraph| {
+            if p.pap.style == id {
+                p.pap.style = 0;
+            } else {
+                p.pap.style = fix(p.pap.style);
+            }
+        };
+        self.note_bank
+            .values_mut()
+            .flat_map(|paras| paras.iter_mut())
+            .for_each(move_down);
     }
 }
 
@@ -2654,6 +2797,35 @@ mod tests {
     use crate::props::Align;
 
     const MAIN: StoryId = StoryId::Main;
+
+    #[test]
+    fn matching_a_saved_copy_is_one_step_that_undoes() {
+        let mut doc = crate::text::from_plain_text("One\nTwo\nThree");
+        doc.mark_saved();
+        let original = doc.clone();
+        let mut saved = doc.clone();
+        saved.main.paras[1].pap.left += 360;
+        saved.props.margin_left += 20;
+        saved.section.columns = 2;
+        let sel = Selection::caret(p(1, 0));
+        assert!(doc.match_saved(&saved, "Save Anyway", sel));
+        let same = |a: &Document, b: &Document| {
+            a.main == b.main && a.props == b.props && a.section == b.section && a.styles == b.styles
+        };
+        assert!(same(&doc, &saved));
+        assert_eq!(doc.undo_label(), Some("Save Anyway"));
+        doc.undo();
+        assert!(same(&doc, &original));
+        assert_eq!(texts(&doc), ["One", "Two", "Three"]);
+        doc.redo();
+        assert!(same(&doc, &saved));
+        // Fonts cannot be put back by undo, so nothing changes.
+        saved.fonts.push("Nowhere".into());
+        let before = doc.clone();
+        assert!(!doc.match_saved(&saved, "Save Anyway", sel));
+        assert!(same(&doc, &before));
+        assert_eq!(doc.undo_label(), Some("Save Anyway"));
+    }
 
     fn p(para: usize, offset: usize) -> Position {
         Position::new(para, offset)
@@ -3081,6 +3253,33 @@ mod tests {
     }
 
     #[test]
+    fn revert_to_style_keeps_what_the_text_is() {
+        let mut d = doc_with(&["Some words"]);
+        d.format_chars(MAIN, p(0, 0), p(0, 4), |c| {
+            c.italic = true;
+            c.link = 5;
+            c.rev = 7;
+            c.comment = 9;
+        });
+        d.format_paras(MAIN, 0, 0, |pp| {
+            pp.in_table = true;
+            pp.nest = 1;
+            pp.align = Align::Right;
+        });
+        d.revert_to_style(MAIN, 0, 0);
+        let para = &d.main.paras[0];
+        let first = para.chp_of_char(0);
+        // The look goes back to the style's.
+        assert!(!first.italic);
+        assert_eq!(para.pap.align, Align::Left);
+        // The link, the tracked change and the comment stay.
+        assert_eq!((first.link, first.rev, first.comment), (5, 7, 9));
+        // The paragraph is still in its table.
+        assert!(para.pap.in_table);
+        assert_eq!(para.pap.nest, 1);
+    }
+
+    #[test]
     fn formatting_that_changes_nothing_is_not_an_undo_step() {
         let mut d = doc_with(&["Plain"]);
         d.begin("Formatting", Selection::default());
@@ -3184,7 +3383,7 @@ mod tests {
         let mut pap = d.styles.get(0).pap.clone();
         pap.shading_color = Some(crate::Rgb(0xEBF0FA));
         d.begin("Style", Selection::default());
-        d.redefine_style(MAIN, 0, pap, d.styles.get(0).chp);
+        d.redefine_style(0, pap, d.styles.get(0).chp);
         d.commit(Selection::default());
         assert_eq!(
             d.main.paras[0].pap.shading_color,
@@ -3219,7 +3418,7 @@ mod tests {
         chp.italic = false;
         chp.size = 20;
         d.begin("Style", Selection::default());
-        d.redefine_style(MAIN, 0, pap, chp);
+        d.redefine_style(0, pap, chp);
         d.commit(Selection::default());
         let para = &d.main.paras[0];
         assert_eq!(para.pap.left, 720);
@@ -3238,6 +3437,88 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_style_changes_every_story_and_undo_restores_them() {
+        let mut d = doc_with(&["A", "B"]);
+        let sel = Selection::default();
+        let pap = d.main.paras[0].pap.clone();
+        let chp = d.main.paras[0].chp_at(0);
+        d.begin("Style", sel);
+        let a = d.add_style("Alpha", 0, None, pap.clone(), chp);
+        let b = d.add_style("Beta", a, None, pap, chp);
+        d.commit(sel);
+        // The first section's header uses Beta and its footer Alpha; the
+        // notes use Alpha; a second section has headers of its own with
+        // both.
+        d.headers[StoryId::Header.header_index()].paras[0].pap.style = b;
+        d.headers[StoryId::Footer.header_index()].paras[0].pap.style = a;
+        d.notes.paras[0].pap.style = a;
+        d.begin("Break", sel);
+        d.insert_section_break(Position::new(0, 1));
+        d.commit(sel);
+        d.begin("Own headers", sel);
+        let mut set = vec![Story::new(d.main.paras[0].clone()); 6];
+        set[0].paras[0].pap.style = b;
+        set[1].paras[0].pap.style = a;
+        d.format_sections(1, 1, |s| s.headers = Some(std::sync::Arc::new(set.clone())));
+        d.commit(sel);
+        let styles = |d: &Document| {
+            let own = d.headers_of(1);
+            (
+                d.headers[0].paras[0].pap.style,
+                d.headers[1].paras[0].pap.style,
+                d.notes.paras[0].pap.style,
+                own[0].paras[0].pap.style,
+                own[1].paras[0].pap.style,
+            )
+        };
+        assert_eq!(styles(&d), (b, a, a, b, a));
+        d.begin("Delete Style", sel);
+        d.delete_style(a);
+        d.commit(sel);
+        // Beta moved down to take Alpha's number; Alpha's users are Normal.
+        let beta = d.styles.find("Beta").unwrap();
+        assert_eq!(beta, b - 1);
+        assert_eq!(styles(&d), (beta, 0, 0, beta, 0));
+        d.undo();
+        assert_eq!(styles(&d), (b, a, a, b, a));
+    }
+
+    #[test]
+    fn replacing_fonts_reaches_every_sections_headers_and_undo_takes_it_back() {
+        let mut d = doc_with(&["A", "B"]);
+        let sel = Selection::default();
+        let (from, to) = (d.font_id("Zed"), d.font_id("Ink"));
+        let chp = CharProps {
+            font: from,
+            ..d.main.paras[0].chp_at(0)
+        };
+        let pap = d.main.paras[0].pap.clone();
+        let header = Story::new(Paragraph::with_text("Head", chp, pap));
+        d.headers[StoryId::Header.header_index()] = header.clone();
+        d.begin("Break", sel);
+        d.insert_section_break(Position::new(0, 1));
+        d.commit(sel);
+        d.begin("Own headers", sel);
+        d.format_sections(1, 1, |s| {
+            s.headers = Some(std::sync::Arc::new(vec![header.clone(); 6]));
+        });
+        d.commit(sel);
+        let fonts = |d: &Document| {
+            (
+                d.headers[0].paras[0].chp_of_char(0).font,
+                d.headers_of(1)[0].paras[0].chp_of_char(0).font,
+            )
+        };
+        assert_eq!(fonts(&d), (from, from));
+        d.begin("Replace Fonts", sel);
+        d.replace_font(&[from], to);
+        d.commit(sel);
+        assert_eq!(fonts(&d), (to, to));
+        d.undo();
+        assert_eq!(fonts(&d), (from, from));
+    }
+
+    #[test]
     fn deleting_a_style_returns_its_paragraphs_to_normal() {
         let mut d = doc_with(&["A", "B", "C"]);
         let pap = d.main.paras[0].pap.clone();
@@ -3250,7 +3531,7 @@ mod tests {
         d.apply_style(MAIN, 2, 2, b);
         d.commit(Selection::default());
         d.begin("Delete Style", Selection::default());
-        d.delete_style(MAIN, a);
+        d.delete_style(a);
         d.commit(Selection::default());
         assert_eq!(d.main.paras[0].pap.style, 0);
         assert!(!d.main.paras[0].chp_at(0).bold);
@@ -3363,6 +3644,59 @@ mod tests {
         let p = &doc.annotations.paras[0];
         assert!(p.text.starts_with(chars::ANNOTATION));
         assert_eq!(p.chp_of_char(0).object, id);
+    }
+
+    #[test]
+    fn style_changes_reach_every_sections_headers_once() {
+        let mut d = crate::text::from_plain_text("A\nB");
+        let chp = d.main.paras[0].mark_chp;
+        d.insert_text(StoryId::Header, Position::new(0, 0), "Zero", chp);
+        let normal = d.styles.get(0).clone();
+        let a = d.add_style("A", 0, None, normal.pap.clone(), normal.chp);
+        let b = d.add_style("B", 0, None, normal.pap.clone(), normal.chp);
+        d.apply_style(StoryId::Header, 0, 0, b);
+        d.forget_history();
+        d.begin("Break", Selection::default());
+        d.insert_section_break(Position::new(1, 0));
+        d.commit(Selection::default());
+        // The second section gets a header of its own, and the pane is
+        // left showing it, as after editing it.
+        d.header_section = 1;
+        d.begin("Typing", Selection::default());
+        d.insert_text(StoryId::Header, Position::new(0, 0), "One ", chp);
+        d.commit(Selection::default());
+        assert!(d.has_own_headers(1));
+        let style_of = |d: &Document, k: usize| {
+            let s = d.header_story(k, StoryId::Header).paras[0].pap.style;
+            d.styles.get(s).name.clone()
+        };
+        assert_eq!((style_of(&d, 0), style_of(&d, 1)), ("B".into(), "B".into()));
+        // Deleting a style before B moves B down by one, in both headers,
+        // once each.
+        d.begin("Delete Style", Selection::default());
+        d.delete_style(a);
+        d.commit(Selection::default());
+        assert_eq!(d.header_section, 1);
+        assert_eq!((style_of(&d, 0), style_of(&d, 1)), ("B".into(), "B".into()));
+        d.undo();
+        assert_eq!((style_of(&d, 0), style_of(&d, 1)), ("B".into(), "B".into()));
+        // Redefining B reaches both headers, as one step.
+        let b = d.styles.find("B").unwrap();
+        let mut bigger = normal.chp;
+        bigger.size = 40;
+        d.begin("Define Style", Selection::default());
+        d.redefine_style(b, normal.pap.clone(), bigger);
+        d.commit(Selection::default());
+        for k in 0..2 {
+            let p = &d.header_story(k, StoryId::Header).paras[0];
+            assert_eq!(p.chp_of_char(0).size, 40, "section {k}");
+        }
+        d.undo();
+        for k in 0..2 {
+            let p = &d.header_story(k, StoryId::Header).paras[0];
+            assert_eq!(p.chp_of_char(0).size, normal.chp.size, "section {k}");
+        }
+        assert_eq!(d.header_section, 1);
     }
 
     #[test]

@@ -61,8 +61,9 @@ impl DocView {
         self.page_view || self.headers_wanted || self.printing
     }
 
-    /// Whether any frame is placed relative to the page rather than where
-    /// its text is, so placing it needs the pages.
+    /// Whether any frame other than a drop cap is placed, so placing it
+    /// needs the pages: one placed by the page, or one in the text that
+    /// must not hang over a page break.
     pub(super) fn has_page_frames(&self) -> bool {
         self.frames_on()
             && self
@@ -70,7 +71,7 @@ impl DocView {
                 .main
                 .paras
                 .iter()
-                .any(|p| p.pap.frame.is_some_and(|f| f.v != FrameV::InLine))
+                .any(|p| p.pap.frame.is_some_and(|f| f.drop_lines == 0))
     }
 
     /// Place the frame that starts at paragraph `i`, with the text column
@@ -149,7 +150,17 @@ impl DocView {
                 FrameH::At(t) => lo + pt(t),
             }
         };
-        let fy = if f.v == FrameV::InLine || self.pages.is_empty() {
+        let fy = if f.drop_lines > 0 {
+            y
+        } else if f.v == FrameV::InLine || f.v_rel == FrameRel::Column {
+            // In line, or measured from the paragraph after it (RTF's
+            // \pvpara, .docx's "text"): where the frame comes in the text.
+            let down = match f.v {
+                FrameV::At(t) if f.v_rel == FrameRel::Column => pt(t),
+                _ => 0.0,
+            };
+            self.frame_on_one_page(y + down, h, paras[i].pap.page_break_before)
+        } else if self.pages.is_empty() {
             y
         } else {
             let text_h = self.page_body_height(page);
@@ -172,6 +183,24 @@ impl DocView {
             from_text: pt(f.from_text),
             drop: f.drop_lines > 0,
         })
+    }
+
+    /// Where a frame `h` points tall that would start at document `y`
+    /// goes: on the next page when it would hang past the foot of this
+    /// one, or when it starts with a page break and is not already at the
+    /// top. Frames take no room in the text, so pagination never moves
+    /// them.
+    fn frame_on_one_page(&self, y: f32, h: f32, page_break: bool) -> f32 {
+        if self.pages.is_empty() {
+            return y;
+        }
+        let (page, _, local) = self.on_page(y);
+        let past_foot = local + h > self.page_body_height(page) && local > 0.0;
+        if page + 1 < self.pages.len() && ((page_break && local > 0.5) || past_foot) {
+            self.doc_y_on_page(page + 1, 0.0)
+        } else {
+            y
+        }
     }
 
     /// Place the paragraphs, then lay out again the ones a frame now
@@ -311,27 +340,64 @@ impl DocView {
         top: f32,
         bottom: f32,
     ) {
-        let (s, e) = self.sel.range();
         for f in &self.frames {
             if f.y + f.h < top || f.y > bottom {
                 continue;
             }
-            for para in f.first..=f.last {
-                let l = self.layout(para);
-                let (px, py) = (ox + self.xs[para], oy + self.tops[para]);
-                if let Some(bx) = &l.border {
-                    draw_border_box(c, bx, px, py);
-                }
-                if c.screen()
-                    && !self.sel.is_empty()
-                    && self.selected_picture().is_none()
-                    && para >= s.para
-                    && para <= e.para
-                {
-                    self.draw_selection(c, para, l, px, py, s, e, focused);
-                }
-                self.draw_paragraph(c, fonts, cache, para, l, px, py);
+            self.draw_frame(c, fonts, cache, focused, f, ox, oy);
+        }
+    }
+
+    /// Draw the frames on page `k`, whose text area starts at (`ox`, `oy`).
+    /// A frame is drawn whole on the page it starts on, not clipped to the
+    /// text the page holds, which may be shorter than the frame.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_page_frames(
+        &self,
+        c: &mut dyn Surface,
+        fonts: &Fonts,
+        cache: &mut GlyphCache,
+        focused: bool,
+        k: usize,
+        ox: f32,
+        oy: f32,
+    ) {
+        for f in &self.frames {
+            let (page, x, local) = self.on_page(f.y);
+            if page == k {
+                self.draw_frame(c, fonts, cache, focused, f, ox + x, oy + local - f.y);
             }
+        }
+    }
+
+    /// Draw frame `f` with document (0, 0) at (`ox`, `oy`).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_frame(
+        &self,
+        c: &mut dyn Surface,
+        fonts: &Fonts,
+        cache: &mut GlyphCache,
+        focused: bool,
+        f: &FrameBox,
+        ox: f32,
+        oy: f32,
+    ) {
+        let (s, e) = self.sel.range();
+        for para in f.first..=f.last {
+            let l = self.layout(para);
+            let (px, py) = (ox + self.xs[para], oy + self.tops[para]);
+            if let Some(bx) = &l.border {
+                draw_border_box(c, bx, px, py);
+            }
+            if c.screen()
+                && !self.sel.is_empty()
+                && self.selected_picture().is_none()
+                && para >= s.para
+                && para <= e.para
+            {
+                self.draw_selection(c, para, l, px, py, s, e, focused);
+            }
+            self.draw_paragraph(c, fonts, cache, para, l, px, py);
         }
     }
 }
@@ -402,6 +468,38 @@ mod tests {
             assert_eq!(body.lines[usize::from(lines)].left, 0.0);
             assert_eq!(view.doc.main.paras[0].chp_of_char(0).size, 96);
         }
+    }
+
+    #[test]
+    fn framed_paragraphs_wrap_at_the_frame_width() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let caption = "A caption long enough to need several lines in a narrow frame. ".repeat(3);
+        let mut view = DocView::new(
+            quill_core::text::from_plain_text(&format!("Picture\n{caption}\nBody text")),
+            "Frame".into(),
+        );
+        let frame = Frame {
+            h: FrameH::Right,
+            width: Some(2880),
+            ..Default::default()
+        };
+        view.doc.main.paras[0].pap.frame = Some(frame);
+        view.doc.main.paras[1].pap.frame = Some(frame);
+        view.page_view = true;
+        view.area = Rect::new(0.0, 0.0, 900.0, 700.0);
+        view.update_layout(&mut fonts);
+        let f = view.frames[0];
+        assert_eq!((f.first, f.last, f.w), (0, 1, 144.0));
+        let l = view.layout(1);
+        assert!(l.lines.len() > 3);
+        // end_x counts the space a line ends in.
+        assert!(l.lines.iter().all(|ln| ln.end_x < 150.0));
+        // Normal view shows the paragraph in the text, at the column's width.
+        view.page_view = false;
+        view.update_layout(&mut fonts);
+        assert!(view.layout(1).lines.iter().any(|ln| ln.end_x > 200.0));
     }
 
     #[test]

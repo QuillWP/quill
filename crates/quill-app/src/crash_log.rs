@@ -6,8 +6,7 @@ use std::io::Write;
 
 /// Add each panic to the crash log, then report it as before.
 pub fn install() {
-    let Some(path) =
-        crate::settings::sibling("Quill Crash Log", "Quill Crash Log.txt", "crash-log")
+    let Some(path) = crate::settings::sibling("Crash Log", "Quill Crash Log.txt", "crash-log")
     else {
         return;
     };

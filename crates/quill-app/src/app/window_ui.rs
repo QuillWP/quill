@@ -505,7 +505,7 @@ impl WinState {
             // The divider follows the pointer while it is dragged.
             c.fill(Rect::new(0.0, dy - 1.0, w, 2.0), color::GRAY_DARK);
         }
-        let style = self.view.style_name().to_string();
+        let style = self.view.style_name();
         let status = Rect::new(0.0, h - BAR, w - gutter, BAR);
         let page = format!("Page {}", self.main_view().caret_page() + 1);
         let message = self.view.status.clone();
@@ -598,7 +598,7 @@ impl WinState {
         if self.show_paragraph_toolbar {
             let v = &self.view;
             let ps = ParagraphToolbarState {
-                style: v.style_name(),
+                style: v.style_name().into(),
                 pap: v.current_pap(),
                 tab_type: self.tab_type,
                 columns: v.current_section().columns,
@@ -838,6 +838,7 @@ impl WinState {
         let (m, actions) = match hit {
             Hit::FontPopup => app_menus::font_popup(&cx),
             Hit::SizePopup => app_menus::size_popup(&cx),
+            Hit::ColorPopup => app_menus::color_popup(&cx),
             _ => app_menus::style_popup(&cx),
         };
         let anchor = bars::popup_rect(

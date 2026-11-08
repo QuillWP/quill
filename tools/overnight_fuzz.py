@@ -21,8 +21,12 @@ TARGETS = ['character_styles', 'native', 'clipboard', 'docx', 'rtf', 'html', 'od
 DOCUMENT_TARGETS = TARGETS[:8]
 LIMIT = 262144
 
-def budgets(hours):
-    """Seconds per target. Three run at a time, so the campaign has hours * 3 to share."""
+def budgets(hours, chosen=None):
+    """Seconds per target. Three run at a time, so the campaign has hours * 3 to share.
+    Chosen targets share it evenly."""
+    if chosen:
+        each = int(hours * 3 * 3600 / len(chosen)) if hours else 10800
+        return {target: each for target in chosen}
     if hours is None:
         return {target: 10800 for target in TARGETS}
     total = hours * 3 * 3600
@@ -45,6 +49,7 @@ def seed():
     if not samples.is_dir():
         raise RuntimeError(f'Missing sample directory: {samples}. Set QUILL_TEST_CASES to a folder of sample documents.')
     xml_archives = 0
+    other_clips = 0
     for folder, _, names in os.walk(samples):
         for name in names:
             if name.startswith(('._', '~$')):
@@ -59,7 +64,11 @@ def seed():
                     add(target, path.read_bytes())
                 if ext in ('.docx', '.odt'):
                     add('zip', path.read_bytes())
-                if ext in ('.rtf', '.htm', '.html') and 'Clipboard' in str(path):
+                # Clipboard: the pasteboard kinds Quill reads, from the
+                # clipboard samples and a share of the other RTF and HTML.
+                clipboard = 'Clipboard' in str(path)
+                if ext in ('.rtf', '.htm', '.html') and (clipboard or other_clips < 600):
+                    other_clips += not clipboard
                     add('clipboard', bytes([0 if ext == '.rtf' else 1]) + path.read_bytes())
                 if ext == '.docx':
                     with zipfile.ZipFile(path) as archive:
@@ -70,6 +79,18 @@ def seed():
                     xml_archives += 1
             except (OSError, ValueError, zipfile.BadZipFile, RuntimeError):
                 continue
+    # Print Merge data: a header row and records, tab and comma separated,
+    # with quotes, empty fields and ragged rows.
+    for data in ['Name\tCity\nAda\tLondon\nGrace\tNew York\n',
+                 'Name,City,Note\n"Lovelace, Ada",London,"said ""hi"""\nGrace,,\n',
+                 'First\tLast\tAmount\nA\tB\nC\tD\tE\tF\n\n',
+                 'name\tNAME\tStraße\nx\ty\tz\n', 'Only\n']:
+        add('merge_data', data.encode())
+    # Markdown the editor makes: headings, emphasis, quotes, lists in quotes.
+    for data in ['# Title\n\nSome *text* and **bold**.\n\n> A quote\n>\n> 1. one\n> 2. two\n',
+                 '- a\n- b\n  - c\n\n1. x\n2. y\n\n---\n\n`code` [link](x)\n',
+                 '> > nested\n>\n> back\n\nplain\n']:
+        add('markdown', data.encode())
     # Seed operation programs so the editing target reaches every action
     # before mutation starts, including Undo/Redo and explicit save checks.
     for action in range(13):
@@ -95,12 +116,18 @@ def seed():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--hours', type=float, help='share this many hours between the targets; the default is three hours each')
-    seconds = budgets(parser.parse_args().hours)
+    parser.add_argument('--targets', help='comma-separated targets to run, sharing the hours evenly; the default is all of them')
+    args = parser.parse_args()
+    chosen = [t for t in args.targets.split(',') if t] if args.targets else None
+    unknown = [t for t in chosen or [] if t not in TARGETS]
+    if unknown:
+        parser.error('unknown targets: ' + ', '.join(unknown))
+    seconds = budgets(args.hours, chosen)
     run = ROOT / 'fuzz/runs' / dt.datetime.now().strftime('%Y%m%d-%H%M%S')
     run.mkdir(parents=True)
     (ROOT / 'fuzz/runs/latest.txt').write_text(str(run) + '\n')
     lock = threading.Lock()
-    state = {'started':now(), 'phase':'Seeding', 'targets':{t:{'status':'queued'} for t in TARGETS}}
+    state = {'started':now(), 'phase':'Seeding', 'targets':{t:{'status':'queued'} for t in seconds}}
     def report():
         with lock:
             (run / 'status.json').write_text(json.dumps(state, indent=2) + '\n')
@@ -130,7 +157,7 @@ def main():
     try:
         state['seeds'] = seed()
         for target, count in state['seeds'].items():
-            if count == 0:
+            if count == 0 and target in seconds:
                 raise RuntimeError(f'Empty corpus: {target}')
         with (run / 'source.diff').open('w') as output:
             subprocess.run(['git','diff','HEAD','--binary'], cwd=ROOT, stdout=output, check=True)
@@ -175,7 +202,7 @@ def main():
             info.update(elapsed=time.time()-info['epoch'], finished=now())
             report()
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
-            futures = [pool.submit(exercise, target) for target in TARGETS]
+            futures = [pool.submit(exercise, target) for target in seconds]
             while not all(f.done() for f in futures):
                 time.sleep(30)
                 report()

@@ -101,6 +101,8 @@ impl DocView {
             paragraphs: now.paragraphs + extra.paragraphs,
             characters: now.characters + extra.characters,
             runs: now.runs + extra.runs,
+            pictures: now.pictures + extra.pictures,
+            headers: now.headers + extra.headers,
         };
         match after.too_large() {
             Some(why) => {
@@ -408,6 +410,9 @@ impl DocView {
 
     /// Run a command. Returns what the application should do next.
     pub fn exec(&mut self, cmd: Cmd, extend: bool, clip: &mut Clipboard) -> Effect {
+        if self.in_markdown_source() && cmd.changes_format() {
+            return Effect::None;
+        }
         if !self.captions {
             return self.exec_inner(cmd, extend, clip);
         }
@@ -483,6 +488,9 @@ impl DocView {
             Find => return Effect::Dialog(DialogId::Find),
             Replace => return Effect::Dialog(DialogId::Replace),
             GoTo => return Effect::Dialog(DialogId::GoTo),
+            Grep => return Effect::Dialog(DialogId::Grep),
+            RegexSearch => return Effect::Dialog(DialogId::RegexSearch),
+            Sed => return Effect::Dialog(DialogId::Sed),
             Glossary => return Effect::Dialog(DialogId::Glossary),
             WordCount => return Effect::Dialog(DialogId::WordCount),
             ChangeCase if !self.sel.is_empty() => return Effect::Dialog(DialogId::ChangeCase),
@@ -663,6 +671,7 @@ impl DocView {
             }
             NewParagraph if self.on_row_mark() => {}
             NewParagraph if self.on_empty_list_item() => self.end_list_here(),
+            NewParagraph if self.on_empty_quote() => self.leave_quote_here(),
             NewParagraph => {
                 self.doc.begin_typing(self.sel);
                 let at = self.delete_selection();
@@ -701,7 +710,21 @@ impl DocView {
                     }
                 ));
             }
-            PageBreak => self.type_special(chars::PAGE_BREAK),
+            PageBreak => {
+                // One step. At the end of a paragraph the break is followed
+                // by an empty line on the next page, as a line break is, so
+                // the insertion point lands on the new page and typing goes
+                // there.
+                self.doc.begin("Page Break", self.sel);
+                let at = self.delete_selection();
+                let chp = self
+                    .typing_chp
+                    .unwrap_or_else(|| self.doc.main.paras[at.para].chp_at(at.offset));
+                let end = self
+                    .doc
+                    .insert_text(MAIN, at, &chars::PAGE_BREAK.to_string(), chp);
+                self.finish_edit(Selection::caret(end));
+            }
             SectionBreak => {
                 self.doc.begin("Section Break", self.sel);
                 let at = self.delete_selection();
@@ -758,6 +781,14 @@ impl DocView {
                     };
                     self.finish_edit(Selection::caret(at));
                 }
+            }
+            // Markdown source is plain text in one fixed-width font, so
+            // whatever is pasted goes in as text in that font. A Markdown
+            // file shown formatted takes text only too: its fonts come from
+            // Markdown, not from what was copied, so there are no missing
+            // fonts to ask about.
+            Paste if self.in_markdown_source() || self.is_markdown_file() => {
+                self.paste_as(crate::paste_special::Form::Unformatted, clip);
             }
             Paste => {
                 let Some(mut content) = clip.get() else {
@@ -1233,6 +1264,10 @@ impl DocView {
         self.format_chars("Formatting", move |c| c.size = half_points);
     }
 
+    pub fn set_color(&mut self, color: quill_core::props::Rgb) {
+        self.format_chars("Formatting", move |c| c.color = color);
+    }
+
     pub fn set_style(&mut self, style: u16) {
         let (first, last) = self.selected_paras();
         self.doc.begin("Style", self.sel);
@@ -1328,9 +1363,9 @@ impl DocView {
         }
     }
 
-    pub fn style_name(&self) -> &str {
+    pub fn style_name(&self) -> String {
         let id = self.current_pap().style;
-        &self.doc.styles.get(id).name
+        self.doc.styles.get(id).display_name()
     }
 }
 

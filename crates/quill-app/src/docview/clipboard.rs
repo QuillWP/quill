@@ -4,7 +4,7 @@ use super::*;
 
 #[path = "clipboard_rich.rs"]
 mod rich;
-use rich::RichContent;
+pub(super) use rich::RichContent;
 
 /// Most clipboard text, and HTML, Quill will read: the text limit is the
 /// document's character limit, and the HTML limit is the HTML reader's.

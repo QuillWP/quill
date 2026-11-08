@@ -188,7 +188,16 @@ impl Document {
 
     /// A note id not used yet, by either kind.
     pub fn fresh_note_id(&mut self) -> u32 {
-        let used = NoteKind::ALL
+        self.fresh_note_ids(1)[0]
+    }
+
+    /// `count` different note ids, none in use yet. Ids that came from a
+    /// file can be any number, so this never adds to one without checking:
+    /// id 0 means no note, and a counter that wrapped would hand out an id
+    /// that is already in use. Each id handed out is counted as taken
+    /// before the next is chosen, so a batch never repeats one.
+    pub fn fresh_note_ids(&mut self, count: usize) -> Vec<u32> {
+        let taken: std::collections::HashSet<u32> = NoteKind::ALL
             .iter()
             .flat_map(|&k| {
                 ref_ids(&self.main.paras, k)
@@ -198,11 +207,23 @@ impl Document {
             .chain(self.note_bank.keys().copied())
             .chain(self.note_marks.keys().copied())
             .chain(self.annotation_info.keys().copied())
-            .max()
-            .unwrap_or(0);
-        self.next_note = self.next_note.max(used + 1);
-        self.next_note += 1;
-        self.next_note - 1
+            .collect();
+        let used = taken.iter().copied().max().unwrap_or(0);
+        let start = self.next_note.max(used.saturating_add(1)).max(1);
+        // Normally one past the highest id there is, as ever.
+        if (count as u64) < u64::from(u32::MAX) - u64::from(start) {
+            let ids: Vec<u32> = (0..count as u32).map(|i| start + i).collect();
+            self.next_note = start + count as u32;
+            return ids;
+        }
+        // Out of room above: take the lowest numbers from 1 that are free.
+        let ids: Vec<u32> = (1..=u32::MAX)
+            .filter(|id| !taken.contains(id))
+            .take(count)
+            .collect();
+        assert_eq!(ids.len(), count, "fewer than u32::MAX notes exist");
+        self.next_note = ids.last().map_or(1, |id| id.saturating_add(1));
+        ids
     }
 
     /// Rebuild the story of `kind` so it holds one note per reference, in
@@ -547,17 +568,40 @@ impl Document {
     /// Give pasted notes new ids so they are copies, not the originals,
     /// and put their text where the next rebuild finds it.
     pub(crate) fn adopt_notes(&mut self, paras: &mut [Paragraph], notes: &[NoteCopy]) {
+        // Every copy gets its id first, so a reply can name its parent's.
+        // The same note can be listed twice when its reference was.
+        let mut old: Vec<u32> = Vec::new();
         for n in notes {
-            let new = self.fresh_note_id();
-            let swap = |p: &mut Paragraph| set_note_id(p, n.id, new, n.kind.mark());
-            paras.iter_mut().for_each(swap);
+            if !old.contains(&n.id) {
+                old.push(n.id);
+            }
+        }
+        let fresh: HashMap<u32, u32> = old
+            .iter()
+            .copied()
+            .zip(self.fresh_note_ids(old.len()))
+            .collect();
+        // Each reference is renamed once, from the full map, so a new id
+        // that equals another copy's old one is not renamed again.
+        paras.iter_mut().for_each(|p| renumber_notes(p, &fresh));
+        let mut done = std::collections::HashSet::new();
+        for n in notes {
+            if !done.insert(n.id) {
+                continue;
+            }
+            let new = fresh[&n.id];
             let mut text = n.paras.clone();
-            text.iter_mut().for_each(swap);
+            text.iter_mut().for_each(|p| renumber_notes(p, &fresh));
             if let Some(m) = &n.mark {
                 self.note_marks.insert(new, m.clone());
             }
             if let Some(i) = &n.info {
-                self.annotation_info.insert(new, i.clone());
+                let mut info = i.clone();
+                // A reply follows its parent into the copy. One whose
+                // parent was not copied stands alone, so that deleting the
+                // original thread does not take this copy with it.
+                info.parent = info.parent.and_then(|p| fresh.get(&p).copied());
+                self.annotation_info.insert(new, info);
             }
             self.note_bank.insert(new, text);
         }
@@ -574,14 +618,16 @@ impl Document {
     }
 }
 
-/// Change the id on `mark` characters naming `old` to `new`.
-fn set_note_id(p: &mut Paragraph, old: u32, new: u32, mark: char) {
-    let spans: Vec<(usize, usize)> = p
+/// Rename the note references in `p` by `map`, each run once. Only runs
+/// holding a note mark carry a note id; other objects keep theirs.
+fn renumber_notes(p: &mut Paragraph, map: &HashMap<u32, u32>) {
+    let marks: Vec<char> = NoteKind::ALL.iter().map(|k| k.mark()).collect();
+    let spans: Vec<(usize, usize, u32)> = p
         .run_bounds()
-        .filter(|(s, e, c)| c.object == old && p.text[*s..*e].contains(mark))
-        .map(|(s, e, _)| (s, e))
+        .filter(|(s, e, _)| p.text[*s..*e].contains(&marks[..]))
+        .filter_map(|(s, e, c)| map.get(&c.object).map(|&new| (s, e, new)))
         .collect();
-    for (s, e) in spans {
+    for (s, e, new) in spans {
         p.format_range(s, e, &mut |c| c.object = new);
     }
 }
@@ -641,12 +687,73 @@ mod tests {
     }
 
     #[test]
+    fn pasting_notes_whose_ids_cross_keeps_each_one() {
+        // The later reference has the lower id, so the copies' new ids
+        // are the old ids swapped. Renaming one at a time merged them.
+        let mut d = doc();
+        let sel = crate::Selection::default();
+        let a = d.insert_note(Position::new(0, 13), CharProps::default(), None);
+        let at = d.note_text_start(a).unwrap();
+        d.insert_text(StoryId::Notes, at, "Later.", CharProps::default());
+        let b = d.insert_note(Position::new(0, 3), CharProps::default(), None);
+        let at = d.note_text_start(b).unwrap();
+        d.insert_text(StoryId::Notes, at, "Earlier.", CharProps::default());
+        d.commit(sel);
+        assert_eq!(note_ids(&d.main.paras), [b, a]);
+        let end = d.main.paras[0].len();
+        let frag = d.copy(Main, Position::new(0, 0), Position::new(0, end));
+        let mut other = Document::new();
+        other.begin("Paste", sel);
+        other.insert_fragment(Main, Position::new(0, 0), &frag);
+        other.commit(sel);
+        let ids = note_ids(&other.main.paras);
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1], "two notes, not one");
+        assert!(note_text(&other, ids[0]).ends_with("Earlier."));
+        assert!(note_text(&other, ids[1]).ends_with("Later."));
+    }
+
+    #[test]
+    fn a_batch_of_note_ids_never_repeats_one() {
+        let mut d = doc();
+        d.annotation_info
+            .insert(u32::MAX, AnnotationInfo::default());
+        d.note_marks.insert(2, "*".into());
+        let ids = d.fresh_note_ids(4);
+        let set: std::collections::HashSet<u32> = ids.iter().copied().collect();
+        assert_eq!(set.len(), 4);
+        assert!(!set.contains(&0) && !set.contains(&2) && !set.contains(&u32::MAX));
+    }
+
+    #[test]
     fn custom_marks_do_not_count() {
         let mut d = doc();
         let a = d.insert_note(Position::new(0, 3), CharProps::default(), Some("*".into()));
         let b = d.insert_note(Position::new(0, 7), CharProps::default(), None);
         let labels = d.note_labels(None);
         assert_eq!((labels[&a].as_str(), labels[&b].as_str()), ("*", "1"));
+    }
+
+    #[test]
+    fn note_ids_near_the_top_of_the_range_do_not_overflow_or_repeat() {
+        let mut d = doc();
+        // A file can carry any id, the largest included.
+        d.annotation_info
+            .insert(u32::MAX, AnnotationInfo::default());
+        d.note_marks.insert(7, "*".into());
+        let first = d.fresh_note_id();
+        assert!(first != 0 && first != u32::MAX && first != 7);
+        // Each call gives one not given before, and not one in use.
+        d.note_marks.insert(first, "+".into());
+        let second = d.fresh_note_id();
+        assert!(second != 0 && second != first && second != 7 && second != u32::MAX);
+        // And the counter itself at its limit.
+        let mut d = doc();
+        d.next_note = u32::MAX;
+        let id = d.fresh_note_id();
+        assert!(id != 0);
+        d.note_marks.insert(id, "*".into());
+        assert_ne!(d.fresh_note_id(), id);
     }
 
     #[test]
@@ -680,6 +787,63 @@ mod tests {
         assert_eq!(d.main.paras[0], before);
         assert_eq!(annotation_ids(&d.annotations.paras), [other, a, reply]);
     }
+    #[test]
+    fn copied_replies_follow_their_copied_parents() {
+        let mut d = doc();
+        let sel = crate::Selection::default();
+        d.begin("Annotation", sel);
+        let a = d.insert_annotation_on(
+            Position::new(0, 4),
+            Position::new(0, 7),
+            CharProps::default(),
+            AnnotationInfo::default(),
+        );
+        let reply = d.insert_reply(a, AnnotationInfo::default()).unwrap();
+        d.commit(sel);
+        let last = d.main.paras.len() - 1;
+        let end = Position::new(last, d.main.paras[last].len());
+        let thread = d.copy(StoryId::Main, Position::new(0, 0), end);
+        d.begin("Paste", sel);
+        d.insert_fragment(StoryId::Main, end, &thread);
+        d.commit(sel);
+        let ids = annotation_ids(&d.main.paras);
+        assert_eq!(ids.len(), 4);
+        let copies: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|&i| i != a && i != reply)
+            .collect();
+        fn parent_of(d: &Document, id: u32) -> Option<u32> {
+            d.annotation_info[&id].parent
+        }
+        // One copy is a comment and the other a reply to it, not to `a`.
+        let (top, answer): (Vec<u32>, Vec<u32>) =
+            copies.iter().partition(|&&c| parent_of(&d, c).is_none());
+        assert_eq!((top.len(), answer.len()), (1, 1));
+        assert_eq!(parent_of(&d, answer[0]), Some(top[0]));
+        // Deleting the original thread leaves the copy's whole.
+        d.begin("Delete Annotation", sel);
+        d.delete_annotation(a);
+        d.commit(sel);
+        assert_eq!(annotation_ids(&d.main.paras), copies);
+
+        // A reply copied without its parent stands alone.
+        let at = d.annotation_mark(answer[0]).unwrap();
+        let mark = d.copy(
+            StoryId::Main,
+            at,
+            Position::new(at.para, at.offset + chars::ANNOTATION.len_utf8()),
+        );
+        d.begin("Paste", sel);
+        d.insert_fragment(StoryId::Main, Position::new(0, 0), &mark);
+        d.commit(sel);
+        let alone = annotation_ids(&d.main.paras)
+            .into_iter()
+            .find(|i| !copies.contains(i))
+            .unwrap();
+        assert_eq!(parent_of(&d, alone), None);
+    }
+
     #[test]
     fn deleting_an_annotation_s_mark_by_hand_takes_its_replies() {
         let mut d = doc();

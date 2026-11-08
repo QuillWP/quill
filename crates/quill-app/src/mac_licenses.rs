@@ -172,11 +172,24 @@ fn make_about() -> *mut AnyObject {
         let _: () = msg_send![content, addSubview: image];
         let _: () = msg_send![image, release];
         for (string, y, size) in [
-            ("Quill Word Processor".to_owned(), 486.0, 20.0),
+            (
+                if cfg!(debug_assertions) {
+                    "Quill Debug".to_owned()
+                } else {
+                    "Quill".to_owned()
+                },
+                486.0,
+                20.0,
+            ),
             (
                 format!("Version {}", env!("CARGO_PKG_VERSION")),
                 462.0,
                 12.0,
+            ),
+            (
+                "Copyright \u{a9} 2026 Lucas Krupinski and Quill contributors".to_owned(),
+                438.0,
+                11.0,
             ),
         ] {
             let label: *mut AnyObject =
@@ -188,7 +201,7 @@ fn make_about() -> *mut AnyObject {
             let _: () = msg_send![content, addSubview: label];
         }
         let scroll: *mut AnyObject = msg_send![class!(NSTextView), scrollableTextView];
-        let _: () = msg_send![scroll, setFrame: NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(380.0, 430.0))];
+        let _: () = msg_send![scroll, setFrame: NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(380.0, 406.0))];
         let _: () = msg_send![scroll, setHasVerticalScroller: true];
         let _: () = msg_send![scroll, setAutohidesScrollers: true];
         let text: *mut AnyObject = msg_send![scroll, documentView];

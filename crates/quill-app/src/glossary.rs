@@ -17,7 +17,7 @@ thread_local! {
 }
 
 fn file() -> Option<std::path::PathBuf> {
-    crate::settings::sibling("Quill Glossary", "Quill Glossary.txt", "glossary")
+    crate::settings::sibling("Glossary", "Quill Glossary.txt", "glossary")
 }
 
 /// The glossary is read whole at startup; a larger or non-regular file is

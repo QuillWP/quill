@@ -19,6 +19,8 @@ pub enum Action {
     FontVariant(String, bool, bool),
     /// Font size in half-points.
     Size(u16),
+    /// Text color, from the formatting toolbar's Color pop-up.
+    Color(quill_core::props::Rgb),
     Style(u16),
     CharacterStyle(u16),
     /// Open a header or footer in the pane.
@@ -194,7 +196,44 @@ pub fn build(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
     let (mut menus, actions) = build_menus(cx);
     let mut b = Builder { actions };
     customize(&mut menus, &mut b);
+    if cx.view.in_markdown_source() {
+        for menu in &mut menus {
+            disable_formatting(&mut menu.items, &b.actions);
+        }
+    }
     (menus, b.actions)
+}
+
+/// Grey out every item that would change formatting, submenus included,
+/// for Markdown source, which takes none.
+fn disable_formatting(items: &mut [Item], actions: &[Action]) {
+    for it in items {
+        if actions
+            .get(it.id as usize)
+            .is_some_and(Action::changes_format)
+        {
+            it.enabled = false;
+        }
+        if let Some(sub) = &mut it.submenu {
+            disable_formatting(&mut sub.items, actions);
+        }
+    }
+}
+
+impl Action {
+    /// Whether choosing this changes the document's formatting.
+    pub fn changes_format(&self) -> bool {
+        match self {
+            Action::Cmd(c) => c.changes_format(),
+            Action::FontVariant(..)
+            | Action::Size(_)
+            | Action::Color(_)
+            | Action::Style(_)
+            | Action::CharacterStyle(_)
+            | Action::CellAlign(_) => true,
+            _ => false,
+        }
+    }
 }
 
 /// The original's own menus.
@@ -316,6 +355,14 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             sep(),
             b.cmd("Find…", Cmd::Find),
             b.cmd("Replace…", Cmd::Replace),
+            b.item("Advanced", Action::None).submenu(Menu {
+                title: "Advanced".into(),
+                items: vec![
+                    b.cmd("Grep…", Cmd::Grep),
+                    b.cmd("Regex Search…", Cmd::RegexSearch),
+                    b.cmd("Sed…", Cmd::Sed),
+                ],
+            }),
             b.cmd("Go To…", Cmd::GoTo),
             b.cmd("Glossary…", Cmd::Glossary),
             b.cmd("Hyperlink…", Cmd::Hyperlink).key("⌘⌥K"),
@@ -876,6 +923,52 @@ pub fn size_popup(cx: &MenuContext) -> (Menu, Vec<Action>) {
     )
 }
 
+/// The formatting toolbar's Color pop-up: the original's eight colors, the
+/// colors named in Preferences > Colors, the selection's own color if it is
+/// none of those, and More Colors…, which opens the Character dialog and
+/// its palette.
+pub fn color_popup(cx: &MenuContext) -> (Menu, Vec<Action>) {
+    use quill_core::props::{Rgb, WORD_COLORS};
+    let mut b = Builder {
+        actions: vec![Action::None],
+    };
+    let current = cx.view.current_chp().color;
+    let mut listed: Vec<Rgb> = Vec::new();
+    let mut items = Vec::new();
+    for (name, c) in WORD_COLORS {
+        items.push(b.item(name, Action::Color(c)).checked(current == c));
+        listed.push(c);
+    }
+    let named = crate::settings::with(|s| s.named_colors.clone());
+    if !named.is_empty() {
+        items.push(Item::separator());
+    }
+    for (rgb, name) in named {
+        let c = Rgb(rgb);
+        if listed.contains(&c) {
+            continue;
+        }
+        items.push(b.item(name, Action::Color(c)).checked(current == c));
+        listed.push(c);
+    }
+    if !listed.contains(&current) {
+        items.push(Item::separator());
+        items.push(
+            b.item(crate::palette::hex(current), Action::Color(current))
+                .checked(true),
+        );
+    }
+    items.push(Item::separator());
+    items.push(b.cmd(crate::format_dialogs::OTHER_COLOR, Cmd::CharacterDialog));
+    (
+        Menu {
+            title: String::new(),
+            items,
+        },
+        b.actions,
+    )
+}
+
 /// The menu that drops from the toolbar's last button: where the toolbar
 /// sits, and Customize. The position is the same setting Preferences shows.
 pub fn toolbar_menu(position: u8) -> (Menu, Vec<Action>) {
@@ -924,7 +1017,7 @@ pub fn style_popup(cx: &MenuContext) -> (Menu, Vec<Action>) {
     let items = used
         .iter()
         .map(|&id| {
-            b.item(doc.styles.get(id).name.clone(), Action::Style(id))
+            b.item(doc.styles.get(id).display_name(), Action::Style(id))
                 .checked(id == current)
         })
         .collect();
@@ -1238,6 +1331,88 @@ mod tests {
         assert_eq!(arial.font.as_deref(), Some("Arial"));
         assert_eq!(variants.items[1].font.as_deref(), Some("Arial"));
         assert_eq!(menu.items[1].font, None);
+    }
+
+    #[test]
+    fn formatting_items_are_greyed_out_in_markdown_source() {
+        let (doc, _) = quill_formats::markdown::read("Some text\n", None);
+        let mut view = DocView::new(doc, String::new());
+        fn enabled(view: &DocView, title: &str, label: &str) -> bool {
+            let cx = MenuContext {
+                view,
+                font_families: &[],
+                show_formatting_toolbar: true,
+                show_paragraph_toolbar: true,
+                show_ruler: true,
+                full_screen: false,
+                recent: &[],
+                windows: &[],
+            };
+            let (menus, _) = build(&cx);
+            let menu = menus.iter().find(|m| m.title == title).unwrap();
+            menu.items
+                .iter()
+                .find(|i| i.label == label)
+                .unwrap()
+                .enabled
+        }
+        assert!(enabled(&view, "Format", "Bold"));
+        assert!(enabled(&view, "Font", "12 Point"));
+        view.show_markdown_source();
+        assert!(!enabled(&view, "Format", "Bold"));
+        assert!(!enabled(&view, "Format", "Character…"));
+        assert!(!enabled(&view, "Font", "12 Point"));
+        // Editing and the switch back are still there.
+        assert!(enabled(&view, "Edit", "Select All"));
+        assert!(enabled(&view, "Font", "Default Font…"));
+    }
+
+    #[test]
+    fn the_color_pop_up_offers_the_eight_colors_the_selections_own_and_more() {
+        use quill_core::props::Rgb;
+        let mut doc = quill_core::text::from_plain_text("Some text");
+        doc.main.paras[0].format_range(0, 9, &mut |c| c.color = Rgb(0x336699));
+        let mut view = DocView::new(doc, String::new());
+        view.sel = quill_core::Selection::caret(quill_core::Position::new(0, 4));
+        let cx = MenuContext {
+            view: &view,
+            font_families: &[],
+            show_formatting_toolbar: true,
+            show_paragraph_toolbar: true,
+            show_ruler: true,
+            full_screen: false,
+            recent: &[],
+            windows: &[],
+        };
+        let (menu, actions) = color_popup(&cx);
+        let labels: Vec<&str> = menu
+            .items
+            .iter()
+            .filter(|i| !i.separator)
+            .map(|i| i.label.as_str())
+            .collect();
+        assert_eq!(
+            &labels[..8],
+            [
+                "Black", "Blue", "Cyan", "Green", "Magenta", "Red", "Yellow", "White"
+            ]
+        );
+        assert_eq!(
+            &labels[8..],
+            ["#336699", crate::format_dialogs::OTHER_COLOR]
+        );
+        let own = menu.items.iter().find(|i| i.label == "#336699").unwrap();
+        assert!(own.checked);
+        assert_eq!(actions[own.id as usize], Action::Color(Rgb(0x336699)));
+        assert!(Action::Color(Rgb::BLACK).changes_format());
+        // Choosing a color sets the selection's.
+        view.sel = quill_core::Selection::new(
+            quill_core::Position::new(0, 0),
+            quill_core::Position::new(0, 4),
+        );
+        view.set_color(Rgb(0xFF0000));
+        assert_eq!(view.doc.main.paras[0].chp_of_char(0).color, Rgb(0xFF0000));
+        assert_eq!(view.doc.main.paras[0].chp_of_char(5).color, Rgb(0x336699));
     }
 
     #[test]

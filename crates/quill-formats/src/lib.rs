@@ -477,6 +477,25 @@ pub fn read_file_with_limit(path: &Path, limit: u64) -> Result<Vec<u8>, String> 
 /// Save a document. Writes a temporary file next to the target and
 /// renames it into place, so a failed save never damages the old file.
 pub fn save(doc: &Document, path: &Path, format: Format) -> Result<(), String> {
+    save_reading_back(doc, path, format, false).map(drop)
+}
+
+/// Save as .qwp even though the file does not read back exactly as the
+/// document is (see `native_check`). The file must still open. Returns
+/// the document as it reads back, which is what the file now holds.
+pub fn save_anyway(doc: &Document, path: &Path) -> Result<Document, String> {
+    save_reading_back(doc, path, Format::Quill, true)
+        .map(|back| back.expect("a .qwp save reads back"))
+}
+
+/// `save`, and for .qwp the document as it reads back. With `accept_loss`
+/// a .qwp is saved even when that differs from `doc`.
+fn save_reading_back(
+    doc: &Document,
+    path: &Path,
+    format: Format,
+    accept_loss: bool,
+) -> Result<Option<Document>, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -524,8 +543,20 @@ pub fn save(doc: &Document, path: &Path, format: Format) -> Result<(), String> {
     };
     // Read the result back before it replaces anything, so a save that
     // couldn't be opened again never reaches the disk.
+    let mut read_back = None;
     let back = match format {
-        Format::Quill => native::read(&bytes).map(drop),
+        // Quill's own format keeps everything, so what comes back must be
+        // what was saved. A difference means a bug in the writer or the
+        // reader, and the file on disk is better left as it was, unless
+        // the person chose to save anyway.
+        Format::Quill => native::read(&bytes).and_then(|back| {
+            match native_loss(doc, &back) {
+                Some(loss) if !accept_loss => return Err(loss.to_string()),
+                _ => {}
+            }
+            read_back = Some(back);
+            Ok(())
+        }),
         Format::Docx => docx::read(&bytes).map(drop),
         Format::Rtf => rtf::read(&bytes).map(drop),
         Format::Odt => odt_read::read(&bytes).map(drop),
@@ -544,10 +575,10 @@ pub fn save(doc: &Document, path: &Path, format: Format) -> Result<(), String> {
     };
     if let Err(e) = back {
         return Err(format!(
-            "Quill didn't save \u{201c}{file}\u{201d}, because it couldn't open the result again \
-             ({e}). The file on disk is unchanged.{}",
+            "Quill didn't save \u{201c}{file}\u{201d}, because it couldn't read the result back \
+             correctly ({e}). The file on disk is unchanged.{}",
             if format == Format::Quill {
-                ""
+                " Saving a copy in another format may work."
             } else {
                 " Saving in Quill's own format may work."
             }
@@ -572,7 +603,128 @@ pub fn save(doc: &Document, path: &Path, format: Format) -> Result<(), String> {
             write_picture_file(&folder.join(&picture.name), &picture.bytes)?;
         }
     }
-    write_atomic(path, &bytes)
+    write_atomic(path, &bytes)?;
+    Ok(read_back)
+}
+
+/// Where a .qwp read back differs from the document that was saved.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NativeLoss {
+    /// The part of the document, such as "text" or "styles".
+    pub part: &'static str,
+    /// In the main text, the first paragraph that differs, so the app can
+    /// show it.
+    pub para: Option<usize>,
+    /// Which paragraph and what changed in it, for the message.
+    pub detail: String,
+}
+
+impl std::fmt::Display for NativeLoss {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "the {} came back different", self.part)?;
+        if !self.detail.is_empty() {
+            write!(f, " {}", self.detail)?;
+        }
+        Ok(())
+    }
+}
+
+/// Save `doc` as .qwp in memory and read it back, and say where the result
+/// differs, if it does, with the document as it reads back. The app asks
+/// this after a refused save so it can select the paragraph at fault and
+/// offer to save anyway.
+pub fn native_check(doc: &Document) -> Option<(NativeLoss, Document)> {
+    let back = native::read(&native::write(doc, 0)).ok()?;
+    native_loss(doc, &back).map(|loss| (loss, back))
+}
+
+/// Where a .qwp read back as `back` does not keep `doc`, or None if it kept
+/// every part. The save time and other details the writer fills in are
+/// left out.
+fn native_loss(doc: &Document, back: &Document) -> Option<NativeLoss> {
+    let whole = |part| NativeLoss {
+        part,
+        para: None,
+        detail: String::new(),
+    };
+    if let Some((para, detail)) = story_loss(&doc.main.paras, &back.main.paras) {
+        return Some(NativeLoss {
+            part: "text",
+            para: Some(para),
+            detail,
+        });
+    }
+    if let Some((_, detail)) = story_loss(&doc.notes.paras, &back.notes.paras) {
+        return Some(NativeLoss {
+            detail,
+            ..whole("footnotes")
+        });
+    }
+    if doc.headers.len() != back.headers.len() {
+        return Some(whole("headers and footers"));
+    }
+    for (a, b) in doc.headers.iter().zip(&back.headers) {
+        if let Some((_, detail)) = story_loss(&a.paras, &b.paras) {
+            return Some(NativeLoss {
+                detail,
+                ..whole("headers and footers")
+            });
+        }
+    }
+    if let Some((_, detail)) = story_loss(&doc.annotations.paras, &back.annotations.paras) {
+        return Some(NativeLoss {
+            detail,
+            ..whole("comments")
+        });
+    }
+    [
+        ("styles", back.styles == doc.styles),
+        ("document settings", back.props == doc.props),
+        ("section settings", back.section == doc.section),
+        ("pictures", back.objects == doc.objects),
+        ("fonts", back.fonts == doc.fonts),
+    ]
+    .into_iter()
+    .find(|(_, same)| !same)
+    .map(|(part, _)| whole(part))
+}
+
+/// The first paragraph of `a` that `b` does not match, with a description
+/// of it and of what changed, or None if they match.
+fn story_loss(a: &[quill_core::Paragraph], b: &[quill_core::Paragraph]) -> Option<(usize, String)> {
+    let i = (0..a.len().max(b.len())).find(|&i| a.get(i) != b.get(i))?;
+    let what = match (a.get(i), b.get(i)) {
+        (Some(x), Some(y)) if x.text != y.text => "its text changed",
+        (Some(x), Some(y)) if x.runs != y.runs || x.mark_chp != y.mark_chp => {
+            "its character formatting changed"
+        }
+        (Some(x), Some(y)) if x.pap != y.pap || x.mark != y.mark => {
+            "its paragraph formatting changed"
+        }
+        (Some(x), Some(y)) if x.row != y.row => "its table row settings changed",
+        (Some(_), Some(_)) => "its section settings changed",
+        (Some(_), None) => "it was missing",
+        (None, _) => "an extra paragraph came after it",
+    };
+    let shown: String = a
+        .get(i)
+        .or(a.last())
+        .map(|p| p.text.as_str())
+        .unwrap_or("")
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let shown = shown.trim();
+    let quote = if shown.is_empty() {
+        "an empty paragraph".to_string()
+    } else if shown.chars().count() > 40 {
+        let cut: String = shown.chars().take(40).collect();
+        format!("\u{201c}{}\u{2026}\u{201d}", cut.trim_end())
+    } else {
+        format!("\u{201c}{shown}\u{201d}")
+    };
+    let at = i.min(a.len().saturating_sub(1));
+    Some((at, format!("at paragraph {} ({quote}): {what}", at + 1)))
 }
 
 // Assets are immutable once published: even an unlikely checksum collision
@@ -669,7 +821,8 @@ pub fn copy_atomic(source: &Path, destination: &Path) -> Result<(), String> {
         .file_name()
         .ok_or_else(|| format!("{} has no file name", destination.display()))?;
     let mut source_file = std::fs::File::open(source).map_err(|e| file_error("open", source, e))?;
-    let (tmp, file) = create_temp(destination, name)?;
+    let keep = permissions_to_keep(destination, Some(source));
+    let (tmp, file) = create_temp(destination, name, keep.is_some())?;
     let mut cleanup = TempCleanup {
         path: Some(tmp),
         file: Some(file),
@@ -677,6 +830,10 @@ pub fn copy_atomic(source: &Path, destination: &Path) -> Result<(), String> {
     let tmp = cleanup.path.as_deref().unwrap();
     let file = cleanup.file.as_mut().unwrap();
     std::io::copy(&mut source_file, file).map_err(|e| file_error("copy to", tmp, e))?;
+    if let Some(keep) = keep {
+        file.set_permissions(keep)
+            .map_err(|e| file_error("set permissions of", tmp, e))?;
+    }
     file.flush().map_err(|e| file_error("flush", tmp, e))?;
     file.sync_all().map_err(|e| file_error("sync", tmp, e))?;
     drop(cleanup.file.take());
@@ -701,7 +858,8 @@ fn write_atomic_with(
     let name = path
         .file_name()
         .ok_or_else(|| format!("{} has no file name", path.display()))?;
-    let (tmp, file) = create_temp(path, name)?;
+    let keep = permissions_to_keep(path, None);
+    let (tmp, file) = create_temp(path, name, keep.is_some())?;
     let mut cleanup = TempCleanup {
         path: Some(tmp),
         file: Some(file),
@@ -710,6 +868,10 @@ fn write_atomic_with(
     let file = cleanup.file.as_mut().unwrap();
     file.write_all(bytes)
         .map_err(|e| file_error("write", tmp, e))?;
+    if let Some(keep) = keep {
+        file.set_permissions(keep)
+            .map_err(|e| file_error("set permissions of", tmp, e))?;
+    }
     file.flush().map_err(|e| file_error("flush", tmp, e))?;
     file.sync_all().map_err(|e| file_error("sync", tmp, e))?;
     // Windows cannot replace a destination while this handle remains open.
@@ -795,18 +957,31 @@ fn transient_windows_replace_error(error: &std::io::Error) -> bool {
 
 /// Create a unique temporary file without overwriting one left by a crashed
 /// process or another window saving the same document.
-fn create_temp(path: &Path, name: &std::ffi::OsStr) -> Result<(PathBuf, std::fs::File), String> {
+///
+/// With `private` the file is readable by its owner only until the caller
+/// gives it its final permissions, so nobody else can read the contents of
+/// a document that was private while it is being written.
+fn create_temp(
+    path: &Path,
+    name: &std::ffi::OsStr,
+    private: bool,
+) -> Result<(PathBuf, std::fs::File), String> {
     for _ in 0..100 {
         let n = TEMP_NUMBER.fetch_add(1, Ordering::Relaxed);
         let mut temp_name = OsString::from(".");
         temp_name.push(name);
         temp_name.push(format!(".qwp-saving-{}-{n}", std::process::id()));
         let tmp = path.with_file_name(temp_name);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-        {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = private;
+        match options.open(&tmp) {
             Ok(file) => return Ok((tmp, file)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(file_error("create", &tmp, e)),
@@ -816,6 +991,22 @@ fn create_temp(path: &Path, name: &std::ffi::OsStr) -> Result<(PathBuf, std::fs:
         "Could not create a unique temporary file beside \u{201c}{}\u{201d}",
         path.display()
     ))
+}
+
+/// The permissions the new copy of a file should have: those of the file it
+/// replaces, else of `fallback`. Only on Unix, where a document may be
+/// readable by its owner alone; other systems keep their defaults.
+fn permissions_to_keep(
+    destination: &Path,
+    fallback: Option<&Path>,
+) -> Option<std::fs::Permissions> {
+    if !cfg!(unix) {
+        return None;
+    }
+    std::fs::metadata(destination)
+        .or_else(|e| fallback.map_or(Err(e), std::fs::metadata))
+        .ok()
+        .map(|m| m.permissions())
 }
 
 fn file_error(action: &str, path: &Path, error: std::io::Error) -> String {
@@ -859,6 +1050,50 @@ impl Drop for TempCleanup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_qwp_save_must_read_back_unchanged() {
+        let doc = quill_core::text::from_plain_text("One\nTwo");
+        let back = native::read(&native::write(&doc, 0)).unwrap();
+        assert_eq!(native_loss(&doc, &back), None);
+        assert!(native_check(&doc).is_none());
+        // The message names the paragraph and what changed in it.
+        let loss = |lost: &Document| native_loss(&doc, lost).unwrap();
+        let mut lost = back.clone();
+        lost.main.paras.pop();
+        let l = loss(&lost);
+        assert_eq!((l.part, l.para), ("text", Some(1)));
+        assert_eq!(
+            l.to_string(),
+            "the text came back different at paragraph 2 (\u{201c}Two\u{201d}): it was missing"
+        );
+        let mut lost = back.clone();
+        lost.main.paras[1].pap.left += 20;
+        assert_eq!(
+            loss(&lost).detail,
+            "at paragraph 2 (\u{201c}Two\u{201d}): its paragraph formatting changed"
+        );
+        let mut lost = back.clone();
+        lost.main.paras[0].text.push('!');
+        assert_eq!(loss(&lost).para, Some(0));
+        assert!(loss(&lost).detail.ends_with("its text changed"));
+        let mut lost = back;
+        lost.props.page_width += 20;
+        assert_eq!(
+            loss(&lost).to_string(),
+            "the document settings came back different"
+        );
+        // A normal save still goes through.
+        let dir = std::env::temp_dir().join(format!("quill-verify-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("saved.qwp");
+        save(&doc, &path, Format::Quill).unwrap();
+        assert_eq!(native_loss(&doc, &load(&path).unwrap()), None);
+        // Save Anyway hands back what the file now holds.
+        let back = save_anyway(&doc, &path).unwrap();
+        assert_eq!(native_loss(&back, &load(&path).unwrap()), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn files_that_are_not_what_their_names_say_get_a_clear_answer() {
@@ -1408,6 +1643,43 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn saving_keeps_a_private_file_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        let dir = std::env::temp_dir().join(format!("quill-private-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.qwp");
+        std::fs::write(&path, b"old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_atomic(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(mode(&path), 0o600);
+
+        // A backup of a private document is private too, new or replaced.
+        let backup = dir.join("Backup of secret.qwp");
+        copy_atomic(&path, &backup).unwrap();
+        assert_eq!(mode(&backup), 0o600);
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o640)).unwrap();
+        copy_atomic(&path, &backup).unwrap();
+        assert_eq!(mode(&backup), 0o640);
+
+        // A file that did not exist gets the usual permissions, those any
+        // new file gets under the umask, and not the temporary file's 0600.
+        let fresh = dir.join("fresh.qwp");
+        write_atomic(&fresh, b"x").unwrap();
+        let usual = dir.join("usual");
+        std::fs::write(&usual, b"x").unwrap();
+        assert_eq!(mode(&fresh), mode(&usual));
+        std::fs::remove_file(&usual).unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 3);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn atomic_copy_replaces_a_read_only_backup_when_the_folder_allows_it() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1694,6 +1966,95 @@ mod tests {
             chp,
         );
         doc
+    }
+
+    #[test]
+    fn as_many_pictures_as_allowed_can_be_saved_and_opened_again() {
+        use quill_core::limits::MAX_PICTURES;
+        let mut doc = text::from_plain_text("Pictures");
+        let chp = doc.main.paras[0].chp_of_char(0);
+        let add = |doc: &mut Document, i: usize| {
+            let mut data = png();
+            data.extend_from_slice(format!(" picture {i}").as_bytes());
+            let pic = quill_core::Picture::from_bytes(data).unwrap();
+            doc.insert_picture(
+                quill_core::StoryId::Main,
+                quill_core::Position::new(0, 0),
+                pic,
+                chp,
+            );
+        };
+        for i in 0..MAX_PICTURES {
+            add(&mut doc, i);
+        }
+        assert_eq!(doc.size().pictures, MAX_PICTURES);
+        assert!(doc.size().too_large().is_none());
+        for format in [Format::Quill, Format::Docx] {
+            let path = std::env::temp_dir().join(format!(
+                "quill-pictures-{}.{}",
+                std::process::id(),
+                format.extensions()[0]
+            ));
+            save(&doc, &path, format).unwrap();
+            let back = load(&path).unwrap();
+            assert_eq!(back.size().pictures, MAX_PICTURES, "{format:?}");
+            let _ = std::fs::remove_file(&path);
+        }
+        // One more is over the limit, and saving says so instead of
+        // writing a file that cannot be opened.
+        add(&mut doc, MAX_PICTURES);
+        let why = doc.size().too_large().unwrap();
+        assert!(why.contains("pictures"), "{why}");
+        let path =
+            std::env::temp_dir().join(format!("quill-pictures-over-{}.qwp", std::process::id()));
+        assert!(save(&doc, &path, Format::Quill).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn many_sections_with_their_own_headers_save_and_open_again() {
+        use quill_core::para::Mark;
+        // 700 sections, each with headers of its own, and a picture: a
+        // .docx writes each header and footer as a part with its own list
+        // of pictures, more parts than the archive reader used to take.
+        let mut doc = text::from_plain_text(&"Section\n".repeat(700));
+        let chp = doc.main.paras[0].chp_of_char(0);
+        let pic = quill_core::Picture::from_bytes(png()).unwrap();
+        doc.insert_picture(
+            quill_core::StoryId::Main,
+            quill_core::Position::new(0, 0),
+            pic,
+            chp,
+        );
+        let header = text::from_plain_text("Own header").main;
+        let n = doc.main.paras.len();
+        for p in &mut doc.main.paras[..n - 1] {
+            p.mark = Mark::SectionBreak;
+            let mut section = doc.section.clone();
+            section.headers = Some(std::sync::Arc::new(vec![header.clone(); 6]));
+            p.section = Some(Box::new(section));
+        }
+        assert!(doc.size().headers > 4_000);
+        assert!(doc.size().too_large().is_none());
+        let path = std::env::temp_dir().join(format!("quill-sections-{}.docx", std::process::id()));
+        save(&doc, &path, Format::Docx).unwrap();
+        let back = load(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(back.sections().len(), doc.sections().len());
+        assert_eq!(back.size().pictures, 1);
+        // Past the limit, it is too large, by its headers.
+        let mut more = doc.clone();
+        let extra = quill_core::limits::MAX_HEADERS / 6;
+        let mut section = doc.section.clone();
+        section.headers = Some(std::sync::Arc::new(vec![header.clone(); 6]));
+        for _ in 0..extra {
+            let mut p = more.main.paras[0].clone();
+            p.mark = Mark::SectionBreak;
+            p.section = Some(Box::new(section.clone()));
+            more.main.paras.insert(0, p);
+        }
+        let why = more.size().too_large().unwrap();
+        assert!(why.contains("headers"), "{why}");
     }
 
     #[test]

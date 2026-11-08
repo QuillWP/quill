@@ -374,17 +374,7 @@ impl Document {
 
     fn update_character_uses(&mut self, id: u16, old: CharacterFormat, delete: bool) {
         let header = self.header_section;
-        let mut targets: Vec<(usize, StoryId)> =
-            [StoryId::Main, StoryId::Notes, StoryId::Annotations]
-                .into_iter()
-                .map(|s| (header, s))
-                .collect();
-        for k in 0..self.sections().len() {
-            if self.has_own_headers(k) {
-                targets.extend(StoryId::HEADERS.map(|s| (k, s)));
-            }
-        }
-        for (section, story) in targets {
+        for (section, story) in self.every_story() {
             self.header_section = section;
             for i in 0..self.story(story).paras.len() {
                 let mut p = self.story(story).paras[i].clone();
@@ -473,7 +463,7 @@ mod tests {
         let own = d.styles.get(heading).chp;
         let pap = d.styles.get(heading).pap.clone();
         d.begin("Link", Selection::default());
-        d.redefine_style_linked(MAIN, heading, pap.clone(), own, callout);
+        d.redefine_style_linked(heading, pap.clone(), own, callout);
         d.commit(Selection::default());
         let style = d.styles.get(heading);
         assert_eq!(style.character, callout);
@@ -495,7 +485,7 @@ mod tests {
         );
 
         d.begin("Unlink", Selection::default());
-        d.redefine_style_linked(MAIN, heading, pap, own, 0);
+        d.redefine_style_linked(heading, pap, own, 0);
         d.commit(Selection::default());
         assert_eq!(d.styles.get(heading).chp, own);
         assert_eq!(d.main.paras[0].chp_of_char(0).size, own.size);
@@ -508,7 +498,7 @@ mod tests {
     fn changing_a_character_style_reaches_linked_paragraph_styles_and_their_text() {
         let (mut d, heading, callout) = linked_fixture();
         let (pap, own) = (d.styles.get(heading).pap.clone(), d.styles.get(heading).chp);
-        d.redefine_style_linked(MAIN, heading, pap, own, callout);
+        d.redefine_style_linked(heading, pap, own, callout);
         let format = CharacterFormat::new(
             CharProps {
                 size: 48,
@@ -542,9 +532,9 @@ mod tests {
             .unwrap();
         let normal_pap = d.styles.get(0).pap.clone();
         let normal_own = d.styles.get(0).chp;
-        d.redefine_style_linked(MAIN, 0, normal_pap, normal_own, quote);
+        d.redefine_style_linked(0, normal_pap, normal_own, quote);
         let (pap, own) = (d.styles.get(heading).pap.clone(), d.styles.get(heading).chp);
-        d.redefine_style_linked(MAIN, heading, pap, own, callout);
+        d.redefine_style_linked(heading, pap, own, callout);
         let looked = d.styles.get(heading).chp;
         assert!(d.delete_character_style(callout));
         let style = d.styles.get(heading);
@@ -595,7 +585,7 @@ mod tests {
             font: d.font_id("Georgia"),
             ..d.styles.get(0).chp
         };
-        d.redefine_style(MAIN, 0, pap, base);
+        d.redefine_style(0, pap, base);
         let c = d.main.paras[0].chp_of_char(0);
         assert_eq!((c.font, c.size), (base.font, 36));
         assert!(c.italic && c.bold);
@@ -767,7 +757,7 @@ mod tests {
         d.apply_style(MAIN, 1, 1, heading);
         let (pap, mut own) = (d.styles.get(heading).pap.clone(), d.styles.get(heading).chp);
         own.color = old;
-        d.redefine_style_linked(MAIN, heading, pap, own, id);
+        d.redefine_style_linked(heading, pap, own, id);
         d.commit(Selection::default());
         let before = d.main.clone();
 
@@ -785,7 +775,7 @@ mod tests {
             d.styles.get(heading).pap.clone(),
             d.styles.get(heading).own(),
         );
-        d.redefine_style_linked(MAIN, heading, pap, own, 0);
+        d.redefine_style_linked(heading, pap, own, 0);
         assert_eq!(d.styles.get(heading).chp.color, new);
         d.undo();
         d.undo();

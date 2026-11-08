@@ -760,7 +760,29 @@ impl NativeDialog {
                 .all(|(control, item)| control.matches(item))
     }
 
-    pub fn show(window: &Window, depth: usize, dialog: &Dialog) -> Option<Self> {
+    /// Where this window's top-left corner is, when `dialog` is the same
+    /// kind of window rebuilt in its place (Preferences changing panels).
+    /// The new window opens there instead of back in the middle.
+    pub fn top_left_for(&self, dialog: &Dialog) -> Option<(f64, f64)> {
+        if self.alert_message.is_some()
+            || is_alert(dialog)
+            || !self.modeless
+            || !dialog.modeless
+            || self.title != native_title(dialog)
+        {
+            return None;
+        }
+        let panel = Retained::as_ptr(&self.panel) as *mut AnyObject;
+        let frame: NSRect = unsafe { msg_send![panel, frame] };
+        Some((frame.origin.x, frame.origin.y + frame.size.height))
+    }
+
+    pub fn show(
+        window: &Window,
+        depth: usize,
+        dialog: &Dialog,
+        top_left: Option<(f64, f64)>,
+    ) -> Option<Self> {
         let handle = window.window_handle().ok()?.as_raw();
         let RawWindowHandle::AppKit(handle) = handle else {
             return None;
@@ -770,15 +792,24 @@ impl NativeDialog {
         if parent.is_null() {
             return None;
         }
-        Self::show_with_parent(parent, depth, dialog)
+        Self::show_with_parent(parent, depth, dialog, top_left)
     }
 
     /// Application settings do not need a document window as their parent.
-    pub fn show_standalone(depth: usize, dialog: &Dialog) -> Option<Self> {
-        Self::show_with_parent(std::ptr::null_mut(), depth, dialog)
+    pub fn show_standalone(
+        depth: usize,
+        dialog: &Dialog,
+        top_left: Option<(f64, f64)>,
+    ) -> Option<Self> {
+        Self::show_with_parent(std::ptr::null_mut(), depth, dialog, top_left)
     }
 
-    fn show_with_parent(parent: *mut AnyObject, depth: usize, dialog: &Dialog) -> Option<Self> {
+    fn show_with_parent(
+        parent: *mut AnyObject,
+        depth: usize,
+        dialog: &Dialog,
+        top_left: Option<(f64, f64)>,
+    ) -> Option<Self> {
         if !supported(dialog) {
             return None;
         }
@@ -878,6 +909,8 @@ impl NativeDialog {
                     parent_frame.origin.y + (parent_frame.size.height - frame.size.height) / 2.0,
                 );
                 let _: () = msg_send![panel_ptr, setFrameOrigin: origin];
+            } else if let Some((x, y)) = top_left {
+                let _: () = msg_send![panel_ptr, setFrameTopLeftPoint: NSPoint::new(x, y)];
             } else {
                 let _: () = msg_send![panel_ptr, center];
             }
@@ -1057,8 +1090,7 @@ impl NativeDialog {
         }
         if let Some((family, bold, italic)) = choice {
             dialog.set_selected(changed, family);
-            dialog.set_on("bold", bold);
-            dialog.set_on("italic", italic);
+            dialog.set_font_variant(bold, italic);
         }
     }
 

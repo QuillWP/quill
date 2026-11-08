@@ -763,6 +763,26 @@ pub fn list_mark_len(text: &str) -> Option<usize> {
     (is_mark && text[len..].starts_with('\t')).then_some(len + 1)
 }
 
+/// The length of a numbered list mark ("1." or "1)" and a tab, as a
+/// Markdown numbered list has) at the start of `text`, if there is one.
+pub fn numbered_mark_len(text: &str) -> Option<usize> {
+    let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+    let rest = &text.as_bytes()[digits..];
+    ((1..=9).contains(&digits) && matches!(rest, [b'.' | b')', b'\t', ..])).then_some(digits + 2)
+}
+
+/// The mark for the item after one marked `mark`: the next number for a
+/// numbered mark, the same mark otherwise.
+pub fn next_list_mark(mark: &str) -> String {
+    match numbered_mark_len(mark) {
+        Some(len) => {
+            let n: u64 = mark[..len - 2].parse().unwrap_or(0);
+            format!("{}{}", n.saturating_add(1), &mark[len - 2..len])
+        }
+        None => mark.to_string(),
+    }
+}
+
 /// Turn the `typed` bytes at the start of paragraph `para` into a list mark.
 pub fn start_list(doc: &mut Document, story: StoryId, para: usize, typed: usize, mark: char) {
     let mut p = doc.story(story).paras[para].clone();
@@ -775,7 +795,7 @@ pub fn start_list(doc: &mut Document, story: StoryId, para: usize, typed: usize,
 /// text. Returns the length of what went.
 pub fn end_list(doc: &mut Document, story: StoryId, para: usize) -> usize {
     let mut p = doc.story(story).paras[para].clone();
-    let Some(len) = list_mark_len(&p.text) else {
+    let Some(len) = list_mark_len(&p.text).or_else(|| numbered_mark_len(&p.text)) else {
         return 0;
     };
     p.remove(0, len);
@@ -998,6 +1018,13 @@ mod tests {
         assert_eq!(list_mark_len("-one"), None);
         assert_eq!(list_mark_len("\tone"), None);
         assert_eq!(list_mark_len(""), None);
+        assert_eq!(numbered_mark_len("1.\tone"), Some(3));
+        assert_eq!(numbered_mark_len("12)\tone"), Some(4));
+        assert_eq!(numbered_mark_len("1. one"), None);
+        assert_eq!(numbered_mark_len(".\tone"), None);
+        assert_eq!(next_list_mark("9.\t"), "10.\t");
+        assert_eq!(next_list_mark("3)\t"), "4)\t");
+        assert_eq!(next_list_mark("•\t"), "•\t");
         let mut d = doc(&["* one"]);
         start_list(&mut d, StoryId::Main, 0, 2, '•');
         assert_eq!(texts(&d), ["•\tone"]);

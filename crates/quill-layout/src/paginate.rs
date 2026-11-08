@@ -56,7 +56,14 @@ pub fn line_units(para: usize, l: &ParaLayout, top: f32) -> Vec<Unit> {
             para,
             line: li,
             top: if li == 0 { top } else { top + line.top },
-            bottom: top + line.top + line.height,
+            // A line holding only a page break takes no room on its page,
+            // so a break at the foot of a page cannot push itself onto the
+            // next page and leave one blank.
+            bottom: if line.hard_break && line.end - line.start == 1 {
+                top + line.top
+            } else {
+                top + line.top + line.height
+            },
             first: li == 0,
             last: li + 1 == n,
             hard_break: line.hard_break,

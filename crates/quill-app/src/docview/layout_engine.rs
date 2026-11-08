@@ -4,6 +4,16 @@ use super::sections::PageSections;
 use super::*;
 use quill_core::props::Twips;
 
+/// What a header or footer layout depends on besides its text and page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct HfBasis {
+    width: u32,
+    default_tab: u32,
+    show_hidden: bool,
+    show_changes: bool,
+    scripts: quill_core::ScriptSizes,
+}
+
 impl DocView {
     pub(super) fn options(&self) -> LayoutOptions {
         let p = &self.doc.props;
@@ -143,6 +153,20 @@ impl DocView {
             want[row.end] = 12.0;
             i = row.end + 1;
         }
+        // A frame with a set width has its paragraphs laid out at that
+        // width where frames are placed, so a caption under a picture wraps
+        // inside the frame. The last paragraph is never framed (see
+        // place_frame).
+        if self.frames_on() {
+            for (i, w) in want.iter_mut().enumerate().take(n.saturating_sub(1)) {
+                if paras[i].pap.in_table {
+                    continue;
+                }
+                if let Some(t) = paras[i].pap.frame.and_then(|f| f.width) {
+                    *w = (t as f32 / 20.0).clamp(12.0, *w);
+                }
+            }
+        }
         // Outline view indents each paragraph by its level. A table of
         // contents keeps its width, or its page numbers would wrap at the
         // right tab.
@@ -267,18 +291,28 @@ impl DocView {
     /// it is, and the page when it shows the page number.
     pub(super) fn hf_key(&self, story: StoryId, k: usize) -> (StoryId, usize, u32) {
         let source = self.doc.header_source(self.page_section_index(k));
-        let numbered = self
-            .page_header(story, k)
-            .paras
-            .iter()
-            .any(|p| p.text.contains(chars::FIELD_PAGE));
-        (story, source, if numbered { k as u32 + 1 } else { 0 })
+        (
+            story,
+            source,
+            hf_page_key(&self.page_header(story, k).paras, k),
+        )
     }
 
     /// Lay out the headers and footers the pages need.
     pub(super) fn layout_headers(&mut self, fonts: &mut Fonts, opts: &LayoutOptions) {
-        if self.hf_dirty {
+        // A header's layout depends on the text width, the tab stops, what
+        // is shown and how scripts are drawn, as well as on its text.
+        let basis = HfBasis {
+            width: opts.width.to_bits(),
+            default_tab: opts.default_tab.to_bits(),
+            show_hidden: opts.show_hidden,
+            show_changes: opts.show_changes,
+            scripts: opts.scripts,
+        };
+        if self.hf_dirty || self.hf_basis != Some(basis) {
             self.hf.clear();
+            self.hf_numbers.clear();
+            self.hf_basis = Some(basis);
             self.hf_dirty = false;
         }
         let fonts_table = self.doc.fonts.clone();
@@ -293,10 +327,18 @@ impl DocView {
                 let paras = &set[story.header_index()].paras;
                 let empty = paras.len() == 1 && paras[0].text.is_empty();
                 let key = (story, source, hf_page_key(paras, k));
-                if empty || self.hf.contains_key(&key) {
+                let (number, format) = pages.number[k];
+                // The page number only matters to a header that shows it.
+                let shown = if key.2 != 0 {
+                    (number, format)
+                } else {
+                    Default::default()
+                };
+                if empty
+                    || (self.hf.contains_key(&key) && self.hf_numbers.get(&key) == Some(&shown))
+                {
                     continue;
                 }
-                let (number, format) = pages.number[k];
                 let o = LayoutOptions {
                     page_number: number,
                     page_format: format,
@@ -307,6 +349,7 @@ impl DocView {
                     .map(|p| layout_paragraph_joined(p, &name, fonts, &o, Joins::default()))
                     .collect();
                 self.hf.insert(key, ls);
+                self.hf_numbers.insert(key, shown);
             }
         }
     }
@@ -452,7 +495,13 @@ impl DocView {
     pub(super) fn place(&mut self) {
         let paras = &self.doc.main.paras;
         let n = paras.len();
-        let height = |i: usize| self.layouts[i].as_ref().map_or(0.0, |l| l.height);
+        // A paragraph's height, less the empty line after a closing page
+        // break unless it is the last paragraph (see `break_tail`).
+        let height = |i: usize| {
+            self.layouts[i].as_ref().map_or(0.0, |l| {
+                l.height - if i + 1 < n { break_tail(l) } else { 0.0 }
+            })
+        };
         let mut tops = vec![0.0; n + 1];
         let mut xs = vec![0.0; n];
         let mut blocks: Vec<Block> = Vec::new();
@@ -528,7 +577,13 @@ impl DocView {
                     xs[p] = f.x;
                     fy += height(p);
                 }
-                clears.push(f.clear());
+                // A frame at the top of a page keeps no text out above it:
+                // that is the page before.
+                let mut clear = f.clear();
+                if !self.pages.is_empty() && self.on_page(f.y).2 <= 0.0 {
+                    clear.top = clear.top.max(f.y);
+                }
+                clears.push(clear);
                 i = f.last + 1;
                 frames.push(f);
                 continue;
@@ -828,13 +883,22 @@ impl DocView {
         // Lines of paragraphs, and table rows in slices that can go on
         // different pages.
         let mut units = Vec::new();
+        let n = self.doc.main.paras.len();
         for b in &self.blocks {
             match &b.row {
-                None => units.extend(paginate::line_units(
-                    b.first,
-                    self.layout(b.first),
-                    self.unpad(b.top),
-                )),
+                None => {
+                    let l = self.layout(b.first);
+                    units.extend(paginate::line_units(b.first, l, self.unpad(b.top)));
+                    // The empty line after a closing page break is placed
+                    // only at the end of the document; elsewhere the next
+                    // paragraph starts the new page.
+                    if b.first + 1 < n && break_tail(l) > 0.0 {
+                        units.pop();
+                        if let Some(u) = units.last_mut() {
+                            u.last = true;
+                        }
+                    }
+                }
                 Some(row) => units.extend(self.row_units(b, row)),
             }
         }
@@ -881,6 +945,18 @@ impl DocView {
             p.margin_bottom,
             p.widow_control,
         );
+    }
+}
+
+/// The height of the empty line a paragraph ending in a page break has
+/// after the break, or 0. That line holds the insertion point on the next
+/// page. Only the document's last paragraph gives it room, so a document
+/// that ends in a page break shows the page after it, while a break in
+/// the middle lets the next paragraph start at the top of the new page.
+fn break_tail(l: &ParaLayout) -> f32 {
+    match l.lines.as_slice() {
+        [.., before, last] if before.hard_break && last.start == last.end => last.height,
+        _ => 0.0,
     }
 }
 

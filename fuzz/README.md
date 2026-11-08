@@ -34,7 +34,8 @@ Run `python3 tools/overnight_fuzz.py` from the repository root under
 AddressSanitizer and checked arithmetic, and run each for three hours.
 Three targets run concurrently with three workers apiece. `--hours 8` instead
 shares eight hours, giving three quarters to the targets that read whole
-documents. Original sample documents are only read.
+documents. `--targets native,editing` runs only those targets, sharing the
+hours evenly between them. Original sample documents are only read.
 
 Character-style sources are made by `python3 tools/make_character_style_seeds.py`.
 Save them through Word into `fuzz/word-fixtures/2026-11-01/word`, then run

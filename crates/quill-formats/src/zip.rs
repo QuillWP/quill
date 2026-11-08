@@ -4,7 +4,10 @@
 use std::{cell::Cell, fmt};
 
 const MAX_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
-const MAX_ENTRIES: usize = 4096;
+/// More than a document within `quill_core::limits` writes: its pictures
+/// (`MAX_PICTURES`), each header and footer (`MAX_HEADERS`) with its list
+/// of pictures, and the dozen or so parts every document has.
+const MAX_ENTRIES: usize = 16_384;
 const MAX_ENTRY_BYTES: usize = 512 * 1024 * 1024;
 const MAX_EXPANDED_BYTES: usize = 1024 * 1024 * 1024;
 

@@ -95,6 +95,41 @@ class PackageTests(unittest.TestCase):
         for name in ["Quill.icns", "QuillDocument.icns", "quill-about.jpg"]:
             self.assertTrue((contents / "Resources" / name).is_file())
 
+    def test_debug_packages_are_a_different_app_from_the_real_one(self):
+        import plistlib
+        executable = Path(self.tmp.name) / "quill"
+        executable.write_bytes(b"executable")
+        info = plistlib.loads((package.ROOT / "tools/Info.plist").read_bytes())
+        (self.root / "tools/Info.plist").write_bytes(plistlib.dumps(info))
+
+        def fake_run(*args, **kwargs):
+            # hdiutil makes the disk image: its last argument.
+            if args and args[0] == "hdiutil" and args[1] == "create":
+                Path(args[-1]).write_bytes(b"image")
+
+        with patch.object(package, "ROOT", self.root), patch.object(package, "run", fake_run):
+            dmg = package.mac_package(executable, self.output, "1.2.3", "arm64", "-debug", True)
+            self.assertEqual(dmg.name, "Quill-1.2.3-macos-arm64-debug.dmg")
+            # Beside it the app is Quill Debug, never Quill, and says so.
+            self.assertFalse((self.output / "Quill.app").exists())
+            app = self.output / "Quill Debug.app"
+            info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+            self.assertEqual(info["CFBundleIdentifier"], "com.quillwp.Quill.debug")
+            self.assertEqual(info["CFBundleName"], "Quill Debug")
+            self.assertNotIn("CFBundleDocumentTypes", info)
+            # A release package is still Quill.
+            package.mac_package(executable, self.output, "1.2.3", "arm64")
+            info = plistlib.loads((self.output / "Quill.app/Contents/Info.plist").read_bytes())
+            self.assertEqual(info["CFBundleIdentifier"], "com.quillwp.Quill")
+            # A portable debug package registers nothing for Linux.
+            archive = package.portable_package(executable, self.output, "1.2.3", "linux", "aarch64",
+                                               "-debug", True)
+            with tarfile.open(archive) as bundle:
+                names = {name.rsplit("/", 1)[-1] for name in bundle.getnames()}
+            for name in ["quill.desktop", "install-linux.sh", "quill-mime.xml"]:
+                self.assertNotIn(name, names)
+            self.assertIn("quill", names)
+
 
 if __name__ == "__main__":
     unittest.main()

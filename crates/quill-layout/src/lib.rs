@@ -79,6 +79,40 @@ mod tests {
     }
 
     #[test]
+    fn a_line_break_at_the_end_of_a_paragraph_adds_an_empty_line() {
+        use quill_core::para::chars::LINE_BREAK;
+        let Some(mut f) = fonts() else { return };
+        let plain = lay(&para("abc", ParaProps::default()), 400.0, &mut f);
+        let text = format!("abc{LINE_BREAK}");
+        let l = lay(&para(&text, ParaProps::default()), 400.0, &mut f);
+        assert_eq!(plain.lines.len(), 1);
+        assert_eq!(l.lines.len(), 2);
+        // The new line is empty, as tall as the first, and holds the end.
+        let (first, last) = (&l.lines[0], &l.lines[1]);
+        assert_eq!((last.start, last.end), (text.len(), text.len()));
+        assert_eq!(last.first, last.last);
+        assert!((last.height - first.height).abs() < 0.01);
+        assert!((l.height - 2.0 * plain.height).abs() < 0.01);
+        assert_eq!(l.caret(text.len(), false).0, 1);
+        // A break in the middle adds nothing of the kind.
+        let mid = format!("a{LINE_BREAK}b");
+        assert_eq!(
+            lay(&para(&mid, ParaProps::default()), 400.0, &mut f)
+                .lines
+                .len(),
+            2
+        );
+        // Two breaks in a row are two empty lines after the text.
+        let two = format!("a{LINE_BREAK}{LINE_BREAK}");
+        assert_eq!(
+            lay(&para(&two, ParaProps::default()), 400.0, &mut f)
+                .lines
+                .len(),
+            3
+        );
+    }
+
+    #[test]
     fn long_text_wraps_at_spaces() {
         let Some(mut f) = fonts() else { return };
         let text = "The quick brown fox jumps over the lazy dog. ".repeat(6);

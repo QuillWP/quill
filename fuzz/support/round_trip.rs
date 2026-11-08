@@ -77,6 +77,18 @@ fn assert_same_named(doc: &Document, back: &Document, format: &str) {
 #[allow(dead_code)]
 pub fn check_supported(doc: &Document) {
     check_imported(doc);
+    // A .qwp save checks that it reads back unchanged, so edits must never
+    // leave a document it cannot keep exactly.
+    let qwp = quill_formats::native::read(&quill_formats::native::write(doc, 0)).unwrap();
+    assert!(qwp.main == doc.main, "QWP main text changed");
+    assert!(qwp.notes == doc.notes, "QWP footnotes changed");
+    assert!(qwp.headers == doc.headers, "QWP headers changed");
+    assert!(qwp.annotations == doc.annotations, "QWP comments changed");
+    assert!(qwp.styles == doc.styles, "QWP styles changed");
+    assert!(qwp.props == doc.props, "QWP settings changed");
+    assert!(qwp.section == doc.section, "QWP section changed");
+    assert!(qwp.objects == doc.objects, "QWP pictures changed");
+    assert!(qwp.fonts == doc.fonts, "QWP fonts changed");
     // Quill exports each comment as a continuous first-to-last range. Edits
     // can leave gaps in its internal per-character tags; that representation
     // is lossless in native saves but not an exchange-format feature.

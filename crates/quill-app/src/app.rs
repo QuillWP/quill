@@ -612,6 +612,9 @@ impl WinState {
                 _ => {}
             }
         }
+        if self.main_view().in_markdown_source() && action.changes_format() {
+            return Effect::None;
+        }
         match action {
             Action::None | Action::Window(_) => {}
             Action::About => return Effect::About,
@@ -630,6 +633,7 @@ impl WinState {
                 });
             }
             Action::Size(hp) => self.view.set_size(hp),
+            Action::Color(c) => self.view.set_color(c),
             Action::CellAlign(i) => {
                 if let Some(&(_, v, h)) = crate::docview::CELL_ALIGNMENTS.get(i) {
                     self.view.align_cells(v, h);
@@ -802,7 +806,9 @@ impl WinState {
             return Effect::None;
         }
         if self.show_ruler && cy < self.text_top() {
-            if bars::on_ruler(self.ruler_top(), cy) {
+            // The ruler sets indents, tabs and columns, which Markdown
+            // source does not have.
+            if bars::on_ruler(self.ruler_top(), cy) && !self.main_view().in_markdown_source() {
                 let grab = bars::scale_grab(&self.ruler_state(), self.ruler_top(), cx, cy);
                 // A double-click opens Tabs on a tab stop and Paragraph
                 // on an indent marker.
@@ -973,8 +979,12 @@ impl WinState {
         env: &Env,
         clip: &mut Clipboard,
     ) -> Effect {
+        // The bars only format, and Markdown source takes no formatting.
+        if self.main_view().in_markdown_source() {
+            return Effect::None;
+        }
         let cmd = match hit {
-            Hit::FontPopup | Hit::SizePopup | Hit::StylePopup => {
+            Hit::FontPopup | Hit::SizePopup | Hit::ColorPopup | Hit::StylePopup => {
                 self.open_popup(hit, label, env);
                 return Effect::None;
             }
@@ -2117,9 +2127,15 @@ impl App {
                     _ => false,
                 };
             if !keep {
+                // A window rebuilt in place stays where the person put it.
+                let top_left = match (&w.dialog, top) {
+                    (Some(native), Some(dialog)) => native.top_left_for(dialog),
+                    _ => None,
+                };
                 w.dialog = None;
                 if let Some(dialog) = top {
-                    w.dialog = crate::mac_dialog::NativeDialog::show(&w.window, depth, dialog);
+                    w.dialog =
+                        crate::mac_dialog::NativeDialog::show(&w.window, depth, dialog, top_left);
                 }
             }
             if let (Some(native), Some(dialog)) = (&mut w.dialog, top) {
@@ -2898,7 +2914,11 @@ impl App {
             }
             Effect::None
         };
-        if !matches!(cmd, Some(Cmd::PageUp | Cmd::PageDown)) {
+        // A bare Shift, Cmd, Ctrl or Alt press changes nothing in the
+        // document, so it must not pull the view back to the caret (it did
+        // on the way to a Cmd-Shift-3 screenshot).
+        let bare_modifier = cmd.is_none() && modifier;
+        if !bare_modifier && !matches!(cmd, Some(Cmd::PageUp | Cmd::PageDown)) {
             if let Some(fonts) = self.fonts.as_mut() {
                 w.st.view.update_layout(fonts);
             }
@@ -3344,10 +3364,13 @@ impl ApplicationHandler<UserEvent> for App {
         }
         if !self.recovered {
             self.recovered = true;
-            for (path, title, doc) in crate::recovery::load_all() {
-                self.new_window(el, doc, Some(format!("{title}{RECOVERED}")));
+            for r in crate::recovery::load_all() {
+                self.new_window(el, r.doc, Some(format!("{}{RECOVERED}", r.title)));
                 if let Some((_, window)) = self.windows.last_mut() {
-                    window.recovery = Some(path);
+                    window.recovery = Some(r.path);
+                    if let Some(original) = r.original {
+                        window.st.main_view_mut().resume_markdown_source(original);
+                    }
                 }
             }
         }
@@ -3555,9 +3578,11 @@ impl ApplicationHandler<UserEvent> for App {
                 for (_, w) in &mut self.windows {
                     if autosave && (w.group == 0 || w.holds) && w.st.main_view().doc.is_modified() {
                         serial = serial.wrapping_add(1);
+                        let (doc, original) = w.st.main_view().recovery_documents();
                         match crate::recovery::save(
                             w.recovery.as_deref(),
-                            &w.st.main_view().doc,
+                            &doc,
+                            original,
                             &w.st.main_view().title,
                             serial,
                         ) {
@@ -3950,7 +3975,12 @@ mod tests {
                 .iter()
                 .any(|it| actions.get(it.id as usize) == Some(&Action::ToolbarPosition(1)))
         );
-        for hit in [Hit::FontPopup, Hit::SizePopup, Hit::StylePopup] {
+        for hit in [
+            Hit::FontPopup,
+            Hit::SizePopup,
+            Hit::ColorPopup,
+            Hit::StylePopup,
+        ] {
             state.open_popup(hit, &mut label, &env);
             let rect = state.menu.as_ref().expect("a pop-up opens").open.rect;
             let (menu, _, at) = state.take_popup_menu().expect("the pop-up's menu");
@@ -5575,7 +5605,7 @@ mod tests {
         state.dialogs.push((
             Which::Preferences {
                 panel: crate::prefs_dialog::COLORS_PANEL,
-                fonts: Vec::new(),
+                families: Vec::new(),
                 original: Box::new(crate::settings::get()),
                 draft: Box::new(crate::settings::get()),
             },

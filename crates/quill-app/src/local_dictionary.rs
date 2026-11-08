@@ -87,11 +87,7 @@ impl Dictionary {
 
 pub fn path() -> Option<PathBuf> {
     crate::settings::with(|s| s.custom_dictionary.clone()).or_else(|| {
-        crate::settings::sibling(
-            "Quill Dictionary.txt",
-            "Quill Dictionary.txt",
-            "dictionary.txt",
-        )
+        crate::settings::sibling("Dictionary.txt", "Quill Dictionary.txt", "dictionary.txt")
     })
 }
 

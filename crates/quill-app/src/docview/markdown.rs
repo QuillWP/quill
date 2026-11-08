@@ -22,6 +22,14 @@ impl DocView {
         self.md_source.is_some()
     }
 
+    /// Whether the window's file is Markdown, in either view.
+    pub fn is_markdown_file(&self) -> bool {
+        self.path
+            .as_deref()
+            .and_then(quill_formats::Format::from_path)
+            == Some(quill_formats::Format::Markdown)
+    }
+
     /// The Markdown text being edited, in Source view.
     pub fn markdown_text(&self) -> Option<String> {
         self.md_source
@@ -55,6 +63,30 @@ impl DocView {
             return Some(s.original.compact_for_save());
         }
         Some(self.read_source().0)
+    }
+
+    /// What a crash recovery copy should hold. Outside Source view, the
+    /// window's document. In Source view with the text untouched, the
+    /// formatted document, since the text adds nothing to it. Edited, the
+    /// text as it is and the formatted document it was made from, both as
+    /// they are: reading the text as Markdown here would drop what it
+    /// cannot carry (a reference definition, say) before the person chose
+    /// to go back.
+    pub fn recovery_documents(&self) -> (std::borrow::Cow<'_, Document>, Option<&Document>) {
+        use std::borrow::Cow;
+        match &self.md_source {
+            None => (Cow::Borrowed(&self.doc), None),
+            Some(s) if !self.source_edited() => (Cow::Owned(s.original.compact_for_save()), None),
+            Some(s) => (Cow::Borrowed(&self.doc), Some(&s.original)),
+        }
+    }
+
+    /// Put a recovered Source view back: the window holds the source text
+    /// as it was left, and `original` is the formatted document it was
+    /// made from.
+    pub fn resume_markdown_source(&mut self, original: Document) {
+        let shown = markdown::write(&original);
+        self.md_source = Some(Box::new(MarkdownSource { original, shown }));
     }
 
     fn read_source(&self) -> (Document, quill_formats::report::ImportReport) {
@@ -158,6 +190,48 @@ mod tests {
     }
 
     #[test]
+    fn recovery_saves_the_formatted_document_not_the_source_text() {
+        let mut doc = Document::new();
+        let mut chp = doc.styles.get(0).chp;
+        chp.color = quill_core::Rgb(0xFF0000);
+        let pap = doc.styles.get(0).pap.clone();
+        doc.main.paras = vec![quill_core::Paragraph::with_text("Red text", chp, pap)];
+        doc.forget_history();
+        let mut view = DocView::new(doc, "Red".into());
+        // Outside Source view the window's own document is what is saved.
+        assert_eq!(view.recovery_documents().0.main.paras[0].text, "Red text");
+        assert!(view.recovery_documents().1.is_none());
+        view.show_markdown_source();
+        // Untouched, the saved copy is the formatted original, color and all.
+        let (saved, original) = view.recovery_documents();
+        assert!(original.is_none());
+        assert_eq!(saved.main.paras[0].text, "Red text");
+        assert_eq!(
+            saved.main.paras[0].chp_at(0).color,
+            quill_core::Rgb(0xFF0000)
+        );
+        drop(saved);
+        // Edited, it is the text as typed, beside the formatted original.
+        // A reference definition shows nothing once read as Markdown, so
+        // reading it here would lose it.
+        view.type_text("[draft]: https://example.com/a\n");
+        let (saved, original) = view.recovery_documents();
+        let text = markdown::source_text(&saved);
+        assert!(text.contains("[draft]: https://example.com/a"), "{text}");
+        let original = original.unwrap().clone();
+        assert_eq!(
+            original.main.paras[0].chp_at(0).color,
+            quill_core::Rgb(0xFF0000)
+        );
+        // Recovered, the window is back in Source view, edited.
+        let mut back = DocView::new(saved.into_owned(), "Red - Recovered".into());
+        back.resume_markdown_source(original);
+        assert!(back.in_markdown_source());
+        assert!(back.source_edited());
+        assert_eq!(markdown::source_text(&back.doc), text);
+    }
+
+    #[test]
     fn editing_the_source_rebuilds_the_document() {
         let mut view = view_of("plain *text*\n");
         view.show_markdown_source();
@@ -238,5 +312,99 @@ mod tests {
         view.show_markdown_source();
         let now = find(&view);
         assert!(now[0].1 && !now[1].1);
+    }
+
+    #[test]
+    fn text_pasted_into_the_source_is_in_the_source_font() {
+        use crate::commands::Cmd;
+        let mut clip = crate::docview::Clipboard::new();
+        // Copy a word in another font, at another size, in bold.
+        let mut other = Document::new();
+        let mut chp = other.styles.get(0).chp;
+        chp.font = other.font_id("Georgia");
+        chp.size = 48;
+        chp.bold = true;
+        let pap = other.styles.get(0).pap.clone();
+        other.main.paras = vec![quill_core::Paragraph::with_text("Pasted", chp, pap)];
+        let end = quill_core::Position::new(0, 6);
+        let frag = other.copy(
+            quill_core::StoryId::Main,
+            quill_core::Position::new(0, 0),
+            end,
+        );
+        clip.put(&other, frag);
+        let mut view = view_of("Some text\n");
+        view.show_markdown_source();
+        let source = view.doc.styles.get(0).chp;
+        view.exec(Cmd::Paste, false, &mut clip);
+        assert!(markdown::source_text(&view.doc).starts_with("Pasted"));
+        let p = &view.doc.main.paras[0];
+        for at in 0..p.len() {
+            let c = p.chp_of_char(at);
+            assert_eq!((c.font, c.size, c.bold), (source.font, source.size, false));
+        }
+    }
+
+    #[test]
+    fn formatting_commands_do_nothing_in_the_source() {
+        use crate::commands::Cmd;
+        let mut clip = crate::docview::Clipboard::new();
+        let mut view = view_of("Some text\n");
+        view.show_markdown_source();
+        view.exec(Cmd::SelectAll, false, &mut clip);
+        let before = view.doc.main.paras.clone();
+        for cmd in [
+            Cmd::Bold,
+            Cmd::LargerFontSize,
+            Cmd::AlignCenter,
+            Cmd::Nest,
+            Cmd::PlainText,
+        ] {
+            assert_eq!(view.exec(cmd, false, &mut clip), Effect::None, "{cmd:?}");
+        }
+        // The dialogs that would format open no more than the commands do.
+        for cmd in [Cmd::CharacterDialog, Cmd::ParagraphDialog, Cmd::StyleDialog] {
+            assert_eq!(view.exec(cmd, false, &mut clip), Effect::None, "{cmd:?}");
+        }
+        assert_eq!(view.doc.main.paras, before);
+        assert!(!view.doc.is_modified());
+        // Plain editing still works.
+        view.exec(Cmd::DocEnd, false, &mut clip);
+        view.type_text("!");
+        assert!(view.doc.is_modified());
+        // Back in the formatted view, Bold works again.
+        let mut view = view_of("Some text\n");
+        view.exec(Cmd::SelectAll, false, &mut clip);
+        view.exec(Cmd::Bold, false, &mut clip);
+        assert!(view.doc.main.paras[0].chp_of_char(0).bold);
+    }
+
+    #[test]
+    fn text_pasted_into_a_markdown_file_takes_the_format_where_it_goes() {
+        use crate::commands::Cmd;
+        let mut clip = crate::docview::Clipboard::new();
+        let mut other = Document::new();
+        let mut chp = other.styles.get(0).chp;
+        chp.font = other.font_id("Georgia");
+        chp.size = 48;
+        chp.bold = true;
+        let pap = other.styles.get(0).pap.clone();
+        other.main.paras = vec![quill_core::Paragraph::with_text("Pasted", chp, pap)];
+        let frag = other.copy(
+            quill_core::StoryId::Main,
+            quill_core::Position::new(0, 0),
+            quill_core::Position::new(0, 6),
+        );
+        clip.put(&other, frag);
+        let mut view = view_of("Some text\n");
+        view.path = Some("notes.md".into());
+        let here = view.doc.main.paras[0].chp_at(0);
+        view.exec(Cmd::Paste, false, &mut clip);
+        let p = &view.doc.main.paras[0];
+        assert!(p.text.starts_with("Pasted"));
+        for at in 0..p.len() {
+            let c = p.chp_of_char(at);
+            assert_eq!((c.font, c.size, c.bold), (here.font, here.size, here.bold));
+        }
     }
 }

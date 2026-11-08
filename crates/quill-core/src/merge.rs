@@ -457,9 +457,17 @@ fn merge_using(
                     out.push(p);
                 }
                 Item::Field(f, chp) => {
-                    let upper = f.to_uppercase();
-                    let word = upper.split_whitespace().next().unwrap_or("");
-                    let rest = f[word.len().min(f.len())..].trim();
+                    // The instruction word and the rest, split before
+                    // upper-casing: a letter can change its length in
+                    // upper case, so the length of the word's upper-case
+                    // form is not a place in the original text.
+                    let text = f.trim_start();
+                    let (first, rest) = match text.split_once(char::is_whitespace) {
+                        Some((first, rest)) => (first, rest.trim()),
+                        None => (text, ""),
+                    };
+                    let upper = first.to_uppercase();
+                    let word = upper.as_str();
                     let value = |name: &str| {
                         sets.get(&name.to_lowercase())
                             .cloned()
@@ -686,6 +694,17 @@ mod tests {
         assert!(read(&table, 3, 8).unwrap_err().contains("cells"));
         assert!(read(&table, 4, 7).unwrap_err().contains("text"));
         assert!(Data::from_document(&doc("")).unwrap().fields.is_empty());
+    }
+
+    #[test]
+    fn a_field_name_that_changes_length_in_capitals_does_not_panic() {
+        // The dotless i is two bytes, and one in capitals, so three of them
+        // used to cut a letter in half. The first line is a field named so.
+        let main = doc("«DATA people»\n«\u{131}\u{131}\u{131}» «\u{149}\u{149} x»");
+        let data = Data::from_document(&doc("Name\nAda")).unwrap();
+        let (_, errors) = merge(&main, &data, None);
+        // They are not fields in the data, and the merge says so.
+        assert_eq!(errors.len(), 2, "{errors:?}");
     }
 
     #[test]

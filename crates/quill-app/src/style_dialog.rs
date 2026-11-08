@@ -157,7 +157,7 @@ fn select(st: &mut StyleState, d: &mut Dialog, view: &DocView, i: usize) {
             st.pap = s.pap.clone();
             st.chp = s.own();
             st.character = s.character;
-            d.set_field("name", &s.name);
+            d.set_field("name", &s.display_name());
             d.set_selected("basedon", at(s.based_on));
             d.set_selected("next", if s.next == id { 0 } else { at(Some(s.next)) });
             d.enable("delete", !s.builtin);
@@ -174,7 +174,7 @@ fn choice_names(view: &DocView, choices: &[StyleId]) -> Vec<String> {
         .chain(
             choices
                 .iter()
-                .map(|&id| view.doc.styles.get(id).name.clone()),
+                .map(|&id| view.doc.styles.get(id).display_name()),
         )
         .collect()
 }
@@ -184,7 +184,7 @@ fn entry_names(view: &DocView, entries: &[Option<StyleId>]) -> Vec<String> {
         .iter()
         .map(|entry| match entry {
             None => "New Style".to_string(),
-            Some(id) => view.doc.styles.get(*id).name.clone(),
+            Some(id) => view.doc.styles.get(*id).display_name(),
         })
         .collect()
 }
@@ -318,14 +318,15 @@ pub fn define(st: &mut StyleState, d: &mut Dialog, view: &mut DocView) -> Option
                     .doc
                     .add_style(&name, based.unwrap_or(0), next, pap.clone(), chp),
             };
-            view.doc
-                .redefine_style_linked(StoryId::Main, id, pap, chp, st.character);
+            view.doc.redefine_style_linked(id, pap, chp, st.character);
             view.doc.commit(view.sel);
             id
         }
         Some(id) => {
             let s = view.doc.styles.get(id);
-            let new_name = if name.is_empty() {
+            // The field shows the title-case name of an automatic style;
+            // leaving it alone must not change the stored name.
+            let new_name = if name.is_empty() || name == s.display_name() {
                 s.name.clone()
             } else {
                 name
@@ -342,13 +343,8 @@ pub fn define(st: &mut StyleState, d: &mut Dialog, view: &mut DocView) -> Option
                 s.pap != st.pap || s.own() != chp || s.character != st.character;
             view.doc.begin("Define Style", view.sel);
             if formatting_changed {
-                view.doc.redefine_style_linked(
-                    StoryId::Main,
-                    id,
-                    st.pap.clone(),
-                    chp,
-                    st.character,
-                );
+                view.doc
+                    .redefine_style_linked(id, st.pap.clone(), chp, st.character);
             }
             view.doc
                 .rename_style(id, &new_name, based, next.unwrap_or(id));
@@ -396,7 +392,7 @@ pub fn delete(st: &mut StyleState, d: &mut Dialog, view: &mut DocView) {
         return;
     }
     view.doc.begin("Delete Style", view.sel);
-    view.doc.delete_style(StoryId::Main, id);
+    view.doc.delete_style(id);
     view.doc.commit(view.sel);
     view.invalidate_layout();
     st.choices = sorted(&view.doc, 0..view.doc.styles.styles.len() as StyleId);
@@ -451,7 +447,7 @@ pub fn reapply_ok(id: StyleId, d: &Dialog, view: &mut DocView) -> bool {
         let pap = view.current_pap().clone();
         let chp = view.current_chp();
         view.doc.begin("Define Style", view.sel);
-        view.doc.redefine_style(StoryId::Main, id, pap, chp);
+        view.doc.redefine_style(id, pap, chp);
         view.doc.commit(view.sel);
         view.invalidate_layout();
     } else {
@@ -664,9 +660,9 @@ fn describe_component(
     let body = parts.join(", ");
     match base {
         Some(b) => {
-            let name = &doc.styles.get(b).name;
+            let name = doc.styles.get(b).display_name();
             if body.is_empty() {
-                name.clone()
+                name
             } else {
                 format!("{name} + {body}")
             }

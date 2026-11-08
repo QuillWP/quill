@@ -23,6 +23,29 @@ pub struct Style {
 }
 
 impl Style {
+    /// The name as shown to the person. Word's automatic styles are stored
+    /// in lower case ("heading 1", "toc 2") so files keep matching them, but
+    /// they read as titles on screen, like Normal does.
+    pub fn display_name(&self) -> String {
+        if !self.builtin {
+            return self.name.clone();
+        }
+        self.name
+            .split(' ')
+            .map(|word| {
+                if word == "toc" {
+                    return "TOC".to_string();
+                }
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().chain(chars).collect(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// The style's own character formatting: `chp` itself unless a
     /// character style is linked.
     pub fn own(&self) -> CharProps {
@@ -396,5 +419,16 @@ mod tests {
         assert_eq!(s.heading_level(s.find("heading 3").unwrap()), Some(3));
         assert_eq!(s.heading_level(NORMAL), None);
         assert_eq!(s.get(s.find("heading 1").unwrap()).next, NORMAL);
+    }
+
+    #[test]
+    fn automatic_styles_show_in_title_case_but_keep_their_stored_names() {
+        let s = sheet();
+        let name = |stored: &str| s.get(s.find(stored).unwrap()).display_name();
+        assert_eq!(name("heading 1"), "Heading 1");
+        assert_eq!(name("toc 2"), "TOC 2");
+        assert_eq!(name("footnote text"), "Footnote Text");
+        assert_eq!(name("Normal"), "Normal");
+        assert_eq!(s.get(s.find("heading 1").unwrap()).name, "heading 1");
     }
 }

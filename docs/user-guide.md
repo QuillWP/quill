@@ -1,8 +1,7 @@
 # Quill
 
-Quill Word Processor, shortened to Quill, is inspired by Lucas's favorite
-word processor from 1992. It is built in Rust for the Mac, and a Windows
-build is on its way.
+Quill is inspired by Lucas's favorite word processor from 1992. It is built
+in Rust for the Mac, and a Windows build is on its way.
 The website is [quillwp.com](https://quillwp.com).
 Documents use `.qwp`.
 Alpha builds do not import earlier versions' settings, glossary, dictionary or
@@ -60,6 +59,11 @@ Markdown text to edit; View > Markdown > WYSIWYG shows it formatted. Going back 
 WYSIWYG without changing the text gives the document back exactly; after editing the text, the
 document is rebuilt from it.
 
+Paste puts text only into a Markdown file, in either view: the copied text's fonts and pictures
+are not brought along. In a Markdown file, Return carries on a numbered list with the next
+number, Return on an empty item ends the list, and Return on an empty paragraph in a quote takes
+it out of the quote, one level each time.
+
 DOCX itself can carry all the document content of Lucas's favorite word
 processor from 1992 that Quill implements. Three Quill preferences have no
 standard DOCX equivalent (margin page numbers, Include Endnotes and Print
@@ -72,6 +76,58 @@ Word also normalizes two otherwise-unused pieces of state from that era: it
 changes frames positioned vertically from a margin to its own default
 anchor, and discards a stored indent while a table row is centered or
 right-aligned. Quill includes those cases in the same targeted warning.
+
+## Grep, Regex Search and Sed
+
+Edit > Advanced has three pattern tools for people who know `grep` and `sed`.
+They are built into Quill, so they work the same on macOS, Windows and Linux
+and need no other program. All three treat each paragraph as a line.
+
+Patterns use the extended regular expression syntax of Rust's `regex` crate:
+`.`, `[a-z]`, `[^0-9]`, `*`, `+`, `?`, `{2,5}`, `|`, `^`, `$`, `\d`, `\w`,
+`\s`, `\b`, `(...)` for groups and `(?i)` for ignoring case. Write groups as
+`(...)`, not `\(...\)`. `\w`, `\d` and `\b` understand accented and
+non-Latin letters. Not supported: look-ahead and look-behind, back-references
+inside a pattern (`(a)\1`) and `\p{L}`-style classes. Quill says so when a
+pattern uses one.
+
+**Grep** lists the paragraphs that match, with their paragraph numbers.
+Click a row, or choose Go To, to select the first match in that paragraph
+and scroll to it. Ignore Case, Whole Word (`grep -w`) and Invert Match
+(`grep -v`) are check boxes. Only the main text is searched, not footnotes,
+headers or comments. Text that tracked changes show as deleted is searched
+too.
+
+**Regex Search** is Find and Replace with regular expressions. Find Next
+selects the next match after the selection and wraps to the top at the end.
+Replace changes the selected match, if it is one, and moves to the next.
+Replace All changes every match in the document or the selection as one
+step that Undo takes back. The replacement reads `&` (the whole match), `\1`
+to `\9`, `\n` and `\t` as in Sed. A match is within one paragraph, and an
+empty match is skipped. Ignore Case and Whole Word are check boxes.
+
+**Sed** runs a script of `s` (substitute) commands on the document or the
+selection, as one step that Undo takes back.
+
+- `s/old/new/` changes the first match in each paragraph, and `s/old/new/g`
+  every match. A number flag changes only that match (`s/a/b/2`), and `2g`
+  that one and all after it. `i` ignores case.
+- Any character can be the delimiter: `s|/usr|/opt|`.
+- In the replacement, `&` is the whole match, `\1` to `\9` are groups, `\n` is
+  a new paragraph, `\t` is a tab and `\&` and `\\` are the characters
+  themselves.
+- Put `;` or a new line between commands. Each command works on the text the
+  one before it left.
+- An address limits a command to some paragraphs: `3s/a/b/`, `3,7s/a/b/`,
+  `3,$s/a/b/`, `$s/a/b/` (the last paragraph) and `/word/s/a/b/` (paragraphs
+  that match). Paragraph numbers count from 1 and are read when the command
+  runs.
+- Other sed commands (`d`, `y`, `p` and so on) and `\U`, `\L` in a
+  replacement are not supported, and the script is not run if it uses one.
+
+New text takes the character format of the text it replaces. With Apply to
+set to Selection, only matches wholly inside the selection change; `^` and
+`$` still mean the start and end of the paragraph.
 
 ## Tracked changes
 
@@ -126,7 +182,14 @@ so anything Quill opens can be saved as .qwp, .docx or RTF and opened again. A
 larger file is refused with the reason, and so is a paste that would take a
 document past the limit. Before Save replaces a file, Quill reads the result back,
 and if it couldn't open it again the save is refused and the file on disk is left
-as it was. A document this large is too big for the ODT and HTML exports, which
+as it was. A .qwp file must also come back exactly as it was saved, since Quill's
+own format keeps everything. If it doesn't, the message says which part changed,
+and for the main text Quill selects the first paragraph that came back different;
+retyping it or removing its formatting may let the document save. Save Anyway
+saves the document as Quill reads it back, so the file still opens, and the window
+then shows what it holds. Undo takes that change back, except when fonts or
+pictures changed, which the message says first. The file as it was is kept as
+"Backup of" its name, even when backups are turned off. A document this large is too big for the ODT and HTML exports, which
 say so.
 
 Measurements a file can't sensibly mean, such as margins wider than the page, are
@@ -179,6 +242,8 @@ the start of a paragraph makes a bulleted or dashed list, and Undo gives back wh
 In any list, Return starts the next item, Return on an empty item ends the list, and
 Backspace at the start of an item takes off its bullet and keeps the text.
 
+The Fonts panel sets the font, style (the faces the chosen font has) and size of new documents.
+
 ## Platform interface
 
 The percentage field at the right of the top toolbar changes document zoom.
@@ -199,7 +264,9 @@ link. Clicking inside selected text preserves the selection; clicking elsewhere 
 the insertion point. On a link, the menu has Edit Hyperlink and Remove Hyperlink; on other
 selected text, it has Hyperlink. In a table it adds Delete (Row, Column, Cell), Insert Cell
 Before and After, Split Cell, and Merge Cells when more than one cell is selected. The
-toolbar's font name previews its face.
+toolbar's font name previews its face. Beside the font size, the Color pop-up shows the
+selection's color and offers the original's eight colors, the colors named in Preferences >
+Colors, and More Colors…, which opens the Character dialog.
 
 A new table has real borders that print, thin and black unless `table_border_color` or
 `table_border_dotted` in the settings file say otherwise. Those are only the starting point:
@@ -277,7 +344,7 @@ color shows its name. Preferences > View has Interface Size, and Advanced has Sm
 
     cargo build --release               # target/release/quill
     python3 tools/package.py            # the Mac app, in target/release/Quill.app
-    python3 tools/package.py --debug    # a debug build, in target/debug/Quill.app
+    python3 tools/package.py --debug    # a debug build, in target/debug/Quill Debug.app
     python3 tools/package.py --dist     # the disk image to share, in dist/
     python3 tools/footprint.py          # sizes and memory against the budget
 

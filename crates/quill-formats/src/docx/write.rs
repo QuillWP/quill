@@ -41,11 +41,19 @@ fn pictures(doc: &Document) -> Vec<(u32, String)> {
         .filter(|&k| doc.has_own_headers(k))
         .flat_map(|k| doc.headers_of(k).iter())
         .collect();
+    // Every story that is written: the notes and comments hold pictures
+    // too, and a picture missing from here is lost on saving.
     let mut ids: Vec<u32> = std::iter::once(&doc.main)
+        .chain([&doc.notes, &doc.annotations])
         .chain(doc.headers.iter())
         .chain(own)
         .flat_map(|s| s.paras.iter())
-        .flat_map(|p| p.runs.iter().map(|r| r.chp.object))
+        .flat_map(|p| {
+            p.text
+                .char_indices()
+                .filter(|&(_, c)| c == quill_core::para::chars::OBJECT)
+                .map(|(at, _)| p.chp_of_char(at).object)
+        })
         .filter(|&id| doc.picture(id).is_some())
         .collect();
     ids.sort();
@@ -183,6 +191,12 @@ pub fn write(doc: &Document, now: u64) -> Vec<u8> {
             "word/commentsExtended.xml",
             comments_extended_xml(doc).as_bytes(),
         );
+        if !pics.is_empty() {
+            let r = format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{pic_rels}</Relationships>"#
+            );
+            z.add("word/_rels/comments.xml.rels", r.as_bytes());
+        }
     }
     if notes {
         z.add(

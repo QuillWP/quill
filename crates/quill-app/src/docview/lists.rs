@@ -1,10 +1,12 @@
 //! Bulleted paragraphs as you type: Return carries the bullet on or ends
 //! the list, Backspace takes it off, and "* " or "- " starts one. A bullet
 //! is typed text (see `tools::bullet`), a mark and a tab that act as one.
+//! In a Markdown file numbered items work the same way, and Return on an
+//! empty paragraph in a quote takes it out of the quote.
 
 use super::*;
 use quill_core::CharProps;
-use quill_core::tools::{end_list, list_mark_len, start_list};
+use quill_core::tools::{end_list, list_mark_len, next_list_mark, numbered_mark_len, start_list};
 
 impl DocView {
     /// The length of the list mark of paragraph `para`, if it has one.
@@ -12,7 +14,12 @@ impl DocView {
         if self.in_markdown_source() {
             return None;
         }
-        list_mark_len(&self.doc.main.paras[para].text)
+        let text = &self.doc.main.paras[para].text;
+        list_mark_len(text).or_else(|| {
+            self.is_markdown_file()
+                .then(|| numbered_mark_len(text))
+                .flatten()
+        })
     }
 
     /// Where the caret lands moving to `next`: never between a list mark
@@ -64,7 +71,29 @@ impl DocView {
     pub(super) fn list_mark_to_carry(&self, at: Position) -> Option<(String, CharProps)> {
         let len = self.list_mark(at.para).filter(|len| at.offset >= *len)?;
         let p = &self.doc.main.paras[at.para];
-        Some((p.text[..len].to_string(), p.chp_of_char(0)))
+        Some((next_list_mark(&p.text[..len]), p.chp_of_char(0)))
+    }
+
+    /// Whether the caret is in an empty paragraph of a quote, in a Markdown
+    /// file.
+    pub(super) fn on_empty_quote(&self) -> bool {
+        let p = &self.doc.main.paras[self.sel.focus.para];
+        self.sel.is_empty()
+            && self.is_markdown_file()
+            && !self.in_markdown_source()
+            && p.is_empty()
+            && !p.pap.in_table
+            && p.pap.borders.left.style != quill_core::props::BorderStyle::None
+    }
+
+    /// Take the caret's paragraph out of one level of quote.
+    pub(super) fn leave_quote_here(&mut self) {
+        let para = self.sel.focus.para;
+        self.doc.begin("Quote", self.sel);
+        self.doc.format_paras(MAIN, para, para, |pap| {
+            quill_formats::markdown::leave_quote(pap);
+        });
+        self.finish_edit(self.sel);
     }
 
     /// After a space: "* " or "- " at the start of a paragraph starts a
@@ -193,5 +222,34 @@ mod tests {
         v.type_text(" ");
         crate::settings::update(|s| s.auto_lists = true);
         assert_eq!(texts(&v), ["* "]);
+    }
+
+    #[test]
+    fn return_on_empty_items_and_quotes_steps_out_of_a_markdown_file_s_blocks() {
+        let mut clip = Clipboard::without_system();
+        let (doc, _) = quill_formats::markdown::read("> Quoted\n>\n> 1. one\n", None);
+        let mut v = DocView::new(doc, "Notes".into());
+        v.path = Some("notes.md".into());
+        let last = v.doc.main.paras.len() - 1;
+        let end = v.doc.main.paras[last].len();
+        v.sel = Selection::caret(Position::new(last, end));
+        // Return carries the next number.
+        v.exec(Cmd::NewParagraph, false, &mut clip);
+        assert_eq!(v.doc.main.paras[last + 1].text, "2.\t");
+        // On the empty item it ends the list, still in the quote.
+        v.exec(Cmd::NewParagraph, false, &mut clip);
+        assert_eq!(v.doc.main.paras.len(), last + 2);
+        assert_eq!(v.doc.main.paras[last + 1].text, "");
+        // Once more and it is out of the quote, back to normal text.
+        v.exec(Cmd::NewParagraph, false, &mut clip);
+        v.type_text("Plain");
+        let md = quill_formats::markdown::write(&v.doc);
+        assert!(md.contains("> 1. one"), "{md}");
+        assert!(md.trim_end().ends_with("\n\nPlain"), "{md}");
+        // Not in an ordinary document: there a numbered line is just text.
+        let mut v = view("1.\tone");
+        v.sel = Selection::caret(Position::new(0, 6));
+        v.exec(Cmd::NewParagraph, false, &mut clip);
+        assert_eq!(texts(&v), ["1.\tone", ""]);
     }
 }

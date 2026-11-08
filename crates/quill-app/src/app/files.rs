@@ -453,23 +453,102 @@ impl App {
                 (None, _) => quill_formats::save(&view.doc, &path, format),
             }
         };
-        match saved {
-            Ok(()) => {
-                record_saved_file(w.st.main_view_mut(), &path, chosen);
-                crate::recovery::remove(w.recovery.take());
-                w.window.request_redraw();
-                self.retitle();
-                crate::recent::note(&mut self.recent, &path);
-                true
-            }
-            Err(error) => {
+        if let Err(error) = saved {
+            let check = (format == Format::Quill && w.st.main_view().markdown_text().is_none())
+                .then(|| quill_formats::native_check(&w.st.main_view().doc))
+                .flatten();
+            let name = file_name(&path);
+            // Anything else: the file on disk stays as it was.
+            let Some((loss, back)) = check else {
                 alert(
-                    &format!("Quill could not save \u{201c}{}\u{201d}.", file_name(&path)),
+                    &format!("Quill could not save \u{201c}{name}\u{201d}."),
                     &error,
                 );
-                false
+                return false;
+            };
+            // A .qwp that doesn't read back exactly: show the paragraph at
+            // fault, and offer to save the document as it reads back.
+            let view = w.st.main_view_mut();
+            if let Some(para) = loss.para {
+                select_paragraph(view, para);
+                w.window.request_redraw();
+            }
+            let keeps_undo = view.doc.can_match_saved(&back);
+            let backup = format!("Backup of {name}");
+            let detail = format!(
+                "{error}{}\n\nSave Anyway saves the document as Quill reads it back. The file \
+                 will open, and this window then shows what it holds, so you can check it and \
+                 fix what changed by hand. {}{}",
+                if loss.para.is_some() {
+                    "\n\nQuill has selected that paragraph."
+                } else {
+                    ""
+                },
+                if keeps_undo {
+                    "Undo takes the change back."
+                } else {
+                    "This clears Undo, because the fonts or pictures changed."
+                },
+                if path.exists() {
+                    format!(" The file as it was is kept as \u{201c}{backup}\u{201d}.")
+                } else {
+                    String::new()
+                },
+            );
+            if !super::ask(
+                &format!("Quill could not save \u{201c}{name}\u{201d} exactly."),
+                &detail,
+                "Save Anyway",
+            ) {
+                return false;
+            }
+            // Keep the old file even when backups are off, since this save
+            // knowingly changes something.
+            let backed_up = crate::settings::with(|settings| settings.make_backup);
+            if !backed_up
+                && path.exists()
+                && let Err(error) = quill_formats::copy_atomic(&path, &path.with_file_name(&backup))
+            {
+                alert(
+                    &format!("Quill could not make a backup of \u{201c}{name}\u{201d}."),
+                    &format!("{error}\n\nThe document was not saved, so the file is unchanged."),
+                );
+                return false;
+            }
+            let w = &mut self.windows[i].1;
+            let view = w.st.main_view_mut();
+            let back = match quill_formats::save_anyway(&view.doc, &path) {
+                Ok(back) => back,
+                Err(error) => {
+                    alert(
+                        &format!("Quill could not save \u{201c}{name}\u{201d}."),
+                        &error,
+                    );
+                    return false;
+                }
+            };
+            if !view.doc.match_saved(&back, "Save Anyway", view.sel) {
+                // Undo cannot take this back, so the window reopens the
+                // file as it is now.
+                w.st.close_pane();
+                w.st.view = DocView::new(back, name.clone());
+                w.st.view.open_in_its_view();
+            }
+            let view = w.st.main_view_mut();
+            view.invalidate_layout();
+            if let Some(para) = loss.para {
+                select_paragraph(view, para.min(view.doc.main.paras.len() - 1));
+            } else {
+                view.clamp_selection();
             }
         }
+        let w = &mut self.windows[i].1;
+        record_saved_file(w.st.main_view_mut(), &path, chosen);
+        crate::recovery::remove(w.recovery.take());
+        w.window.request_redraw();
+        self.retitle();
+        crate::recent::note(&mut self.recent, &path);
+        true
     }
 
     /// Ask whether to save changes before a window closes.
@@ -554,6 +633,16 @@ fn save_format_warning(doc: &quill_core::Document, format: Format, chosen: bool)
 }
 
 /// Every successful Save As adopts the destination and its saved point.
+/// Select paragraph `para` of the main text and scroll to it.
+fn select_paragraph(view: &mut DocView, para: usize) {
+    let end = view.doc.main.paras[para].len();
+    view.set_selection(Selection::new(
+        quill_core::Position::new(para, 0),
+        quill_core::Position::new(para, end),
+    ));
+    view.scroll_to_caret();
+}
+
 fn record_saved_file(view: &mut DocView, path: &Path, chosen: bool) {
     view.doc.mark_saved();
     view.title = file_name(path);
@@ -849,7 +938,7 @@ mod tests {
             )
             .unwrap();
         let (pap, own) = (doc.styles.get(0).pap.clone(), doc.styles.get(0).chp);
-        doc.redefine_style_linked(StoryId::Main, 0, pap, own, callout);
+        doc.redefine_style_linked(0, pap, own, callout);
         for format in [Format::Docx, Format::Rtf, Format::Odt, Format::Text] {
             let warning = super::save_format_warning(&doc, format, true).unwrap();
             assert!(

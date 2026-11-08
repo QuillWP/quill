@@ -5,7 +5,7 @@
 	<key>CFBundleName</key>
 	<string>Quill</string>
 	<key>CFBundleDisplayName</key>
-	<string>Quill Word Processor</string>
+	<string>Quill</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.quillwp.Quill</string>
 	<key>CFBundleVersion</key>
@@ -86,7 +86,7 @@
 			<key>UTTypeIdentifier</key>
 			<string>com.quillwp.document</string>
 			<key>UTTypeDescription</key>
-			<string>Quill Word Processor Document</string>
+			<string>Quill Document</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>public.data</string>
@@ -106,6 +106,6 @@
 		</dict>
 	</array>
 	<key>NSHumanReadableCopyright</key>
-	<string>Quill Word Processor contributors</string>
+	<string>Copyright © 2026 Lucas Krupinski and Quill contributors</string>
 </dict>
 </plist>

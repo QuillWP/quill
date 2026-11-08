@@ -310,6 +310,12 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
         // resolved state (commentsExtended.xml) refer to.
         let mut by_para: HashMap<String, u32> = HashMap::new();
         if let Some(root) = part(&path)? {
+            // The comments have their own relationships, for their pictures
+            // and links; the ones left from the notes are not theirs.
+            let (cdir, cfile) = path.rsplit_once('/').unwrap_or(("", &path));
+            let crels = part(&format!("{cdir}/_rels/{cfile}.rels"))?;
+            r.images = load_images(&zip, crels.as_ref(), &format!("{cdir}/"));
+            r.links = load_links(crels.as_ref());
             for c in root.elements() {
                 let Some(&id) = r.comment_ids.get(c.attr("id").unwrap_or_default()) else {
                     continue;
@@ -3477,7 +3483,6 @@ mod tests {
         let normal = doc.styles.get(0).clone();
         let font = doc.font_id("Helvetica");
         doc.redefine_style(
-            StoryId::Main,
             0,
             normal.pap,
             CharProps {
