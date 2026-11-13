@@ -11,7 +11,7 @@ publish.workspace = true
 [dependencies]
 quill-core.workspace = true
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
-quick-xml = { version = "0.42", default-features = false, features = ["escape-html"] }
+quick-xml = { version = "0.42", default-features = false }
 # Pictures in formats Quill turns into PNG as they come in (BMP is read by
 # hand): pure Rust decoders from the image-rs project.
 gif = { version = "0.14", default-features = false, features = ["std"] }

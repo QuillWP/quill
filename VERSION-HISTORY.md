@@ -7,40 +7,52 @@ Add an entry for every new tag as part of the release process.
 
 Versions 0.1.0 to 0.14.0 were all tagged on 2026-11-05.
 
-## 0.17.0 - 2026-11-11
+## 0.18.0 - 2026-11-11
 
-Font sources get their own preferences, Linux windows and appearance behave,
-and Format > Style becomes a Paragraph Styles list.
+A security and robustness pass: hard limits on hostile files, faster readers,
+writers that stop at the size limits, large files split up, and questions
+before risky saves.
 
-- Additional font sources move into Preferences > Fonts, and a macOS app
-  bundle can be a source (only its Resources and Library/Fonts are searched).
-- Preferences > Fonts has Markdown settings: the font and size of Source view
-  (default Courier New 10) and the body font and size of Markdown files
-  (default New York 12). Open documents take a change in place without being
-  marked modified.
-- Sources are added one at a time in the order they were added. A family the
-  system already has keeps its own faces, and a later copy is left out whole.
-- A source that has been moved or deleted is dropped from the list. Choose
-  refuses the top of a disk, the home folder and system and program folders.
-  One search visits at most 2,000 folders and 20,000 font files, and runs on a
-  thread of its own so the window does not stop.
-- Add Source is greyed out while a row is still waiting for its folder.
-- Windows open through X11 (XWayland on a Wayland desktop) so they get the
-  theme's title bar and GTK's menu bar. QUILL_BACKEND=wayland keeps native
-  Wayland windows.
-- The debug program is quill-debug, with its own window class and app ID.
-- Auto appearance follows GNOME's color-scheme setting (or a -dark GTK theme,
-  or GTK_THEME). The Style Sheets window stays above the documents without
-  taking the keyboard, and the palette's chosen row starts over when another
-  document comes to the front.
-- Style Sheets moves from View to Window. The Character Styles menu is gone;
-  Character Styles... is in Format.
-- Format > Style is now Paragraph Styles... (still Command-T): a list with
-  This Document or All Styles, the style's description and use count, and New,
-  Edit and Delete. OK in the editor saves the style without restyling the
-  selection; Apply saves it and also gives it to the selected paragraphs.
-- Deleting a style that paragraphs use asks what they become: No Style
-  (Normal) or another style.
+- Invalid headers nested inside native stories are dropped. Go To page
+  arithmetic saturates, and dialog values, Renumber starts and roman numerals
+  stay within the document limits.
+- Picture metadata, format numbers and .docx list number text are bounded,
+  with checked arithmetic.
+- The .odt reader charges every paragraph to the read budget, so a small file
+  of millions of empty paragraphs, or a text:s element that makes a billion
+  spaces, is refused with the usual too-large message in about 0.2 s. Unique
+  pictures are counted as .docx and .odt readers decode them.
+- The .qwp, .docx and .odt writers and the Markdown table writer stop building
+  a document once it passes the size limits. Oversized Markdown stays in
+  Source view.
+- Unclosed Markdown links and angle brackets no longer rescan the paragraph:
+  seven 80,000-opener files that took up to 8.8 s each now open in about 0.1
+  s. HTML raw-text endings are scanned without copying.
+- DOCX table style XML is shared across cells, repeated XML and header parts
+  are cached, and converted .docx and .odt pictures are reused.
+- Saving over a file that changed on disk asks Replace File or Cancel.
+- Save As says so when it changes an unknown extension to .qwp, and lets you
+  cancel.
+- Replacing all settings from a file asks first, defaulting to not replacing.
+  Print Merge asks before reading files outside the document's own.
+- Recovery files are marked while they are opened, license text is written
+  inside a private folder, Windows links open through ShellExecuteW, and the
+  active modal print panel is identified.
+- Command-Shift-Z is Redo, and Edit > Redo names the change. Repeat
+  (Command-Y) only repeats. Plain Text has no default key.
+- On the Mac the window's close button shows a dot while the document has
+  unsaved changes.
+- Tests move out of app.rs, docview.rs, the formats lib.rs and the core
+  document.rs into files of their own. Message boxes, tooltips, font loading,
+  menu tracking, printing, effects, and key, text and mouse handling move out
+  of app.rs into their own modules, and the atomic write code into atomic.rs.
+- Unused code is deleted, six-digit colors are read in one place, and the HTML
+  reader looks entity names up in a small table of the 252 HTML 4 references
+  instead of a 133 KB function. The format bodies are no longer generic.
+  Packaged binaries no longer carry the builder's folder names, and the About
+  picture is not copied into the Mac app's Resources twice.
+- KNOWN-ISSUES, CONTRIBUTING and SECURITY are added, and stale documentation
+  is fixed.
 
 ## 0.15.0 - 2026-11-08
 

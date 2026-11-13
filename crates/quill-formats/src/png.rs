@@ -3,25 +3,13 @@
 
 use std::io::{self, Write};
 
-fn crc32(data: &[u8], mut crc: u32) -> u32 {
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                0xEDB8_8320 ^ (crc >> 1)
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    crc
-}
-
 fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let start = out.len();
     out.extend_from_slice(kind);
     out.extend_from_slice(data);
-    let crc = crc32(data, crc32(kind, 0xFFFF_FFFF)) ^ 0xFFFF_FFFF;
+    // The checksum covers the chunk type and its data.
+    let crc = crate::zip::crc32(&out[start..]);
     out.extend_from_slice(&crc.to_be_bytes());
 }
 
@@ -264,7 +252,7 @@ mod tests {
     #[test]
     fn crc_matches_reference() {
         // CRC of "IEND" with no data, as in every PNG.
-        let crc = super::crc32(b"IEND", 0xFFFF_FFFF) ^ 0xFFFF_FFFF;
+        let crc = crate::zip::crc32(b"IEND");
         assert_eq!(crc, 0xAE42_6082);
     }
 

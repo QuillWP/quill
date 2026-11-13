@@ -88,8 +88,8 @@ fn entities(text: &str) -> String {
         };
         if let Some(c) = value {
             out.push(c);
-        } else if let Some(value) = quick_xml::escape::resolve_html5_entity(name) {
-            out.push_str(value);
+        } else if let Some(c) = crate::html_entities::lookup(name) {
+            out.push(c);
         } else {
             out.push_str(&rest[..=end]);
         }
@@ -167,7 +167,7 @@ fn color(s: &str) -> Option<Rgb> {
             6 => hex.to_string(),
             _ => return None,
         };
-        return u32::from_str_radix(&value, 16).ok().map(Rgb);
+        return Rgb::from_hex(&value);
     }
     if (s.starts_with("rgb(") || s.starts_with("rgba(")) && s.ends_with(')') {
         let start = s.find('(')? + 1;
@@ -491,6 +491,13 @@ const RAW: &[&str] = &[
     "script", "style", "textarea", "title", "xmp", "noembed", "noframes", "iframe",
 ];
 
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .position(|part| part.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
 /// Pop the elements from `at` up, each into its parent.
 fn pop_to(stack: &mut Vec<Element>, at: usize) {
     while stack.len() > at.max(1) {
@@ -662,9 +669,7 @@ fn parse(html: &str, limits: &Limits) -> Result<Element, String> {
             children: Vec::new(),
         };
         if RAW.contains(&tag.as_str()) && !raw.ends_with('/') {
-            let lower = html[i..].to_ascii_lowercase();
-            let stop = lower
-                .find(&format!("</{tag}"))
+            let stop = find_ascii_case_insensitive(&html[i..], &format!("</{tag}"))
                 .map_or(html.len(), |n| i + n);
             let content = &html[i..stop];
             let content = if matches!(tag.as_str(), "title" | "textarea") {
@@ -1828,6 +1833,17 @@ fn decode(bytes: &[u8], report: &mut ImportReport) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_text_closing_tags_are_found_without_lowercasing_the_remainder() {
+        assert_eq!(
+            find_ascii_case_insensitive("some text</TiTlE>x", "</title"),
+            Some(9)
+        );
+        let page = "<title>First</TITLE><title>Second</title>";
+        let (doc, _) = read_file(page.as_bytes()).unwrap();
+        assert_eq!(doc.summary.title, "First");
+    }
 
     #[test]
     fn a_selector_list_cannot_pass_the_rule_cap() {

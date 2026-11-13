@@ -858,6 +858,7 @@ fn unleb(b: &[u8], at: &mut usize) -> Result<u64, Damaged> {
 
 /// The fields of a value, in order.
 fn fields(b: &[u8]) -> Result<Vec<(u32, &[u8])>, Damaged> {
+    const MAX_FIELDS: usize = quill_core::limits::MAX_RUNS + 1024;
     let mut out = Vec::new();
     let mut at = 0;
     while at < b.len() {
@@ -865,6 +866,9 @@ fn fields(b: &[u8]) -> Result<Vec<(u32, &[u8])>, Damaged> {
         let len = unleb(b, &mut at)? as usize;
         let end = at.checked_add(len).ok_or(Damaged)?;
         let body = b.get(at..end).ok_or(Damaged)?;
+        if out.len() >= MAX_FIELDS {
+            return Err(Damaged);
+        }
         out.push((tag.min(u32::MAX as u64) as u32, body));
         at = end;
     }
@@ -1219,7 +1223,7 @@ fn read_row(b: &[u8]) -> Result<RowProps, Damaged> {
     Ok(r)
 }
 
-fn read_section(b: &[u8]) -> Result<SectionProps, Damaged> {
+fn read_section(b: &[u8], budget: &mut crate::ReadBudget) -> Result<SectionProps, Damaged> {
     // A missing distance means none, not the default.
     let mut s = SectionProps {
         line_from_text: None,
@@ -1275,7 +1279,7 @@ fn read_section(b: &[u8]) -> Result<SectionProps, Damaged> {
                     for (tag, f) in fields(f)? {
                         match tag {
                             1 => k = uint(f)?.min(usize::MAX as u64) as usize,
-                            2 => st = Some(read_story(f)?),
+                            2 => st = Some(read_story(f, budget)?),
                             _ => {}
                         }
                     }
@@ -1406,7 +1410,7 @@ fn read_style(b: &[u8]) -> Result<Style, Damaged> {
     Ok(s)
 }
 
-fn read_paragraph(b: &[u8]) -> Result<Paragraph, Damaged> {
+fn read_paragraph(b: &[u8], budget: &mut crate::ReadBudget) -> Result<Paragraph, Damaged> {
     let mut p = Paragraph::default();
     for (tag, f) in fields(b)? {
         match tag {
@@ -1436,7 +1440,7 @@ fn read_paragraph(b: &[u8]) -> Result<Paragraph, Damaged> {
             }
             5 => p.mark_chp = read_chp(f)?,
             6 => p.row = Some(Box::new(read_row(f)?)),
-            7 => p.section = Some(Box::new(read_section(f)?)),
+            7 => p.section = Some(Box::new(read_section(f, budget)?)),
             _ => {}
         }
     }
@@ -1474,12 +1478,16 @@ impl Drop for DepthGuard {
     }
 }
 
-fn read_story(b: &[u8]) -> Result<Story, Damaged> {
+fn read_story(b: &[u8], budget: &mut crate::ReadBudget) -> Result<Story, Damaged> {
     let _depth = DepthGuard::enter()?;
     let mut paras = Vec::new();
     for (tag, f) in fields(b)? {
         if tag == 1 {
-            paras.push(read_paragraph(f)?);
+            let paragraph = read_paragraph(f, budget)?;
+            if !budget.add_paragraph(&paragraph) || budget.full() {
+                return Err(Damaged);
+            }
+            paras.push(paragraph);
         }
     }
     Ok(Story { paras })
@@ -1510,10 +1518,18 @@ pub fn read(bytes: &[u8]) -> Result<Document, String> {
                 .into(),
         );
     }
-    read_body(&rest[4..], &z).map_err(|_| "The document in the file is damaged.".to_string())
+    let mut budget = crate::ReadBudget::default();
+    read_body(&rest[4..], &z, &mut budget).map_err(|_| match budget.too_large() {
+        Some(why) => format!("The document is too large for Quill: {why}."),
+        None => "The document in the file is damaged.".to_string(),
+    })
 }
 
-fn read_body(b: &[u8], z: &zip::Archive) -> Result<Document, Damaged> {
+fn read_body(
+    b: &[u8],
+    z: &zip::Archive,
+    budget: &mut crate::ReadBudget,
+) -> Result<Document, Damaged> {
     let mut doc = Document::new();
     let mut fonts = Vec::new();
     let mut styles = Vec::new();
@@ -1546,17 +1562,17 @@ fn read_body(b: &[u8], z: &zip::Archive) -> Result<Document, Damaged> {
                 }
             }
             3 => doc.props = read_document_props(f)?,
-            4 => doc.section = read_section(f)?,
+            4 => doc.section = read_section(f, budget)?,
             5 => doc.summary = read_summary(f)?,
-            6 => doc.main = read_story(f)?,
-            7 => doc.notes = read_story(f)?,
-            8 => doc.annotations = read_story(f)?,
+            6 => doc.main = read_story(f, budget)?,
+            7 => doc.notes = read_story(f, budget)?,
+            8 => doc.annotations = read_story(f, budget)?,
             9 => {
                 let (mut k, mut s) = (usize::MAX, None);
                 for (tag, f) in fields(f)? {
                     match tag {
                         1 => k = uint(f)?.min(usize::MAX as u64) as usize,
-                        2 => s = Some(read_story(f)?),
+                        2 => s = Some(read_story(f, budget)?),
                         _ => {}
                     }
                 }
@@ -1564,7 +1580,7 @@ fn read_body(b: &[u8], z: &zip::Archive) -> Result<Document, Damaged> {
                     *story_mut(&mut doc, id) = s;
                 }
             }
-            10 => objects.push(read_picture(f, z, &mut loaded)?),
+            10 => objects.push(read_picture(f, z, &mut loaded, budget)?),
             11 => {
                 let (mut id, mut m) = (0, String::new());
                 for (tag, f) in fields(f)? {
@@ -1617,6 +1633,7 @@ fn read_picture(
     b: &[u8],
     z: &zip::Archive,
     loaded: &mut HashMap<String, Arc<[u8]>>,
+    budget: &mut crate::ReadBudget,
 ) -> Result<Object, Damaged> {
     let (mut format, mut pixels, mut natural, mut size) =
         (ImageFormat::Png, (0, 0), (0, 0), (0, 0));
@@ -1649,6 +1666,9 @@ fn read_picture(
             15 => preview_pixels.get_or_insert((0, 0)).1 = u32_of(f)?,
             _ => {}
         }
+    }
+    if !budget.add_picture(&file) || budget.full() {
+        return Err(Damaged);
     }
     let data = match loaded.get(&file) {
         Some(d) => d.clone(),
@@ -1725,18 +1745,27 @@ fn repair(doc: &mut Document) {
         }
     }
     doc.styles.break_based_on_loops();
-    let fix_story = |story: &mut Story| {
+    let fix_story = |story: &mut Story, keep_section_headers: bool| {
         if story.paras.is_empty() {
             story.paras.push(Paragraph::default());
         }
         for p in &mut story.paras {
+            // Only sections in the main text can own headers and footers.
+            // A damaged native file may put them inside another story, but
+            // no document operation can make or use that extra level.
+            if !keep_section_headers && let Some(section) = &mut p.section {
+                section.headers = None;
+            }
             fix_pap(&mut p.pap);
             fix_chp(&mut p.mark_chp);
             // Runs must cover the text exactly, on char boundaries, with
             // nothing empty; if not, the text keeps the first run's format.
-            let total: usize = p.runs.iter().map(|r| r.len).sum();
+            let total = p
+                .runs
+                .iter()
+                .try_fold(0usize, |total, run| total.checked_add(run.len));
             let mut at = 0;
-            let sound = total == p.text.len()
+            let sound = total == Some(p.text.len())
                 && p.runs.iter().all(|r| {
                     at += r.len;
                     r.len > 0 && p.text.is_char_boundary(at)
@@ -1764,16 +1793,16 @@ fn repair(doc: &mut Document) {
             p.runs = merged;
         }
     };
-    fix_story(&mut doc.notes);
-    fix_story(&mut doc.annotations);
+    fix_story(&mut doc.notes, false);
+    fix_story(&mut doc.annotations, false);
     for h in &mut doc.headers {
-        fix_story(h);
+        fix_story(h, false);
     }
     // Sections' own headers and footers, on their breaks and the last.
     let fix_section = |s: &mut SectionProps| {
         if let Some(set) = &mut s.headers {
             for st in Arc::make_mut(set) {
-                fix_story(st);
+                fix_story(st, false);
             }
         }
     };
@@ -1783,7 +1812,7 @@ fn repair(doc: &mut Document) {
             fix_section(s);
         }
     }
-    fix_story(&mut doc.main);
+    fix_story(&mut doc.main, true);
 }
 
 #[cfg(test)]
@@ -1811,16 +1840,90 @@ mod tests {
     }
 
     #[test]
+    fn a_story_stops_building_at_the_paragraph_limit() {
+        // Two bytes per empty paragraph: a small file asking for far more
+        // paragraphs than Quill holds must stop at the limit, not build all.
+        let mut story = Vec::new();
+        for _ in 0..quill_core::limits::MAX_PARAGRAPHS + 1000 {
+            story.extend(field(1, &[]));
+        }
+        let mut budget = crate::ReadBudget::default();
+        assert!(read_story(&story, &mut budget).is_err());
+        assert!(budget.too_large().is_some());
+        assert!(budget.size.paragraphs <= quill_core::limits::MAX_PARAGRAPHS + 1);
+    }
+
+    #[test]
     fn stories_nested_without_end_are_damaged_not_a_crash() {
+        let read = |bytes: &[u8]| read_story(bytes, &mut crate::ReadBudget::default());
         // A real file nests two deep; a few more still read.
-        assert!(read_story(&nested_story(2)).is_ok());
-        assert!(read_story(&nested_story(MAX_STORY_DEPTH - 1)).is_ok());
+        assert!(read(&nested_story(2)).is_ok());
+        assert!(read(&nested_story(MAX_STORY_DEPTH - 1)).is_ok());
         // A crafted one that nests thousands deep is refused, on a small
         // stack as well as a large one.
         let deep = nested_story(5_000);
         assert!(deep.len() < 100_000);
-        assert!(read_story(&deep).is_err());
+        assert!(read(&deep).is_err());
         // The count went back to zero, so the next file reads as usual.
-        assert!(read_story(&nested_story(2)).is_ok());
+        assert!(read(&nested_story(2)).is_ok());
+    }
+
+    #[test]
+    fn repair_drops_headers_nested_inside_another_header() {
+        let mut doc = Document::new();
+        let mut nested = Story::new(Paragraph::default());
+        nested.paras[0].text = "héllo".into();
+        nested.paras[0].runs = vec![
+            Run {
+                len: 2,
+                chp: Default::default(),
+            },
+            Run {
+                len: 900,
+                chp: Default::default(),
+            },
+        ];
+        let mut header = Story::new(Paragraph::default());
+        header.paras[0].section = Some(Box::new(SectionProps {
+            headers: Some(Arc::new(vec![nested])),
+            ..Default::default()
+        }));
+        doc.main.paras[0].section = Some(Box::new(SectionProps {
+            headers: Some(Arc::new(vec![header])),
+            ..Default::default()
+        }));
+
+        repair(&mut doc);
+
+        let header = &doc.main.paras[0]
+            .section
+            .as_ref()
+            .unwrap()
+            .headers
+            .as_ref()
+            .unwrap()[0];
+        assert!(header.paras[0].section.as_ref().unwrap().headers.is_none());
+        write(&doc, 0);
+    }
+
+    #[test]
+    fn repair_replaces_run_lengths_that_overflow() {
+        let mut doc = Document::new();
+        doc.main.paras[0].text = "x".into();
+        doc.main.paras[0].runs = vec![
+            Run {
+                len: usize::MAX,
+                chp: Default::default(),
+            },
+            Run {
+                len: 1,
+                chp: Default::default(),
+            },
+        ];
+
+        repair(&mut doc);
+
+        assert_eq!(doc.main.paras[0].runs.len(), 1);
+        assert_eq!(doc.main.paras[0].runs[0].len, 1);
     }
 }

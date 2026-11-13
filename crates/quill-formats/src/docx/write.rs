@@ -17,21 +17,7 @@ use quill_core::props::{
 use quill_core::{Document, PageNumberFormat, SectionProps, SectionStart, StoryId};
 use std::fmt::Write as _;
 
-pub fn esc(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            // XML 1.0 cannot carry most control characters at all.
-            c if (c as u32) < 0x20 && !matches!(c, '\t' | '\n' | '\r') => {}
-            c => out.push(c),
-        }
-    }
-    out
-}
+pub use crate::export::escape as esc;
 
 const W_NS: &str = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:quill="urn:quill:docx:1" mc:Ignorable="quill""#;
 

@@ -18,6 +18,32 @@ use quill_core::{Document, PageNumberFormat, SectionProps, SectionStart, StoryId
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+struct XmlParts<'a> {
+    zip: &'a Archive<'a>,
+    parsed: HashMap<String, Option<Arc<Element>>>,
+}
+
+impl<'a> XmlParts<'a> {
+    fn new(zip: &'a Archive<'a>) -> XmlParts<'a> {
+        XmlParts {
+            zip,
+            parsed: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, name: &str) -> Result<Option<Arc<Element>>, String> {
+        if let Some(part) = self.parsed.get(name) {
+            return Ok(part.clone());
+        }
+        let part = match self.zip.read(name).map_err(|e| e.to_string())? {
+            Some(bytes) => Some(Arc::new(xml::parse(&bytes)?)),
+            None => None,
+        };
+        self.parsed.insert(name.to_string(), part.clone());
+        Ok(part)
+    }
+}
+
 pub fn read(data: &[u8]) -> Result<Document, String> {
     read_reported(data).map(|(doc, _)| doc)
 }
@@ -25,13 +51,9 @@ pub fn read(data: &[u8]) -> Result<Document, String> {
 /// Like `read`, with what could not be kept exactly.
 pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
     let zip = Archive::open(data).map_err(|e| e.to_string())?;
-    let part = |name: &str| -> Result<Option<Element>, String> {
-        match zip.read(name).map_err(|e| e.to_string())? {
-            Some(bytes) => xml::parse(&bytes).map(Some),
-            None => Ok(None),
-        }
-    };
-    let main_path = part("_rels/.rels")?
+    let mut parts = XmlParts::new(&zip);
+    let main_path = parts
+        .get("_rels/.rels")?
         .and_then(|rels| {
             rels.children_named("Relationship")
                 .find(|r| {
@@ -48,7 +70,9 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
         .rsplit_once('/')
         .map(|(d, _)| format!("{d}/"))
         .unwrap_or_default();
-    let document = part(&main_path)?.ok_or("the file has no document part")?;
+    let document = parts
+        .get(&main_path)?
+        .ok_or("the file has no document part")?;
 
     let mut r = Reader {
         doc: Document::new(),
@@ -64,6 +88,7 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
         list_styles: HashMap::new(),
         lists_used: HashSet::new(),
         images: HashMap::new(),
+        picture_cache: HashMap::new(),
         links: HashMap::new(),
         note_ids: HashMap::new(),
         comment_ids: HashMap::new(),
@@ -87,15 +112,16 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
         cell_layers: Vec::new(),
         toc_field: None,
         other_generated: false,
+        budget: crate::ReadBudget::default(),
     };
     // .docm and .dotm files keep their Visual Basic project here.
     if zip.names().any(|n| n.ends_with("vbaProject.bin")) {
         r.report.note(notes::MACROS);
     }
-    if let Some(theme) = part(&format!("{dir}theme/theme1.xml"))? {
+    if let Some(theme) = parts.get(&format!("{dir}theme/theme1.xml"))? {
         r.theme = Theme::read(&theme);
     }
-    if let Some(styles) = part(&format!("{dir}styles.xml"))? {
+    if let Some(styles) = parts.get(&format!("{dir}styles.xml"))? {
         r.read_styles(&styles);
         // Headers and footers the file leaves out are empty ones in its
         // own header and footer styles.
@@ -104,18 +130,18 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
             .map(|&id| quill_core::document::blank_header(&r.doc.styles, id))
             .collect();
     }
-    if let Some(numbering) = part(&format!("{dir}numbering.xml"))? {
+    if let Some(numbering) = parts.get(&format!("{dir}numbering.xml"))? {
         r.numbering = Numbering::read(&numbering, &r.list_styles);
     }
-    if let Some(settings) = part(&format!("{dir}settings.xml"))? {
+    if let Some(settings) = parts.get(&format!("{dir}settings.xml"))? {
         r.read_settings(&settings);
     }
-    if let Some(core) = part("docProps/core.xml")? {
+    if let Some(core) = parts.get("docProps/core.xml")? {
         r.read_core(&core);
     }
     let body = document.child("body").ok_or("the document has no body")?;
     let file = main_path.rsplit('/').next().unwrap_or("document.xml");
-    let main_rels = part(&format!("{dir}_rels/{file}.rels"))?;
+    let main_rels = parts.get(&format!("{dir}_rels/{file}.rels"))?;
     r.images = load_images(&zip, main_rels.as_ref(), &dir);
     r.links = load_links(main_rels.as_ref());
     if has_unkept_changes(body) {
@@ -123,6 +149,9 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
     }
     let mut paras = Vec::new();
     r.read_block(body, &mut paras, false);
+    if let Some(why) = r.budget.too_large() {
+        return Err(format!("the document is too large for Quill: {why}"));
+    }
     if let Some(sect) = body.child("sectPr") {
         // A section with another page size or margins than the last one.
         let last = page_setup(sect);
@@ -150,6 +179,7 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
     // one naming some keeps the before's for the kinds it leaves out, as
     // Word does.
     let section_refs = std::mem::take(&mut r.section_refs);
+    let mut header_parts: HashMap<String, Arc<quill_core::Story>> = HashMap::new();
     r.part = Part::Header;
     for (k, refs) in section_refs.iter().enumerate() {
         r.doc.header_section = k;
@@ -167,15 +197,25 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
                 Some(abs) => abs.to_string(),
                 None => format!("{dir}{target}"),
             };
-            if let Some(root) = part(&path)? {
+            if let Some(cached) = header_parts.get(&path) {
+                if r.doc.story(*story) != cached.as_ref() {
+                    r.doc.set_story(*story, cached.as_ref().clone());
+                }
+                continue;
+            }
+            if let Some(root) = parts.get(&path)? {
                 let (hdir, hfile) = path.rsplit_once('/').unwrap_or(("", &path));
-                let hrels = part(&format!("{hdir}/_rels/{hfile}.rels"))?;
+                let hrels = parts.get(&format!("{hdir}/_rels/{hfile}.rels"))?;
                 r.images = load_images(&zip, hrels.as_ref(), &format!("{hdir}/"));
                 r.links = load_links(hrels.as_ref());
                 let mut hparas = Vec::new();
                 r.read_block(&root, &mut hparas, false);
                 if !hparas.is_empty() {
-                    r.doc.set_story(*story, quill_core::Story { paras: hparas });
+                    let header = Arc::new(quill_core::Story { paras: hparas });
+                    if r.doc.story(*story) != header.as_ref() {
+                        r.doc.set_story(*story, header.as_ref().clone());
+                    }
+                    header_parts.insert(path, header);
                 }
             }
         }
@@ -202,11 +242,11 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
                 Some(abs) => abs.to_string(),
                 None => format!("{dir}{target}"),
             };
-            let Some(root) = part(&path)? else {
+            let Some(root) = parts.get(&path)? else {
                 continue;
             };
             let (ndir, nfile) = path.rsplit_once('/').unwrap_or(("", &path));
-            let nrels = part(&format!("{ndir}/_rels/{nfile}.rels"))?;
+            let nrels = parts.get(&format!("{ndir}/_rels/{nfile}.rels"))?;
             r.images = load_images(&zip, nrels.as_ref(), &format!("{ndir}/"));
             r.links = load_links(nrels.as_ref());
             for note in root.elements() {
@@ -309,11 +349,11 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
         // Each comment's paragraphs by their w14:paraId, which replies and
         // resolved state (commentsExtended.xml) refer to.
         let mut by_para: HashMap<String, u32> = HashMap::new();
-        if let Some(root) = part(&path)? {
+        if let Some(root) = parts.get(&path)? {
             // The comments have their own relationships, for their pictures
             // and links; the ones left from the notes are not theirs.
             let (cdir, cfile) = path.rsplit_once('/').unwrap_or(("", &path));
-            let crels = part(&format!("{cdir}/_rels/{cfile}.rels"))?;
+            let crels = parts.get(&format!("{cdir}/_rels/{cfile}.rels"))?;
             r.images = load_images(&zip, crels.as_ref(), &format!("{cdir}/"));
             r.links = load_links(crels.as_ref());
             for c in root.elements() {
@@ -371,7 +411,7 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
                 })
         });
         if let Some(path) = extended
-            && let Some(root) = part(&path)?
+            && let Some(root) = parts.get(&path)?
         {
             for ex in root.children_named("commentEx") {
                 let Some(&id) = ex.attr("paraId").and_then(|p| by_para.get(p)) else {
@@ -411,6 +451,9 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
         }
     }
     r.doc.forget_history();
+    if let Some(why) = r.budget.too_large() {
+        return Err(format!("the document is too large for Quill: {why}"));
+    }
     Ok((r.doc, r.report))
 }
 
@@ -532,7 +575,9 @@ impl Numbering {
                         .child("lvlText")
                         .and_then(|f| f.attr("val"))
                         .unwrap_or("")
-                        .to_string(),
+                        .chars()
+                        .take(MAX_LEVEL_TEXT)
+                        .collect(),
                     // Word starts a level at 0 when it doesn't say.
                     start: l.child("start").and_then(|s| s.int("val")).unwrap_or(0),
                     left: ind.and_then(|i| i.int("left").or_else(|| i.int("start"))),
@@ -646,6 +691,10 @@ fn read_note_properties(e: &Element, p: &mut quill_core::DocumentProps) {
     }
 }
 
+/// Longest list label pattern kept. Word allows a few hundred characters; an
+/// unbounded one, repeated for every list paragraph, is a way to fill memory.
+const MAX_LEVEL_TEXT: usize = 256;
+
 struct Reader {
     doc: Document,
     /// The authors and dates of tracked changes seen, to keep a hostile
@@ -668,7 +717,7 @@ struct Reader {
     list_styles: HashMap<String, String>,
     /// Table styles by the file's id: each one's w:style element and those
     /// of the styles it is based on, base first.
-    table_styles: HashMap<String, Vec<Element>>,
+    table_styles: HashMap<String, Arc<[Arc<Element>]>>,
     /// The table style tables without one of their own use.
     default_table_style: Option<String>,
     /// The document's default paragraph and character format.
@@ -676,7 +725,7 @@ struct Reader {
     /// While a table cell is read: the parts of its table style that apply
     /// to it, in order (the whole table, then banding, first and last rows
     /// and columns). Each may hold a pPr, an rPr and a tcPr.
-    cell_layers: Vec<Element>,
+    cell_layers: Vec<StyleLayer>,
     /// The first TOC field met in the main text, as the settings Quill
     /// would make it with.
     toc_field: Option<quill_core::contents::TocOptions>,
@@ -685,7 +734,9 @@ struct Reader {
     /// The lists that have numbered a paragraph, by numId.
     lists_used: HashSet<String>,
     /// The pictures the part being read refers to, by relationship id.
-    images: HashMap<String, Arc<[u8]>>,
+    images: HashMap<String, ImagePart>,
+    /// Converted pictures by their package path, shared by every placement.
+    picture_cache: HashMap<String, Option<quill_core::Picture>>,
     /// The hyperlink targets the part being read refers to, by
     /// relationship id.
     links: HashMap<String, String>,
@@ -720,6 +771,9 @@ struct Reader {
     /// Floating pictures and text boxes as framed paragraphs, to go before
     /// the paragraph they are anchored to.
     floating: Vec<Paragraph>,
+    /// Counts what has been built, so a small file that asks for
+    /// millions of paragraphs stops at Quill's limits.
+    budget: crate::ReadBudget,
     /// Reading the text of a text box, whose own drawings stay in it.
     in_box: u32,
     /// The paragraph being read is in a table.
@@ -827,7 +881,7 @@ fn descendant<'a>(e: &'a Element, name: &str) -> Option<&'a Element> {
 
 /// The image relationships of a part, with their bytes.
 /// Hyperlink relationships: id to target.
-fn load_links(rels: Option<&Element>) -> HashMap<String, String> {
+fn load_links(rels: Option<&Arc<Element>>) -> HashMap<String, String> {
     let Some(rels) = rels else {
         return HashMap::new();
     };
@@ -837,7 +891,11 @@ fn load_links(rels: Option<&Element>) -> HashMap<String, String> {
         .collect()
 }
 
-fn load_images(zip: &Archive, rels: Option<&Element>, dir: &str) -> HashMap<String, Arc<[u8]>> {
+fn load_images(
+    zip: &Archive,
+    rels: Option<&Arc<Element>>,
+    dir: &str,
+) -> HashMap<String, ImagePart> {
     let mut out = HashMap::new();
     let mut by_path: HashMap<String, Arc<[u8]>> = HashMap::new();
     let Some(rels) = rels else {
@@ -858,16 +916,22 @@ fn load_images(zip: &Archive, rels: Option<&Element>, dir: &str) -> HashMap<Stri
             Some(bytes.clone())
         } else if let Ok(Some(bytes)) = zip.read(&path) {
             let bytes: Arc<[u8]> = bytes.into();
-            by_path.insert(path, bytes.clone());
+            by_path.insert(path.clone(), bytes.clone());
             Some(bytes)
         } else {
             None
         };
         if let Some(bytes) = bytes {
-            out.insert(id.to_string(), bytes);
+            out.insert(id.to_string(), ImagePart { path, bytes });
         }
     }
     out
+}
+
+#[derive(Clone)]
+struct ImagePart {
+    path: String,
+    bytes: Arc<[u8]>,
 }
 
 fn twips_or(e: &Element, name: &str, default: i32) -> i32 {
@@ -1165,7 +1229,7 @@ impl Reader {
         }
         let mut raw: HashMap<String, RawStyle> = HashMap::new();
         let mut char_raw: HashMap<String, RawStyle> = HashMap::new();
-        let mut table_raw: HashMap<String, (Option<String>, Element)> = HashMap::new();
+        let mut table_raw: HashMap<String, (Option<String>, Arc<Element>)> = HashMap::new();
         let mut order = Vec::new();
         for s in e.children_named("style") {
             let id = s.attr("styleId").unwrap_or_default().to_string();
@@ -1202,7 +1266,7 @@ impl Reader {
                     if s.attr("default").is_some_and(|v| v == "1" || v == "true") {
                         self.default_table_style = Some(id.clone());
                     }
-                    table_raw.insert(id, (style.based_on.clone(), s.clone()));
+                    table_raw.insert(id, (style.based_on.clone(), Arc::new(s.clone())));
                 }
                 "numbering" => {
                     let num = style.ppr.as_ref().and_then(|p| p.child("numPr"));
@@ -1226,7 +1290,7 @@ impl Reader {
                 chain.insert(0, e.clone());
                 cur = based_on.as_ref().and_then(|b| table_raw.get(b));
             }
-            self.table_styles.insert(id.clone(), chain);
+            self.table_styles.insert(id.clone(), chain.into());
         }
         // Character styles become lists of rPr layers to apply, base first.
         for (id, style) in &char_raw {
@@ -1423,9 +1487,13 @@ impl Reader {
     /// Read block content (paragraphs and tables) into `out`.
     fn read_block(&mut self, e: &Element, out: &mut Vec<Paragraph>, in_table: bool) {
         for child in e.elements() {
+            if self.budget.full() {
+                return;
+            }
             match child.name.as_str() {
                 "p" => {
                     let p = self.read_paragraph(child, in_table);
+                    self.budget.add_paragraph(&p);
                     out.append(&mut self.floating);
                     out.push(p);
                     out.append(&mut self.pending);
@@ -1453,6 +1521,7 @@ impl Reader {
         let (dp, dc) = self.defaults.clone();
         let (mut tp, mut tc) = (dp.clone(), dc);
         for layer in self.cell_layers.clone() {
+            let layer = layer.element();
             if let Some(p) = layer.child("pPr") {
                 self.apply_ppr(p, &mut tp);
             }
@@ -1500,7 +1569,7 @@ impl Reader {
         // The table's own settings, shared by its rows.
         let tblpr = tbl.child("tblPr");
         // Its table style, or the document's default one.
-        let chain: Vec<Element> = tblpr
+        let chain: Arc<[Arc<Element>]> = tblpr
             .and_then(|p| p.child("tblStyle"))
             .and_then(|s| s.attr("val"))
             .map(str::to_string)
@@ -1574,14 +1643,14 @@ impl Reader {
             let mut cells = Vec::new();
             let trpr = tr.child("trPr");
             let (left, right) = gap_in(tr.child("tblPrEx"), table_margins);
-            let gap = (left + right).max(0);
+            let gap = (i64::from(left) + i64::from(right)).clamp(0, i32::MAX as i64) as i32;
             // A row can start further in than the table, skipping columns.
             let before = trpr
                 .and_then(|p| p.child("gridBefore"))
                 .and_then(|g| g.int("val"))
                 .unwrap_or(0)
                 .max(0) as usize;
-            let skipped: i32 = grid.iter().take(before).sum();
+            let skipped: i64 = grid.iter().take(before).map(|&n| i64::from(n)).sum();
             let mut col = before;
             let align = match trpr.and_then(|p| p.child("jc")).and_then(|j| j.attr("val")) {
                 Some("center") => Align::Center,
@@ -1596,10 +1665,11 @@ impl Reader {
                 .and_then(|p| p.child("tblInd"))
                 .map(|i| twips_or(i, "w", 0));
             let indent = match (align, own_ind) {
-                (Align::Left, _) => ind + skipped + gap / 2,
-                (_, Some(i)) => i + gap / 2,
-                _ => ind + gap / 2,
-            };
+                (Align::Left, _) => i64::from(ind) + skipped + i64::from(gap / 2),
+                (_, Some(i)) => i64::from(i) + i64::from(gap / 2),
+                _ => i64::from(ind) + i64::from(gap / 2),
+            }
+            .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
             for (c, tc) in wrapped(tr, "tc").into_iter().enumerate() {
                 let start = out.len();
                 let at = CellAt {
@@ -1632,7 +1702,13 @@ impl Reader {
                     .and_then(|g| g.int("val"))
                     .unwrap_or(1)
                     .max(1) as usize;
-                let from_grid: i32 = grid.iter().skip(col).take(span).sum();
+                let from_grid = grid
+                    .iter()
+                    .skip(col)
+                    .take(span)
+                    .map(|&n| i64::from(n))
+                    .sum::<i64>()
+                    .clamp(i32::MIN as i64, i32::MAX as i64) as i32;
                 col += span;
                 let own = tcpr
                     .and_then(|p| p.child("tcW"))
@@ -1653,7 +1729,11 @@ impl Reader {
                     Some(Some("restart")) => quill_core::props::VMerge::Restart,
                     Some(_) => quill_core::props::VMerge::Continue,
                 };
-                for pr in layers.iter().filter_map(|l| l.child("tcPr")).chain(tcpr) {
+                for pr in layers
+                    .iter()
+                    .filter_map(|l| l.element().child("tcPr"))
+                    .chain(tcpr)
+                {
                     if let Some(v) = pr.child("vAlign") {
                         valign = match v.attr("val") {
                             Some("center") => quill_core::props::VAlign::Center,
@@ -2540,14 +2620,29 @@ impl Reader {
     /// its cropping.
     /// The picture in a VML shape (`v:imagedata`), at the size its style
     /// gives.
+    fn picture_for(&mut self, id: &str) -> Option<quill_core::Picture> {
+        let image = self.images.get(id)?;
+        if let Some(cached) = self.picture_cache.get(&image.path) {
+            return cached.clone();
+        }
+        // Past the picture limit nothing more is decoded; the file is
+        // refused when reading ends.
+        if !self.budget.add_picture(&image.path) {
+            return None;
+        }
+        let picture = crate::images::picture(image.bytes.clone());
+        self.picture_cache
+            .insert(image.path.clone(), picture.clone());
+        picture
+    }
+
     fn vml_picture(
-        &self,
+        &mut self,
         x: &Element,
         style: &HashMap<String, String>,
     ) -> Option<quill_core::Picture> {
         let data = descendant(x, "imagedata")?;
-        let bytes = self.images.get(data.attr("id")?)?;
-        let mut pic = crate::images::picture(bytes.clone())?;
+        let mut pic = self.picture_for(data.attr("id")?)?;
         let size = |k: &str| style.get(k).and_then(|v| vml_length(v));
         if let (Some(w), Some(h)) = (size("width"), size("height")) {
             pic.size = (w.max(20), h.max(20));
@@ -2555,14 +2650,14 @@ impl Reader {
         Some(pic)
     }
 
-    fn read_drawing(&self, d: &Element) -> Option<quill_core::Picture> {
+    fn read_drawing(&mut self, d: &Element) -> Option<quill_core::Picture> {
         let blip = descendant(d, "blip")?;
-        let bytes = self.images.get(blip.attr("embed")?)?;
-        let mut pic = crate::images::picture(bytes.clone())?;
+        let mut pic = self.picture_for(blip.attr("embed")?)?;
         if let Some(ext) = descendant(d, "extent") {
             let emu = |n: &str| ext.attr(n).and_then(|v| v.parse::<i64>().ok());
             if let (Some(cx), Some(cy)) = (emu("cx"), emu("cy")) {
-                pic.size = ((cx / 635).max(20) as i32, (cy / 635).max(20) as i32);
+                let twips = |value: i64| (value / 635).clamp(20, i32::MAX as i64) as i32;
+                pic.size = (twips(cx), twips(cy));
             }
         }
         if let Some(src) = descendant(d, "srcRect") {
@@ -3006,10 +3101,7 @@ fn parse_color(v: &str) -> Option<Rgb> {
     }
     // Exactly six digits, as the format defines; a longer number would set
     // bits no color has.
-    if v.len() != 6 {
-        return None;
-    }
-    u32::from_str_radix(v, 16).ok().map(Rgb)
+    Rgb::from_hex(v)
 }
 
 fn read_border(e: &Element) -> (BorderLine, bool) {
@@ -3045,6 +3137,24 @@ struct CellAt {
     rows: usize,
     col: usize,
     cols: usize,
+}
+
+#[derive(Clone, Debug)]
+struct StyleLayer {
+    owner: Arc<Element>,
+    child: Option<usize>,
+}
+
+impl StyleLayer {
+    fn element(&self) -> &Element {
+        match self.child {
+            None => &self.owner,
+            Some(index) => match &self.owner.children[index] {
+                crate::xml::Node::Element(element) => element,
+                crate::xml::Node::Text(_) => unreachable!(),
+            },
+        }
+    }
 }
 
 /// A table's w:tblLook: which of its style's special rows and columns
@@ -3137,15 +3247,27 @@ impl Look {
 /// The parts of a table style (its chain, base first) that apply to a
 /// cell: each style's whole-table settings, then each condition's, in
 /// order.
-fn style_layers(chain: &[Element], conditions: &[&str]) -> Vec<Element> {
-    let mut out: Vec<Element> = chain.to_vec();
+fn style_layers(chain: &[Arc<Element>], conditions: &[&str]) -> Vec<StyleLayer> {
+    let mut out: Vec<StyleLayer> = chain
+        .iter()
+        .map(|owner| StyleLayer {
+            owner: owner.clone(),
+            child: None,
+        })
+        .collect();
     for cond in conditions {
         for s in chain {
-            out.extend(
-                s.children_named("tblStylePr")
-                    .filter(|c| c.attr("type") == Some(cond))
-                    .cloned(),
-            );
+            for (index, child) in s.children.iter().enumerate() {
+                if let crate::xml::Node::Element(element) = child
+                    && element.name == "tblStylePr"
+                    && element.attr("type") == Some(cond)
+                {
+                    out.push(StyleLayer {
+                        owner: s.clone(),
+                        child: Some(index),
+                    });
+                }
+            }
         }
     }
     out
@@ -3400,6 +3522,38 @@ fn section_settings(e: &Element) -> SectionProps {
 mod tests {
     use super::*;
 
+    #[test]
+    fn xml_parts_are_parsed_once_by_path() {
+        let mut writer = crate::zip::Writer::new(0);
+        writer.add("word/header1.xml", b"<w:hdr xmlns:w=\"w\"><w:p/></w:hdr>");
+        let bytes = writer.finish();
+        let archive = Archive::open(&bytes).unwrap();
+        let mut parts = XmlParts::new(&archive);
+        let first = parts.get("word/header1.xml").unwrap().unwrap();
+        let second = parts.get("word/header1.xml").unwrap().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn table_style_layers_share_the_parsed_xml() {
+        let style = Arc::new(Element {
+            name: "style".into(),
+            children: vec![crate::xml::Node::Element(Element {
+                name: "tblStylePr".into(),
+                attrs: vec![("type".into(), "wholeTable".into())],
+                children: vec![crate::xml::Node::Element(Element {
+                    name: "tcPr".into(),
+                    ..Default::default()
+                })],
+            })],
+            ..Default::default()
+        });
+        let layers = style_layers(std::slice::from_ref(&style), &["wholeTable"]);
+        assert_eq!(layers.len(), 2);
+        assert!(layers.iter().all(|layer| Arc::ptr_eq(&layer.owner, &style)));
+        assert_eq!(layers[1].element().name, "tblStylePr");
+    }
+
     /// A .docx with just this body.
     fn docx(body: &str) -> Vec<u8> {
         let xml = format!(
@@ -3408,6 +3562,30 @@ mod tests {
         let mut zip = crate::zip::Writer::new(0);
         zip.add("word/document.xml", xml.as_bytes());
         zip.finish()
+    }
+
+    #[test]
+    fn a_huge_list_label_pattern_is_cut_short() {
+        let ns = r#"xmlns:w="w""#;
+        let text = "%1".repeat(100_000);
+        let mut zip = crate::zip::Writer::new(0);
+        zip.add(
+            "word/document.xml",
+            format!(r#"<w:document {ns}><w:body><w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>x</w:t></w:r></w:p></w:body></w:document>"#).as_bytes(),
+        );
+        zip.add(
+            "word/numbering.xml",
+            format!(r#"<w:numbering {ns}><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1000000"/><w:numFmt w:val="chicago"/><w:lvlText w:val="{text}"/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#).as_bytes(),
+        );
+        let doc = read(&zip.finish()).unwrap();
+        assert!(doc.main.paras[0].text.chars().count() < 2_000);
+    }
+
+    #[test]
+    fn a_docx_with_too_many_paragraphs_is_refused() {
+        let body = "<w:p/>".repeat(quill_core::limits::MAX_PARAGRAPHS + 1000);
+        let err = read(&docx(&body)).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
     }
 
     #[test]
@@ -3421,6 +3599,11 @@ mod tests {
         let body =
             r#"<w:p><w:pPr><w:ind w:hanging="-2147483648"/></w:pPr><w:r><w:t>x</w:t></w:r></w:p>"#;
         assert!(read(&docx(body)).is_ok());
+        let grid = r#"<w:gridCol w:w="1000000"/>"#.repeat(3_000);
+        let body = format!(
+            r#"<w:tbl><w:tblGrid>{grid}</w:tblGrid><w:tr><w:trPr><w:gridBefore w:val="3000"/></w:trPr><w:tc><w:p/></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:gridSpan w:val="3000"/></w:tcPr><w:p/></w:tc></w:tr></w:tbl>"#
+        );
+        assert!(read(&docx(&body)).is_ok());
     }
 
     #[test]

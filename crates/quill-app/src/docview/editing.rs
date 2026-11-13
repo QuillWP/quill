@@ -756,6 +756,12 @@ impl DocView {
                     self.reset_blink();
                 }
             }
+            Redo => {
+                if let Some(sel) = self.doc.redo() {
+                    self.sel = sel;
+                    self.reset_blink();
+                }
+            }
             Repeat => self.repeat_last(clip),
             Cut | Copy => {
                 if self.sel.is_empty() {
@@ -963,13 +969,6 @@ impl DocView {
     }
 
     pub(super) fn repeat_last(&mut self, clip: &mut Clipboard) {
-        if self.doc.redo_label().is_some() {
-            if let Some(sel) = self.doc.redo() {
-                self.sel = sel;
-                self.reset_blink();
-            }
-            return;
-        }
         match self.repeat.clone() {
             Some(Repeatable::Text(t)) => {
                 self.doc.break_typing();
@@ -1003,10 +1002,18 @@ impl DocView {
         }
     }
 
-    pub fn repeat_label(&self) -> String {
-        if let Some(l) = self.doc.redo_label() {
-            return format!("Redo {l}");
+    pub fn can_redo(&self) -> bool {
+        self.doc.redo_label().is_some()
+    }
+
+    pub fn redo_label(&self) -> String {
+        match self.doc.redo_label() {
+            Some(l) => format!("Redo {l}"),
+            None => "Can't Redo".to_string(),
         }
+    }
+
+    pub fn repeat_label(&self) -> String {
         match &self.repeat {
             Some(Repeatable::Text(_)) => "Repeat Typing".to_string(),
             Some(Repeatable::Command(c)) => format!("Repeat {}", c.name()),
@@ -1065,6 +1072,12 @@ impl DocView {
     }
 
     pub fn format_chars(&mut self, label: &'static str, f: impl Fn(&mut CharProps)) {
+        self.format_chars_with(label, &f);
+    }
+
+    // Not generic inside: `format` calls this with dozens of closures, and a
+    // copy of this whole path for each made the binary much larger.
+    fn format_chars_with(&mut self, label: &'static str, f: &dyn Fn(&mut CharProps)) {
         if self.sel.is_empty() {
             let mut c = self.current_chp();
             let before = c;
@@ -1095,6 +1108,10 @@ impl DocView {
     /// Apply a paragraph change to the selected paragraphs. A selection
     /// that ends at the very start of a paragraph leaves that one alone.
     pub fn format_paras(&mut self, label: &'static str, mut f: impl FnMut(&mut ParaProps)) {
+        self.format_paras_with(label, &mut f);
+    }
+
+    fn format_paras_with(&mut self, label: &'static str, mut f: &mut dyn FnMut(&mut ParaProps)) {
         let (first, last) = self.selected_paras();
         self.doc.begin(label, self.sel);
         match self.cell_block() {

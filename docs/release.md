@@ -1,8 +1,10 @@
 # Releasing Quill
 
 A checklist for each release. Work down it in order; every box is a thing
-to check by hand, since CI only proves that the code builds and passes its
-tests.
+to check by hand. The workflows in `.github/workflows` are not relied on
+today (the Mac runners cannot build Quill yet, and the Windows and Linux
+builds are not trustworthy enough to gate a release), so the checks below are
+run on the maintainer's own machines.
 
 On macOS, run the tests with access to the desktop's native services. A restricted
 runner can deny the spelling service and substitute printer paper dimensions;
@@ -20,11 +22,12 @@ contains current working-tree files, artwork, test images and language data;
 build caches, generated fuzz corpora and compiled packages are excluded.
 `tools/package.sh` remains a compatibility wrapper for existing commands.
 
-The Release workflow also supports Run workflow for building downloadable artifacts
-for all three platforms through GitHub Actions. Only tag pushes create a draft release.
+The Release workflow can build artifacts through GitHub Actions, but releases are
+currently built and published by hand from the maintainer's Mac.
 
-- [ ] `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`
-      and `cargo test` pass on macOS, Linux and Windows (the CI workflow).
+- [ ] `python3 tools/package.py --check` passes on the Mac (format, clippy with
+      `--all-targets -D warnings`, and the whole test suite). Run
+      `cargo check --target x86_64-pc-windows-msvc -p quill-app` as well.
 - [ ] `python3 tools/footprint.py --check` passes on each system: binary
       under 10 MB, package under 10 MB, no measure more than 10% over the
       baseline in docs/footprint.json. Record a new baseline with
@@ -73,7 +76,7 @@ for all three platforms through GitHub Actions. Only tag pushes create a draft r
 
 ## Tagging
 
-- [ ] `git tag vX.Y.Z && git push --tags` runs the Release workflow, which
-      attaches the three packages to a draft GitHub release.
+- [ ] Tag the release (`git tag vX.Y.Z && git push --tags`) and create the
+      GitHub release by hand, attaching the Mac disk images.
 - [ ] Write the release notes (what is new, known gaps), check
       the attached packages download and open, then publish the draft.

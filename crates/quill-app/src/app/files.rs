@@ -151,6 +151,7 @@ impl App {
                 .map(|fonts| missing_fonts(&doc, fonts))
                 .unwrap_or_default();
             let title = file_name(path);
+            #[cfg(debug_assertions)]
             if let Some(log) = std::env::var_os("QUILL_OPEN_LOG") {
                 use std::io::Write as _;
                 if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -190,6 +191,7 @@ impl App {
             if let Some((_, w)) = self.windows.get_mut(i) {
                 let v = w.st.main_view_mut();
                 v.path = Some(path.clone());
+                v.disk_stamp = disk_stamp(path);
                 if let Some(fonts) = self.fonts.as_mut() {
                     v.update_layout(fonts);
                     wide = v.wide_table_pages();
@@ -360,7 +362,31 @@ impl App {
                 chosen = true;
                 match selected {
                     Some(path) if Format::from_path(&path).is_some() => path,
-                    Some(path) => path.with_extension("qwp"),
+                    Some(path) => {
+                        // Quill does not write this kind of file, so the
+                        // name changes. Say so, and say when that name is
+                        // taken, since the save panel asked about the other.
+                        let renamed = path.with_extension("qwp");
+                        let replaces = if renamed.exists() {
+                            " That file already exists and will be replaced."
+                        } else {
+                            ""
+                        };
+                        if !super::ask(
+                            &format!(
+                                "Quill cannot save \u{201c}{}\u{201d} in that format.",
+                                file_name(&path)
+                            ),
+                            &format!(
+                                "It will be saved in Quill's own format as \u{201c}{}\u{201d}.{replaces}",
+                                file_name(&renamed)
+                            ),
+                            "Save",
+                        ) {
+                            return false;
+                        }
+                        renamed
+                    }
                     None => return false,
                 }
             }
@@ -421,6 +447,18 @@ impl App {
             if answer != rfd::MessageDialogResult::Yes {
                 return false;
             }
+        }
+        if changed_on_disk(w.st.main_view(), &path)
+            && !super::ask(
+                &format!(
+                    "\u{201c}{}\u{201d} has been changed by something else since you opened or saved it.",
+                    file_name(&path)
+                ),
+                "Saving now replaces those changes with this window's version. Turn on backups in Preferences to keep a copy of the file you replace.",
+                "Replace File",
+            )
+        {
+            return false;
         }
         if crate::settings::with(|settings| settings.make_backup) && path.exists() {
             let backup = path.with_file_name(format!("Backup of {}", file_name(&path)));
@@ -648,6 +686,22 @@ fn record_saved_file(view: &mut DocView, path: &Path, chosen: bool) {
     view.title = file_name(path);
     view.path = Some(path.to_path_buf());
     view.path_chosen |= chosen;
+    view.disk_stamp = disk_stamp(path);
+}
+
+/// A file's modified time and size, or None if it can't be read.
+fn disk_stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// True when `path` is the document's own file and it has been changed or
+/// replaced since Quill opened or last saved it.
+fn changed_on_disk(view: &DocView, path: &Path) -> bool {
+    match (&view.path, view.disk_stamp, disk_stamp(path)) {
+        (Some(own), Some(then), Some(now)) => own == path && then != now,
+        _ => false,
+    }
 }
 
 fn save_policy(
@@ -806,6 +860,29 @@ mod tests {
     use crate::docview::DocView;
     use quill_core::{Document, Position, StoryId};
     use quill_formats::Format;
+
+    #[test]
+    fn a_file_changed_by_something_else_is_noticed_before_saving() {
+        let dir = std::env::temp_dir().join(format!("quill-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("letter.qwp");
+        std::fs::write(&path, b"one").unwrap();
+        let mut view = DocView::new(Document::new(), "letter.qwp".into());
+        // Not opened or saved from the file yet: nothing to compare.
+        assert!(!super::changed_on_disk(&view, &path));
+        view.path = Some(path.clone());
+        view.disk_stamp = super::disk_stamp(&path);
+        assert!(!super::changed_on_disk(&view, &path));
+        // Another program changes it (a different size, so the check holds
+        // even on a file system with coarse times).
+        std::fs::write(&path, b"changed elsewhere").unwrap();
+        assert!(super::changed_on_disk(&view, &path));
+        // A different file is not this document's own.
+        let other = dir.join("other.qwp");
+        std::fs::write(&other, b"x").unwrap();
+        assert!(!super::changed_on_disk(&view, &other));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn the_open_warning_lists_losses_then_fonts() {

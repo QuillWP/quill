@@ -324,9 +324,7 @@ pub struct Settings {
 /// A color written as six hex digits, "#DDDDDD" or "DDDDDD", as 0xRRGGBB.
 fn html_color(v: &str) -> Option<u32> {
     let hex = v.trim().trim_start_matches('#');
-    (hex.len() == 6)
-        .then(|| u32::from_str_radix(hex, 16).ok())
-        .flatten()
+    quill_core::props::Rgb::from_hex(hex).map(|c| c.0)
 }
 
 /// One `key = value` line of the settings file.
@@ -1186,11 +1184,39 @@ pub fn read_text(path: &std::path::Path) -> Result<String, String> {
 /// own, so it never reads or overwrites the settings and recovery files of an
 /// installed Quill. `QUILL_PROFILE` picks another name for a test run.
 pub fn profile() -> String {
-    match std::env::var("QUILL_PROFILE") {
-        Ok(name) if !name.trim().is_empty() => name.trim().to_string(),
-        _ if cfg!(debug_assertions) => "Quill Debug".to_string(),
-        _ => "Quill".to_string(),
+    std::env::var("QUILL_PROFILE")
+        .ok()
+        .and_then(|name| safe_profile(&name))
+        .unwrap_or_else(|| {
+            if cfg!(debug_assertions) {
+                "Quill Debug".to_string()
+            } else {
+                "Quill".to_string()
+            }
+        })
+}
+
+/// A profile is one short file name, never a path.
+fn safe_profile(name: &str) -> Option<String> {
+    let mut safe = String::new();
+    let mut separator = false;
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_') {
+            safe.push(c);
+            separator = false;
+        } else if !safe.is_empty() {
+            separator = true;
+        }
+        if safe.len() >= 64 {
+            break;
+        }
+        if separator {
+            safe.push('-');
+            separator = false;
+        }
     }
+    let safe = safe.trim_matches([' ', '-', '_']).to_string();
+    (!safe.is_empty()).then_some(safe)
 }
 
 fn path() -> Option<PathBuf> {
@@ -1495,6 +1521,17 @@ mod tests {
         assert_eq!(s.name, "Bo");
         assert_eq!(s.size, 24);
         assert_eq!(s.document_zoom, 800.0);
+    }
+
+    #[test]
+    fn profiles_are_file_names_not_paths() {
+        assert_eq!(safe_profile(" Test Copy ").as_deref(), Some("Test Copy"));
+        assert_eq!(safe_profile("../../outside").as_deref(), Some("outside"));
+        assert_eq!(
+            safe_profile("team/red\\blue").as_deref(),
+            Some("team-red-blue")
+        );
+        assert_eq!(safe_profile("../..").as_deref(), None);
     }
 
     #[test]

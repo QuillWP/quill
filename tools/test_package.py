@@ -92,7 +92,7 @@ class PackageTests(unittest.TestCase):
                          ["com.quillwp.document"])
         native = info["UTExportedTypeDeclarations"][0]["UTTypeTagSpecification"]
         self.assertEqual(native["public.filename-extension"], ["qwp"])
-        for name in ["Quill.icns", "QuillDocument.icns", "quill-about.jpg"]:
+        for name in ["Quill.icns", "QuillDocument.icns"]:
             self.assertTrue((contents / "Resources" / name).is_file())
 
     def test_debug_packages_are_a_different_app_from_the_real_one(self):

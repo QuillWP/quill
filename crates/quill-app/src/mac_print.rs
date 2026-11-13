@@ -78,6 +78,11 @@ extern "C" fn panel_became_key(this: *mut AnyObject, _: Sel, notification: *mut 
             return;
         }
         let panel: *mut AnyObject = msg_send![notification, object];
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let modal: *mut AnyObject = msg_send![app, modalWindow];
+        if modal.is_null() || !std::ptr::eq(panel, modal) {
+            return;
+        }
         if std::ptr::eq(panel, Retained::as_ptr(&context._parent)) {
             return;
         }

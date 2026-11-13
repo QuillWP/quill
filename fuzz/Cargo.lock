@@ -1684,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "quill-app"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "ab_glyph_rasterizer",
  "arboard",
@@ -1714,11 +1714,11 @@ dependencies = [
 
 [[package]]
 name = "quill-core"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "quill-formats"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "gif",
  "image-webp",
@@ -1730,7 +1730,7 @@ dependencies = [
 
 [[package]]
 name = "quill-fuzz"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "libfuzzer-sys",
  "miniz_oxide 0.9.1",
@@ -1741,7 +1741,7 @@ dependencies = [
 
 [[package]]
 name = "quill-layout"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "ab_glyph",
  "ab_glyph_rasterizer",

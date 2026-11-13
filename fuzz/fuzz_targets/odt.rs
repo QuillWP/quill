@@ -8,7 +8,7 @@ mod round_trip;
 fuzz_target!(|data: &[u8]| {
     for doc in [
         quill_formats::odt_read::read(data),
-        quill_formats::odt_read::read_flat(data),
+        quill_formats::odt_read::read_flat_reported(data).map(|(doc, _)| doc),
     ] {
         if let Ok(mut doc) = doc {
             doc.keep_in_bounds();

@@ -155,6 +155,35 @@ pub fn image_info(data: &[u8]) -> Option<(ImageFormat, u32, u32, f32, f32)> {
 }
 
 impl Picture {
+    /// Bring file-supplied measurements into the range drawing and export use.
+    pub fn keep_in_bounds(&mut self) {
+        if let Some(from_data) = Picture::from_shared(self.data.clone()) {
+            self.format = from_data.format;
+            self.pixels = from_data.pixels;
+            self.natural = from_data.natural;
+        } else {
+            self.pixels.0 = self.pixels.0.max(1);
+            self.pixels.1 = self.pixels.1.max(1);
+        }
+        self.natural.0 = self.natural.0.clamp(1, crate::limits::MAX_LENGTH);
+        self.natural.1 = self.natural.1.clamp(1, crate::limits::MAX_LENGTH);
+        self.size.0 = self.size.0.clamp(1, crate::limits::MAX_LENGTH);
+        self.size.1 = self.size.1.clamp(1, crate::limits::MAX_LENGTH);
+        let crop_axis = |a: &mut i32, b: &mut i32| {
+            *a = (*a).clamp(-CROP_WHOLE, CROP_WHOLE - 1);
+            *b = (*b).clamp(-CROP_WHOLE, CROP_WHOLE - 1);
+            if i64::from(*a) + i64::from(*b) >= i64::from(CROP_WHOLE) {
+                *b = CROP_WHOLE - 1 - *a;
+            }
+        };
+        crop_axis(&mut self.crop.left, &mut self.crop.right);
+        crop_axis(&mut self.crop.top, &mut self.crop.bottom);
+        self.preview_pixels = self
+            .preview
+            .as_ref()
+            .and_then(|data| image_info(data).map(|(_, width, height, _, _)| (width, height)));
+    }
+
     /// A picture from a PNG or JPEG file's bytes, at its natural size.
     pub fn from_bytes(data: Vec<u8>) -> Option<Picture> {
         Self::from_shared(data.into())
@@ -182,8 +211,12 @@ impl Picture {
     /// The natural size of the part that shows, after cropping.
     pub fn shown_natural(&self) -> (f32, f32) {
         let c = &self.crop;
-        let w = self.natural.0 as f32 * (CROP_WHOLE - c.left - c.right) as f32 / CROP_WHOLE as f32;
-        let h = self.natural.1 as f32 * (CROP_WHOLE - c.top - c.bottom) as f32 / CROP_WHOLE as f32;
+        let shown = |before: i32, a: i32, b: i32| {
+            before as f32 * (i64::from(CROP_WHOLE) - i64::from(a) - i64::from(b)) as f32
+                / CROP_WHOLE as f32
+        };
+        let w = shown(self.natural.0, c.left, c.right);
+        let h = shown(self.natural.1, c.top, c.bottom);
         (w.max(1.0), h.max(1.0))
     }
 
@@ -202,44 +235,6 @@ impl Picture {
             size: (width.max(20), height.max(20)),
             ..self.clone()
         }
-    }
-
-    /// The picture cropped (or padded) to `width` x `height` at its present
-    /// scale, keeping its center, as the original's side handles do.
-    pub fn cropped_to(&self, width: Twips, height: Twips) -> Picture {
-        let (sx, sy) = self.scale();
-        let mut p = self.clone();
-        let (width, height) = (width.max(20), height.max(20));
-        // How much of the natural size each axis now shows.
-        let show_w = width as f32 * 100.0 / sx.max(0.01);
-        let show_h = height as f32 * 100.0 / sy.max(0.01);
-        let to_units =
-            |show: f32, natural: Twips| CROP_WHOLE as f32 * (1.0 - show / natural.max(1) as f32);
-        let dw = to_units(show_w, p.natural.0) - (p.crop.left + p.crop.right) as f32;
-        let dh = to_units(show_h, p.natural.1) - (p.crop.top + p.crop.bottom) as f32;
-        p.crop.left += (dw / 2.0).round() as i32;
-        p.crop.right += (dw / 2.0).round() as i32;
-        p.crop.top += (dh / 2.0).round() as i32;
-        p.crop.bottom += (dh / 2.0).round() as i32;
-        p.size = (width, height);
-        p
-    }
-
-    /// The picture cropped (or padded) to `width` x `height` at its present
-    /// scale by moving only its right and bottom edges, the ones the side
-    /// handles drag. What shows of the rest stays where it was.
-    pub fn trimmed_to(&self, width: Twips, height: Twips) -> Picture {
-        let (sx, sy) = self.scale();
-        let mut p = self.clone();
-        let (width, height) = (width.max(20), height.max(20));
-        let show_w = width as f32 * 100.0 / sx.max(0.01);
-        let show_h = height as f32 * 100.0 / sy.max(0.01);
-        let to_units =
-            |show: f32, natural: Twips| CROP_WHOLE as f32 * (1.0 - show / natural.max(1) as f32);
-        p.crop.right = (to_units(show_w, p.natural.0) - p.crop.left as f32).round() as i32;
-        p.crop.bottom = (to_units(show_h, p.natural.1) - p.crop.top as f32).round() as i32;
-        p.size = (width, height);
-        p
     }
 
     /// The whole picture's size on the page at its present scale, as if
@@ -346,39 +341,12 @@ mod tests {
     }
 
     #[test]
-    fn scaling_and_cropping() {
+    fn scaling() {
         let mut p = Picture::from_bytes(png_header()).unwrap();
         p.natural = (1440, 720);
         p.size = p.natural;
         let s = p.scaled_to(2880, 720);
         assert_eq!(s.scale(), (200.0, 100.0));
-        // Cropping keeps the scale and the center.
-        let c = s.cropped_to(1440, 720);
-        assert_eq!(c.crop.left, 25_000);
-        assert_eq!(c.crop.right, 25_000);
-        assert!((c.scale().0 - 200.0).abs() < 0.1);
-        // Wider than the picture: white space on both sides.
-        let pad = p.cropped_to(2880, 720);
-        assert_eq!(pad.crop.left, -50_000);
-    }
-
-    #[test]
-    fn trimming_moves_only_the_right_and_bottom_edges() {
-        let mut p = Picture::from_bytes(png_header()).unwrap();
-        p.natural = (1440, 720);
-        p.size = (2880, 720);
-        p.crop.left = 10_000;
-        // Half as wide: the right edge comes in, the left stays put.
-        let t = p.trimmed_to(1440, 360);
-        assert_eq!(t.crop.left, 10_000);
-        assert_eq!(t.crop.right, 45_000);
-        assert_eq!(t.crop.top, 0);
-        assert_eq!(t.crop.bottom, 50_000);
-        assert!((t.scale().0 - p.scale().0).abs() < 0.1);
-        assert!((t.scale().1 - p.scale().1).abs() < 0.1);
-        // Dragging back out uncrops the same edge.
-        let back = t.trimmed_to(p.size.0, p.size.1);
-        assert_eq!(back.crop, p.crop);
     }
 
     #[test]

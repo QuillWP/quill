@@ -17,6 +17,11 @@ pub struct MarkdownSource {
     shown: String,
 }
 
+fn source_size_error(size: quill_core::limits::Size) -> Option<String> {
+    size.too_large()
+        .map(|why| format!("Markdown source is too large for Quill: {why}."))
+}
+
 impl DocView {
     pub fn in_markdown_source(&self) -> bool {
         self.md_source.is_some()
@@ -62,7 +67,7 @@ impl DocView {
         if !self.source_edited() {
             return Some(s.original.compact_for_save());
         }
-        Some(self.read_source().0)
+        self.read_source().ok().map(|(doc, _)| doc)
     }
 
     /// What a crash recovery copy should hold. Outside Source view, the
@@ -89,13 +94,16 @@ impl DocView {
         self.md_source = Some(Box::new(MarkdownSource { original, shown }));
     }
 
-    fn read_source(&self) -> (Document, quill_formats::report::ImportReport) {
+    fn read_source(&self) -> Result<(Document, quill_formats::report::ImportReport), String> {
         let text = markdown::source_text(&self.doc);
         let base = self.path.as_deref().and_then(std::path::Path::parent);
         let (mut doc, report) = markdown::read(&text, base);
+        if let Some(error) = source_size_error(doc.size()) {
+            return Err(error);
+        }
         doc.keep_in_bounds();
         crate::image::prepare_document_previews(&mut doc);
-        (doc, report)
+        Ok((doc, report))
     }
 
     /// Put `doc` in this window in place of its document, keeping the
@@ -104,6 +112,7 @@ impl DocView {
         let mut fresh = DocView::new(doc, std::mem::take(&mut self.title));
         fresh.path = self.path.take();
         fresh.path_chosen = self.path_chosen;
+        fresh.disk_stamp = self.disk_stamp;
         fresh.show_marks = self.show_marks;
         fresh.show_changes = self.show_changes;
         fresh.show_formatting = self.show_formatting;
@@ -174,19 +183,25 @@ impl DocView {
 
     /// View > Markdown > WYSIWYG.
     pub fn show_markdown_formatted(&mut self) {
-        let Some(source) = self.md_source.take() else {
+        let Some(source) = self.md_source.as_ref() else {
             return;
         };
         let edited = markdown::source_text(&self.doc) != source.shown;
         let doc = if edited {
-            let (mut doc, _) = self.read_source();
+            let (mut doc, _) = match self.read_source() {
+                Ok(read) => read,
+                Err(error) => {
+                    self.status = Some(error);
+                    return;
+                }
+            };
             doc.touch();
             doc
         } else {
-            source.original
+            self.md_source.take().unwrap().original
         };
-        self.replace_document(doc);
         self.md_source = None;
+        self.replace_document(doc);
         self.status = None;
     }
 }
@@ -194,6 +209,15 @@ impl DocView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_view_uses_the_document_size_limit() {
+        let size = quill_core::limits::Size {
+            paragraphs: quill_core::limits::MAX_PARAGRAPHS + 1,
+            ..Default::default()
+        };
+        assert!(source_size_error(size).unwrap().contains("too large"));
+    }
 
     fn view_of(md: &str) -> DocView {
         let (doc, _) = markdown::read(md, None);

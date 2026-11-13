@@ -718,6 +718,75 @@ fn closing_bracket(s: &str, open: usize) -> Option<usize> {
     None
 }
 
+/// Every `[` in `s` that has a closing `]`, by the same rules as
+/// `closing_bracket`, found in one pass.
+fn bracket_pairs(s: &str) -> HashMap<usize, usize> {
+    let b = s.as_bytes();
+    let mut pairs = HashMap::new();
+    let mut open = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 1,
+            b'`' => {
+                let run = b[i..].iter().take_while(|&&c| c == b'`').count();
+                if let Some(end) = code_end(s, i + run, run) {
+                    i = end - 1;
+                } else {
+                    i += run - 1;
+                }
+            }
+            b'[' => open.push(i),
+            b']' => {
+                if let Some(start) = open.pop() {
+                    pairs.insert(start, i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    pairs
+}
+
+/// Finds closing brackets for one paragraph. Each `[` is searched from its
+/// own place, as always, until the searches have covered many times the
+/// paragraph's length. That only happens in text made to be slow (thousands
+/// of nested or unclosed brackets), and from then on the answers come from
+/// one table of the whole paragraph, so the time stays in proportion.
+struct Brackets {
+    left: usize,
+    pairs: Option<HashMap<usize, usize>>,
+}
+
+impl Brackets {
+    fn new(s: &str) -> Brackets {
+        Brackets {
+            left: s.len().saturating_mul(16).saturating_add(4096),
+            pairs: None,
+        }
+    }
+
+    fn closing(&mut self, s: &str, open: usize) -> Option<usize> {
+        if self.left == 0 {
+            return self
+                .pairs
+                .get_or_insert_with(|| bracket_pairs(s))
+                .get(&open)
+                .copied();
+        }
+        let close = closing_bracket(s, open);
+        let searched = close.unwrap_or(s.len()).saturating_sub(open);
+        self.left = self.left.saturating_sub(searched.max(1));
+        close
+    }
+}
+
+/// Most brackets nested in a link's address, and the longest reference
+/// label, as CommonMark has them. Past these it is not a link.
+const MAX_DESTINATION_PARENS: usize = 32;
+const MAX_LABEL: usize = 999;
+
 /// Where the backtick run of exactly `run` characters that closes a code
 /// span starting at `from` ends.
 fn code_end(s: &str, from: usize, run: usize) -> Option<usize> {
@@ -749,7 +818,14 @@ fn inline_destination(s: &str, at: usize) -> Option<(String, usize)> {
     let mut i = skip(at);
     let dest;
     if b.get(i) == Some(&b'<') {
-        let end = s[i + 1..].find('>')? + i + 1;
+        // The address ends at the first `>`; another `<` or a line end
+        // before it means this is not one.
+        let end = b[i + 1..]
+            .iter()
+            .position(|c| matches!(c, b'>' | b'<' | b'\n'))
+            .filter(|&n| b[i + 1 + n] == b'>')?
+            + i
+            + 1;
         dest = s[i + 1..end].to_string();
         i = end + 1;
     } else {
@@ -758,6 +834,7 @@ fn inline_destination(s: &str, at: usize) -> Option<(String, usize)> {
         while i < b.len() {
             match b[i] {
                 b'\\' => i += 1,
+                b'(' if depth == MAX_DESTINATION_PARENS => return None,
                 b'(' => depth += 1,
                 b')' if depth == 0 => break,
                 b')' => depth -= 1,
@@ -773,6 +850,10 @@ fn inline_destination(s: &str, at: usize) -> Option<(String, usize)> {
         let close = if q == b'(' { b')' } else { q };
         let mut k = i + 1;
         while k < b.len() && b[k] != close {
+            // A title in brackets cannot hold another opening one.
+            if q == b'(' && b[k] == b'(' {
+                return None;
+            }
             if b[k] == b'\\' {
                 k += 1;
             }
@@ -1000,6 +1081,9 @@ impl Reader {
         let mut toks: Vec<Tok> = Vec::new();
         let mut text = String::new();
         let mut i = 0;
+        let last_close_bracket = s.as_bytes().iter().rposition(|&b| b == b']');
+        let last_close_paren = s.as_bytes().iter().rposition(|&b| b == b')');
+        let mut brackets = Brackets::new(s);
         macro_rules! flush {
             () => {
                 if !text.is_empty() {
@@ -1084,7 +1168,9 @@ impl Reader {
                     let open = if image { i + 1 } else { i };
                     if (!image || s[open..].starts_with('['))
                         && depth < MAX_DEPTH
-                        && let Some((segs, end)) = self.link(s, open, image, depth)
+                        && last_close_bracket.is_some_and(|end| end > open)
+                        && let Some((segs, end)) =
+                            self.link(s, open, image, depth, last_close_paren, &mut brackets)
                     {
                         flush!();
                         toks.extend(segs.into_iter().map(Tok::Seg));
@@ -1095,8 +1181,13 @@ impl Reader {
                     }
                 }
                 '<' => {
-                    let close = rest.find('>');
-                    let inner = close.map(|e| &rest[1..e]).filter(|t| !t.contains('\n'));
+                    // A link or tag in angle brackets holds no line end
+                    // and no second `<`, so the search stops at either.
+                    let close = rest[1..]
+                        .find(['>', '<', '\n'])
+                        .map(|e| e + 1)
+                        .filter(|&e| rest.as_bytes()[e] == b'>');
+                    let inner = close.map(|e| &rest[1..e]);
                     match (close, inner) {
                         (Some(end), Some(inner)) => {
                             let is_url = inner.split_once(':').is_some_and(|(scheme, _)| {
@@ -1219,21 +1310,32 @@ impl Reader {
         open: usize,
         image: bool,
         depth: usize,
+        last_close_paren: Option<usize>,
+        brackets: &mut Brackets,
     ) -> Option<(Vec<Seg>, usize)> {
-        let close = closing_bracket(s, open)?;
+        let close = brackets.closing(s, open)?;
         let label = &s[open + 1..close];
         let after = close + 1;
         let (dest, end) = if s[after..].starts_with('(') {
+            if last_close_paren.is_none_or(|end| end <= after) {
+                return None;
+            }
             inline_destination(s, after + 1)?
         } else {
             let key = if s[after..].starts_with('[') {
-                let end = closing_bracket(s, after)?;
+                let end = brackets.closing(s, after)?;
                 let inner = &s[after + 1..end];
+                if inner.len() > MAX_LABEL || (inner.is_empty() && label.len() > MAX_LABEL) {
+                    return None;
+                }
                 (
                     label_key(if inner.is_empty() { label } else { inner }),
                     end + 1,
                 )
             } else {
+                if label.len() > MAX_LABEL {
+                    return None;
+                }
                 (label_key(label), after)
             };
             if key.0.starts_with('^') {
@@ -1566,6 +1668,11 @@ impl Reader {
             .chain(rows.iter().map(Vec::as_slice))
             .enumerate()
         {
+            // Past the limit the document is refused anyway; stop building
+            // rows of empty cells from a short file.
+            if out.len() > quill_core::limits::MAX_PARAGRAPHS {
+                break;
+            }
             for (c, cell) in row.iter().enumerate().take(columns) {
                 let mut pap = self.pap(Ctx::default(), false);
                 pap.set_level(1);
@@ -1781,6 +1888,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_wide_table_stops_building_at_the_paragraph_limit() {
+        let cells = "|".repeat(255);
+        let rule = "-|".repeat(254);
+        let mut text = format!("{cells}\n|{rule}\n");
+        text.push_str(&format!("{cells}\n").repeat(4_000));
+        let (doc, _) = read(&text, None);
+        let built = doc.main.paras.len();
+        assert!(
+            built < quill_core::limits::MAX_PARAGRAPHS + 1_000,
+            "{built}"
+        );
+        assert!(doc.size().too_large().is_some());
+    }
+
+    #[test]
     fn a_document_stops_taking_pictures_at_the_total_budget() {
         let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
         let src = format!("data:image/png;base64,{png}");
@@ -1789,5 +1911,82 @@ mod tests {
         r.picture_bytes = MAX_PICTURES_TOTAL;
         assert!(r.load_picture(&src).is_none());
         assert!(r.report.notes().contains(&notes::MARKDOWN_PICTURES));
+    }
+
+    #[test]
+    fn many_unclosed_links_are_left_as_text_in_one_pass() {
+        for source in ["[".repeat(20_000), "[a](".repeat(20_000)] {
+            let mut reader = Reader::new(None);
+            let shown: String = reader
+                .inline(&source, 0)
+                .into_iter()
+                .map(|segment| segment.text)
+                .collect();
+            assert_eq!(shown, source);
+        }
+    }
+
+    #[test]
+    fn brackets_made_to_be_slow_read_in_proportion_to_their_length() {
+        let n = 40_000;
+        let sources = [
+            // One closer at the very end, so every opener has to look.
+            format!("{}]", "[".repeat(n)),
+            format!("{})", "[a](".repeat(n)),
+            format!("{}>)", "[a](<".repeat(n)),
+            format!("{})", "[a](x (".repeat(n)),
+            format!("{}]", "[a][".repeat(n)),
+            format!("{}{}", "[".repeat(n), "]".repeat(n)),
+            format!("{}>", "a b<".repeat(n)),
+        ];
+        let started = std::time::Instant::now();
+        for source in &sources {
+            let mut reader = Reader::new(None);
+            let shown: String = reader
+                .inline(source, 0)
+                .into_iter()
+                .map(|segment| segment.text)
+                .collect();
+            // All of it stays as text, but for the last opener, which the
+            // closer at the end can turn into a real (empty) link.
+            assert!(
+                source.starts_with(&shown[..shown.len() - 8]),
+                "{}",
+                &source[..8]
+            );
+            assert!(shown.len() + 8 >= source.len(), "{}", &source[..8]);
+        }
+        // Each took seconds before, in a release build; all six take well
+        // under one here.
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    }
+
+    #[test]
+    fn the_bracket_table_agrees_with_the_search() {
+        let text = r"[a [b] `]` \] c] [d [e] ] ] [f";
+        let pairs = bracket_pairs(text);
+        for (open, _) in text.match_indices('[') {
+            // An escaped or coded bracket is never asked about.
+            if open == 0 || open == 3 || open == 18 || open == 21 || open == 29 {
+                assert_eq!(
+                    pairs.get(&open).copied(),
+                    closing_bracket(text, open),
+                    "{open}"
+                );
+            }
+        }
+        let mut brackets = Brackets::new(text);
+        brackets.left = 0;
+        assert_eq!(brackets.closing(text, 0), closing_bracket(text, 0));
+        assert_eq!(brackets.closing(text, 29), None);
+    }
+
+    #[test]
+    fn links_with_brackets_in_their_addresses_still_read() {
+        let mut reader = Reader::new(None);
+        let segs = reader.inline("[a](x(y)z) [b](<p q>) [c](d (title))", 0);
+        let text: String = segs.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, "a b c");
+        assert!(segs.iter().filter(|s| s.f.link != 0).count() == 3);
     }
 }

@@ -376,6 +376,11 @@ impl Document {
             story.keep_in_bounds();
         }
         self.headers.iter_mut().for_each(Story::keep_in_bounds);
+        for object in &mut self.objects {
+            if let crate::Object::Picture(picture) = object {
+                picture.keep_in_bounds();
+            }
+        }
     }
 }
 
@@ -392,6 +397,44 @@ mod tests {
         assert_eq!(doc.fonts[0].chars().count(), MAX_NAME);
         assert!(doc.fonts[0].chars().all(|c| c == 'é'));
         assert_eq!(doc.styles.styles[0].name.len(), MAX_NAME);
+    }
+
+    #[test]
+    fn picture_measurements_come_from_the_file_and_stay_in_range() {
+        let mut png = vec![0; 24];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        png[16..20].copy_from_slice(&2u32.to_be_bytes());
+        png[20..24].copy_from_slice(&3u32.to_be_bytes());
+        let mut doc = Document::new();
+        doc.objects.push(crate::Object::Picture(crate::Picture {
+            data: png.into(),
+            preview: None,
+            preview_pixels: Some((u32::MAX, u32::MAX)),
+            format: crate::ImageFormat::Jpeg,
+            pixels: (u32::MAX, u32::MAX),
+            natural: (i32::MIN, i32::MAX),
+            size: (0, i32::MAX),
+            crop: crate::Crop {
+                left: i32::MIN,
+                top: i32::MAX,
+                right: i32::MIN,
+                bottom: i32::MAX,
+            },
+        }));
+
+        doc.keep_in_bounds();
+
+        let crate::Object::Picture(picture) = &doc.objects[0] else {
+            unreachable!()
+        };
+        assert_eq!(picture.format, crate::ImageFormat::Png);
+        assert_eq!(picture.pixels, (2, 3));
+        assert_eq!(picture.natural, (40, 60));
+        assert_eq!(picture.size, (1, MAX_LENGTH));
+        assert_eq!(picture.preview_pixels, None);
+        assert_eq!(picture.crop.left, -crate::picture::CROP_WHOLE);
+        assert!(picture.crop.top + picture.crop.bottom < crate::picture::CROP_WHOLE);
+        assert!(picture.shown_natural().0.is_finite());
     }
 
     /// Found by fuzzing: the last section's own headers were never brought

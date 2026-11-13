@@ -205,16 +205,35 @@ pub fn follow(url: &str) -> bool {
         return false;
     };
     #[cfg(target_os = "macos")]
-    let opener = std::process::Command::new("/usr/bin/open")
+    let opened = std::process::Command::new("/usr/bin/open")
         .arg(&url)
-        .spawn();
+        .spawn()
+        .is_ok();
     #[cfg(target_os = "windows")]
-    let opener = std::process::Command::new("rundll32")
-        .args(["url.dll,FileProtocolHandler", &url])
-        .spawn();
+    let opened = {
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        use windows::core::{HSTRING, PCWSTR};
+
+        let wide = HSTRING::from(url);
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR::null(),
+                &wide,
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        result.0 as usize > 32
+    };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let opener = std::process::Command::new("xdg-open").arg(&url).spawn();
-    opener.is_ok()
+    let opened = std::process::Command::new("xdg-open")
+        .arg(&url)
+        .spawn()
+        .is_ok();
+    opened
 }
 
 #[cfg(test)]

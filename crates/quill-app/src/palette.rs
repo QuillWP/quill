@@ -54,7 +54,7 @@ pub fn parse_hex(text: &str) -> Option<Rgb> {
         return None;
     }
     match t.len() {
-        6 => u32::from_str_radix(t, 16).ok().map(Rgb),
+        6 => Rgb::from_hex(t),
         3 => {
             let v = u32::from_str_radix(t, 16).ok()?;
             let (r, g, b) = ((v >> 8) & 0xF, (v >> 4) & 0xF, v & 0xF);

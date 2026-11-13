@@ -69,6 +69,7 @@ pub struct Session {
     base: Option<PathBuf>,
     destination: Destination,
     answers: HashMap<AskKey, String>,
+    outside_files: HashMap<PathBuf, bool>,
 }
 
 /// The next thing an interactive merge needs.
@@ -77,21 +78,52 @@ pub enum Progress {
     Done(Box<Outcome>),
 }
 
+fn named_path(
+    base: Option<&std::path::Path>,
+    name: &str,
+) -> Result<(PathBuf, bool), std::io::Error> {
+    let named = PathBuf::from(name);
+    let path = if named.is_absolute() {
+        named
+    } else {
+        base.map_or(named.clone(), |dir| dir.join(&named))
+    };
+    let real = path.canonicalize()?;
+    let inside = base
+        .and_then(|folder| folder.canonicalize().ok())
+        .is_some_and(|folder| real.starts_with(folder));
+    Ok((real, !inside))
+}
+
+fn allow_outside(kind: &str, name: &str, path: &std::path::Path) -> bool {
+    let answer = crate::app::message_box(
+        rfd::MessageLevel::Warning,
+        "Quill",
+        format!(
+            "This document's {kind} instruction names a file outside its folder.\n\n{name}\n\n{}\n\nLoading it copies its contents into the merged document. Load it only if you trust this document.",
+            path.display()
+        ),
+        rfd::MessageButtons::YesNoCancelCustom(
+            "Don't Load".into(),
+            "Load File".into(),
+            "Cancel".into(),
+        ),
+    );
+    matches!(answer, rfd::MessageDialogResult::Custom(ref label) if label == "Load File")
+}
+
 /// The data document named in the main document's «DATA», found beside
 /// the main document when the name has no folder.
 pub fn data_for(view: &DocView) -> Result<(String, Data), String> {
     let Some((name, _, _)) = data_instruction(&view.doc) else {
         return Err("This document has no DATA instruction. Use View > Print Merge Helper to choose a data document.".into());
     };
-    let path = std::path::PathBuf::from(&name);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        view.path
-            .as_ref()
-            .and_then(|p| p.parent())
-            .map_or(path.clone(), |dir| dir.join(&path))
-    };
+    let base = view.path.as_ref().and_then(|p| p.parent());
+    let (path, outside) = named_path(base, &name)
+        .map_err(|e| format!("The data document “{name}” could not be opened: {e}"))?;
+    if outside && !allow_outside("DATA", &name, &path) {
+        return Err(format!("The data document “{name}” was not loaded."));
+    }
     let doc = quill_formats::load(&path).map_err(|e| {
         format!("The data document \u{201C}{name}\u{201D} could not be opened: {e}")
     })?;
@@ -125,16 +157,25 @@ pub fn start(d: &Dialog, view: &DocView) -> Result<Session, String> {
             .map(PathBuf::from),
         destination,
         answers: HashMap::new(),
+        outside_files: HashMap::new(),
     })
 }
 
-fn load_include(base: Option<&std::path::Path>, name: &str) -> Result<Document, String> {
-    let path = std::path::PathBuf::from(name);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        base.map_or(path.clone(), |dir| dir.join(&path))
-    };
+fn load_include(
+    base: Option<&std::path::Path>,
+    name: &str,
+    outside_files: &mut HashMap<PathBuf, bool>,
+) -> Result<Document, String> {
+    let (path, outside) = named_path(base, name)
+        .map_err(|error| format!("The included document “{name}” could not be opened: {error}"))?;
+    if outside {
+        let allowed = *outside_files
+            .entry(path.clone())
+            .or_insert_with(|| allow_outside("INCLUDE", name, &path));
+        if !allowed {
+            return Err(format!("The included document “{name}” was not loaded."));
+        }
+    }
     quill_formats::load(&path)
         .map_err(|error| format!("The included document “{name}” could not be opened: {error}"))
 }
@@ -142,7 +183,7 @@ fn load_include(base: Option<&std::path::Path>, name: &str) -> Result<Document, 
 /// Continue until another ASK is needed or the merge is complete.
 pub fn advance(session: &mut Session) -> Progress {
     let base = session.base.as_deref();
-    let mut include = |name: &str| load_include(base, name);
+    let mut include = |name: &str| load_include(base, name, &mut session.outside_files);
     let result = if matches!(session.destination, Destination::Check) {
         Ok(merge_with_includes(
             &session.main,
@@ -288,6 +329,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn merge_paths_are_checked_after_canonicalizing() {
+        let root = std::env::temp_dir().join(format!("quill-merge-paths-{}", std::process::id()));
+        let document = root.join("document");
+        let elsewhere = root.join("elsewhere");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&document).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(document.join("inside.txt"), "inside").unwrap();
+        std::fs::write(elsewhere.join("outside.txt"), "outside").unwrap();
+
+        assert!(!named_path(Some(&document), "inside.txt").unwrap().1);
+        assert!(
+            named_path(Some(&document), "../elsewhere/outside.txt")
+                .unwrap()
+                .1
+        );
+        assert!(
+            named_path(None, &document.join("inside.txt").display().to_string())
+                .unwrap()
+                .1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn merges_with_a_data_file_beside_the_document() {
         let dir = std::env::temp_dir().join(format!("quill-merge-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -329,6 +395,7 @@ mod tests {
                 base: None,
                 destination,
                 answers: HashMap::new(),
+                outside_files: HashMap::new(),
             };
             let Progress::Done(outcome) = advance(&mut session) else {
                 panic!("unexpected prompt")

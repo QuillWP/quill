@@ -474,6 +474,9 @@ pub struct Renumber {
     pub numbers: Numbers,
 }
 
+/// The largest first number the Renumber dialog accepts.
+pub const MAX_RENUMBER_START: u32 = 32_767;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Numeral {
     Arabic,
@@ -568,8 +571,9 @@ fn numeral(kind: Numeral, n: u32) -> String {
         Numeral::Arabic => n.to_string(),
         Numeral::LowerLetter => letters(n),
         Numeral::UpperLetter => letters(n).to_uppercase(),
-        Numeral::LowerRoman => roman(n),
-        Numeral::UpperRoman => roman(n).to_uppercase(),
+        Numeral::LowerRoman if n <= 3_999 => roman(n),
+        Numeral::UpperRoman if n <= 3_999 => roman(n).to_uppercase(),
+        Numeral::LowerRoman | Numeral::UpperRoman => n.to_string(),
     }
 }
 
@@ -692,10 +696,10 @@ pub fn renumber(doc: &mut Document, story: StoryId, first: usize, last: usize, o
                 0
             };
             if !started {
-                counters[lv] = opts.start.max(1) - 1;
+                counters[lv] = opts.start.clamp(1, MAX_RENUMBER_START) - 1;
                 started = true;
             }
-            counters[lv] += 1;
+            counters[lv] = counters[lv].saturating_add(1);
             for c in counters.iter_mut().skip(lv + 1) {
                 *c = 0;
             }
@@ -984,6 +988,21 @@ mod tests {
         opts.numbers = Numbers::Remove;
         renumber(&mut d, StoryId::Main, 0, 3, &opts);
         assert_eq!(texts(&d), ["One", "", "Two", "Three"]);
+    }
+
+    #[test]
+    fn renumber_bounds_large_starts_and_roman_output() {
+        assert_eq!(numeral(Numeral::LowerRoman, 3_999), "mmmcmxcix");
+        assert_eq!(numeral(Numeral::LowerRoman, 4_000), "4000");
+        let mut d = doc(&["One", "Two"]);
+        let opts = Renumber {
+            only_numbered: false,
+            start: u32::MAX,
+            format: "i".into(),
+            numbers: Numbers::Plain,
+        };
+        renumber(&mut d, StoryId::Main, 0, 1, &opts);
+        assert_eq!(texts(&d), ["32767\tOne", "32768\tTwo"]);
     }
 
     #[test]

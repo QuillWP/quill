@@ -122,8 +122,29 @@ pub fn web_addresses(text: &str) -> Vec<(usize, usize)> {
 /// file and open it in the program the system uses for text.
 #[cfg(not(target_os = "macos"))]
 pub fn open_text_file() -> bool {
-    let path = std::env::temp_dir().join("Quill Licenses.txt");
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NUMBER: AtomicU64 = AtomicU64::new(0);
+    let directory = loop {
+        let n = NUMBER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("quill-licenses-{}-{n}", std::process::id()));
+        let builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        let builder = {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = builder;
+            builder.mode(0o700);
+            builder
+        };
+        match builder.create(&path) {
+            Ok(()) => break path,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return false,
+        }
+    };
+    let path = directory.join("Quill Licenses.txt");
     if std::fs::write(&path, text()).is_err() {
+        let _ = std::fs::remove_dir_all(directory);
         return false;
     }
     #[cfg(target_os = "windows")]

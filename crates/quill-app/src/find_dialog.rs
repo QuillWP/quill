@@ -620,9 +620,9 @@ pub fn go_to_page(d: &Dialog, view: &DocView) -> Option<usize> {
     let t = t.strip_prefix('p').unwrap_or(&t);
     let cur = view.caret_page() as i64 + 1;
     let n: i64 = if let Some(r) = t.strip_prefix('+') {
-        cur + r.trim().parse::<i64>().ok()?
+        cur.saturating_add(r.trim().parse::<i64>().ok()?)
     } else if let Some(r) = t.strip_prefix('-') {
-        cur - r.trim().parse::<i64>().ok()?
+        cur.saturating_sub(r.trim().parse::<i64>().ok()?)
     } else {
         t.parse().ok()?
     };
@@ -640,6 +640,16 @@ mod tests {
         v.insert_text(text);
         v.set_selection(Selection::caret(Position::new(0, 0)));
         v
+    }
+
+    #[test]
+    fn go_to_large_relative_page_numbers_do_not_overflow() {
+        let view = view("page");
+        let mut dialog = go_to(&view);
+        dialog.set_field("page", "+9223372036854775807");
+        assert_eq!(go_to_page(&dialog, &view), Some(0));
+        dialog.set_field("page", "-9223372036854775807");
+        assert_eq!(go_to_page(&dialog, &view), Some(0));
     }
 
     fn search(find: &str, dir: usize) -> Search {

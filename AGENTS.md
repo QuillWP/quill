@@ -16,7 +16,7 @@ docs/user-guide.md for how it behaves and docs/release.md for releases.
 ## Build and check
 
 ```sh
-python3 tools/package.py --debug   # builds target/debug/Quill.app
+python3 tools/package.py --debug   # builds target/debug/Quill Debug.app
 cargo fmt --all
 cargo clippy -p quill-core -p quill-layout -p quill-app -- -D warnings
 cargo test --workspace

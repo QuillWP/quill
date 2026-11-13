@@ -120,7 +120,12 @@ fn read_document(d: &Dialog, base: &DocumentProps) -> Option<DocumentProps> {
     p.mirror_margins = d.is_on("mirror");
     p.footnote_position = FOOTNOTE_POSITIONS[d.selected("fn_pos").min(3)].1;
     p.footnote_restart_each_page = d.is_on("fn_restart");
-    p.footnote_start = d.field_text("fn_start").trim().parse().ok()?;
+    p.footnote_start = d
+        .field_text("fn_start")
+        .trim()
+        .parse()
+        .ok()
+        .filter(|&n| n > 0)?;
     p.widow_control = d.is_on("widow");
     p.print_hidden = d.is_on("hidden");
     p.even_odd_headers = d.is_on("evenodd");
@@ -441,7 +446,7 @@ fn read_section(d: &Dialog, base: &SectionProps) -> Option<SectionProps> {
     s.start = STARTS[d.selected("start").min(4)].1;
     s.include_endnotes = d.is_on("endnotes");
     s.columns = d.field_text("columns").trim().parse().ok()?;
-    if !(1..=100).contains(&s.columns) {
+    if !(1..=quill_core::limits::MAX_COLUMNS).contains(&s.columns) {
         return None;
     }
     s.column_spacing = len("spacing", base.column_spacing)?.max(0);
@@ -565,6 +570,21 @@ mod tests {
         assert!(apply_document(&d, &mut v));
         assert_eq!(v.doc.props.margin_left, 2880);
         assert!(v.doc.is_modified());
+    }
+
+    #[test]
+    fn dialogs_refuse_values_the_document_limits_would_change() {
+        let v = view();
+        let mut document = document(&v);
+        document.set_field("fn_start", "0");
+        assert!(read_document(&document, &v.doc.props).is_none());
+
+        let mut section = section(&v);
+        section.set_field(
+            "columns",
+            &(quill_core::limits::MAX_COLUMNS + 1).to_string(),
+        );
+        assert!(read_section(&section, &v.doc.section).is_none());
     }
 
     #[test]

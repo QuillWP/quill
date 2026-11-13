@@ -33,6 +33,14 @@ impl Rgb {
     pub const BLACK: Rgb = Rgb(0x000000);
     pub const WHITE: Rgb = Rgb(0xFFFFFF);
 
+    /// A color from exactly six hex digits, with no "#". Anything else,
+    /// including a sign or spaces, is not a color.
+    pub fn from_hex(digits: &str) -> Option<Rgb> {
+        (digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| u32::from_str_radix(digits, 16).ok().map(Rgb))
+            .flatten()
+    }
+
     pub fn r(self) -> u8 {
         (self.0 >> 16) as u8
     }
@@ -593,6 +601,15 @@ pub const SHADING_STEPS: [u16; 17] = [
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn hex_colors_are_exactly_six_digits() {
+        assert_eq!(Rgb::from_hex("c0ffee"), Some(Rgb(0xC0FFEE)));
+        assert_eq!(Rgb::from_hex("+12345"), None);
+        assert_eq!(Rgb::from_hex("12345"), None);
+        assert_eq!(Rgb::from_hex("1234567"), None);
+        assert_eq!(Rgb::from_hex("12 456"), None);
+    }
+
     use super::*;
 
     #[test]

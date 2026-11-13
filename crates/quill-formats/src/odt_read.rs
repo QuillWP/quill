@@ -134,12 +134,8 @@ pub fn is_flat(bytes: &[u8]) -> bool {
         && head.contains("application/vnd.oasis.opendocument.text")
 }
 
-/// Read a flat .fodt file. Its pictures are inline, as base64.
-pub fn read_flat(data: &[u8]) -> Result<Document, String> {
-    read_flat_reported(data).map(|(doc, _)| doc)
-}
-
-/// Like `read_flat`, with what could not be kept exactly.
+/// Read a flat .fodt file, with what could not be kept exactly. Its
+/// pictures are inline, as base64.
 pub fn read_flat_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
     let root = xml::parse(data)?;
     if root.name != "document" {
@@ -333,9 +329,15 @@ struct ListLabel {
 }
 
 struct Reader<'a> {
+    /// Stops a small file with repeated rows and cells from building
+    /// more than Quill's limits allow.
+    budget: crate::ReadBudget,
+    /// Spaces made from `text:s` counts so far.
+    repeated_spaces: usize,
     doc: Document,
     st: Styles<'a>,
     pictures: &'a dyn Fn(&str) -> Option<Arc<[u8]>>,
+    picture_cache: HashMap<String, Option<Picture>>,
     /// Named paragraph style -> our style.
     styles: HashMap<&'a str, StyleId>,
     characters: HashMap<&'a str, u16>,
@@ -402,9 +404,12 @@ fn build<'a>(
         .and_then(|b| b.child("text").or_else(|| b.elements().next()))
         .ok_or("the document has no text body")?;
     let mut r = Reader {
+        budget: crate::ReadBudget::default(),
+        repeated_spaces: 0,
         doc: Document::new(),
         st,
         pictures,
+        picture_cache: HashMap::new(),
         styles: HashMap::new(),
         characters: HashMap::new(),
         base: (ParaProps::default(), CharProps::default()),
@@ -439,6 +444,10 @@ fn build<'a>(
     r.read_styles();
     let mut paras = Vec::new();
     r.read_block(body, &mut paras, false);
+    r.budget.note_paragraph_count(paras.len());
+    if let Some(why) = r.budget.too_large() {
+        return Err(format!("the document is too large for Quill: {why}"));
+    }
     r.read_page();
     if paras.is_empty() {
         let n = r.doc.styles.get(0);
@@ -478,6 +487,10 @@ fn build<'a>(
         r.doc.reconcile(NoteKind::Annotation);
     }
     r.doc.forget_history();
+    // Headers, footers and notes are read after the body.
+    if let Some(why) = r.budget.too_large() {
+        return Err(format!("the document is too large for Quill: {why}"));
+    }
     Ok((r.doc, r.report))
 }
 
@@ -508,10 +521,7 @@ fn percent(v: &str) -> Option<f64> {
 
 fn parse_color(v: &str) -> Option<Rgb> {
     let hex = v.trim().strip_prefix('#')?;
-    if hex.len() != 6 {
-        return None;
-    }
-    u32::from_str_radix(hex, 16).ok().map(Rgb)
+    Rgb::from_hex(hex)
 }
 
 /// Shading as the original's gray percentage, from a background color.
@@ -587,22 +597,11 @@ fn borders(e: &Element) -> Borders {
     }
 }
 
-fn letters(n: i32, upper: bool) -> String {
-    if n <= 0 {
-        return n.to_string();
-    }
-    let base = if upper { b'A' } else { b'a' };
-    let letter = (base + ((n - 1) % 26) as u8) as char;
-    letter
-        .to_string()
-        .repeat(((n - 1) / 26 + 1).min(10) as usize)
-}
-
 fn format_number(n: i32, fmt: &str) -> String {
     match fmt {
         "" => String::new(),
-        "a" => letters(n, false),
-        "A" => letters(n, true),
+        "a" => crate::numfmt::letters(n, false),
+        "A" => crate::numfmt::letters(n, true),
         "i" => crate::numfmt::roman(n).to_lowercase(),
         "I" => crate::numfmt::roman(n),
         _ => n.to_string(),
@@ -1216,6 +1215,11 @@ impl<'a> Reader<'a> {
     /// Read block content (paragraphs, lists, tables, sections) into `out`.
     fn read_block(&mut self, e: &'a Element, out: &mut Vec<Paragraph>, in_table: bool) {
         for child in e.elements() {
+            // Past the limits the file is refused when reading ends, so
+            // nothing more is built from it.
+            if self.budget.full() {
+                return;
+            }
             self.read_block_child(child, out, in_table);
         }
     }
@@ -1225,6 +1229,7 @@ impl<'a> Reader<'a> {
             "p" => {
                 let p = self.read_paragraph(child, in_table, None);
                 out.append(&mut self.floating);
+                self.budget.add_paragraph(&p);
                 out.push(p);
                 out.append(&mut self.pending);
             }
@@ -1234,6 +1239,7 @@ impl<'a> Reader<'a> {
                     .and_then(|level| self.outline_label(level));
                 let p = self.read_paragraph(child, in_table, label);
                 out.append(&mut self.floating);
+                self.budget.add_paragraph(&p);
                 out.push(p);
                 out.append(&mut self.pending);
             }
@@ -1245,6 +1251,7 @@ impl<'a> Reader<'a> {
                     let label = style.and_then(|s| self.list_label(s, depth, None));
                     let para = self.read_paragraph(p, in_table, label);
                     out.append(&mut self.floating);
+                    self.budget.add_paragraph(&para);
                     out.push(para);
                     out.append(&mut self.pending);
                 }
@@ -1259,6 +1266,7 @@ impl<'a> Reader<'a> {
                 if let Some(m) = self.frame_math(child) {
                     crate::math::mathml(&m, &mut p, n.chp);
                 }
+                self.budget.add_paragraph(&p);
                 out.push(p);
             }
             "frame"
@@ -1280,6 +1288,7 @@ impl<'a> Reader<'a> {
                         &chars::OBJECT.to_string(),
                         CharProps { object: id, ..chp },
                     );
+                    self.budget.add_paragraph(&p);
                     out.push(p);
                 }
                 self.read_block(child, out, in_table);
@@ -1394,7 +1403,13 @@ impl<'a> Reader<'a> {
                 }
                 "s" => {
                     let n = x.int("c").unwrap_or(1).clamp(1, 1000) as usize;
-                    append(p, &" ".repeat(n), chp);
+                    // A few bytes in the file make a thousand spaces, so
+                    // stop adding them once they alone are past the limit.
+                    // The file is refused when its paragraphs are counted.
+                    if self.repeated_spaces <= quill_core::limits::MAX_CHARACTERS {
+                        self.repeated_spaces += n;
+                        append(p, &" ".repeat(n), chp);
+                    }
                     ws.0 = false;
                 }
                 "tab" => {
@@ -1697,18 +1712,29 @@ impl<'a> Reader<'a> {
     /// The picture in a frame, if it holds one Quill can show. A frame can
     /// offer several images (an SVG and a PNG fallback); the first that
     /// decodes is used.
-    fn frame_picture(&self, f: &Element) -> Option<Picture> {
+    fn frame_picture(&mut self, f: &Element) -> Option<Picture> {
         for img in f.children_named("image") {
-            let bytes = match img.attr("href") {
-                Some(h) if !h.is_empty() => (self.pictures)(h),
+            let picture = match img.attr("href") {
+                Some(h) if !h.is_empty() => {
+                    if let Some(cached) = self.picture_cache.get(h) {
+                        cached.clone()
+                    } else if !self.budget.add_picture(h) {
+                        // Past the picture limit; the file is refused when
+                        // reading ends.
+                        return None;
+                    } else {
+                        let picture = (self.pictures)(h).and_then(crate::images::picture);
+                        self.picture_cache.insert(h.to_string(), picture.clone());
+                        picture
+                    }
+                }
                 _ => img
                     .child("binary-data")
                     .and_then(|b| base64_decode(&b.text()))
-                    .map(Into::into),
+                    .map(Arc::<[u8]>::from)
+                    .and_then(crate::images::picture),
             };
-            if let Some(b) = bytes
-                && let Some(mut pic) = crate::images::picture(b)
-            {
+            if let Some(mut pic) = picture {
                 let w = f.attr("width").and_then(length);
                 let h = f.attr("height").and_then(length);
                 if let (Some(w), Some(h)) = (w, h) {
@@ -2042,6 +2068,7 @@ impl<'a> Reader<'a> {
                         first = false;
                         let p = self.read_paragraph(c, in_table, label);
                         out.append(&mut self.floating);
+                        self.budget.add_paragraph(&p);
                         out.push(p);
                         out.append(&mut self.pending);
                     }
@@ -2175,6 +2202,9 @@ impl<'a> Reader<'a> {
         // under them take.
         let mut down: Vec<Option<(usize, usize, CellProps)>> = Vec::new();
         for row in rows {
+            if !self.budget.note_paragraph_count(out.len()) {
+                break;
+            }
             let mut cells = Vec::new();
             let mut row_chp = self.doc.styles.get(0).chp;
             let mut col = 0usize;
@@ -2200,6 +2230,7 @@ impl<'a> Reader<'a> {
                                 let mut p = Paragraph::new(n.pap.clone(), n.chp);
                                 p.pap.set_level(self.table_depth);
                                 p.mark = Mark::CellEnd;
+                                self.budget.add_paragraph(&p);
                                 out.push(p);
                                 cells.push(CellProps {
                                     width: widths.iter().skip(col).take(cols).sum(),
@@ -2241,6 +2272,9 @@ impl<'a> Reader<'a> {
                     });
                 }
                 for _ in 0..repeat {
+                    if !self.budget.note_paragraph_count(out.len()) {
+                        break;
+                    }
                     // Past the most cells a row can have, the text joins
                     // the row's last cell rather than being lost.
                     let full = cells.len() >= MAX_COLUMNS;
@@ -2273,6 +2307,7 @@ impl<'a> Reader<'a> {
                         let n = self.doc.styles.get(0);
                         let mut p = Paragraph::new(n.pap.clone(), n.chp);
                         p.pap.set_level(self.table_depth);
+                        self.budget.add_paragraph(&p);
                         out.push(p);
                     }
                     let last = out.last_mut().unwrap();
@@ -2349,6 +2384,7 @@ impl<'a> Reader<'a> {
                 height,
                 align,
             }));
+            self.budget.add_paragraph(&row_end);
             out.push(row_end);
         }
         self.table_depth -= 1;
@@ -2604,6 +2640,38 @@ mod tests {
     }
 
     #[test]
+    fn plain_paragraphs_stop_at_the_size_limit() {
+        // Nine bytes each in the file, and they compress to almost nothing.
+        let body = "<text:p/>".repeat(quill_core::limits::MAX_PARAGRAPHS * 2);
+        let c = xml::parse(content(&body, "").as_bytes()).unwrap();
+        let err = build(&c, None, None, None, &|_| None).err().unwrap();
+        // The count in the message shows where building stopped.
+        let stopped = format!("{}", quill_core::limits::MAX_PARAGRAPHS + 1);
+        assert!(err.contains("too large") && err.contains(&stopped), "{err}");
+    }
+
+    #[test]
+    fn repeated_spaces_stop_at_the_size_limit() {
+        // Each element is a thousand spaces: far more than Quill holds.
+        let spaces = r#"<text:s text:c="1000"/>"#.repeat(200_000);
+        let c = xml::parse(content(&format!("<text:p>{spaces}</text:p>"), "").as_bytes()).unwrap();
+        let err = build(&c, None, None, None, &|_| None).err().unwrap();
+        assert!(err.contains("too large"), "{err}");
+        // It stopped just past the limit, not at all two hundred million.
+        assert!(err.contains("33555000 characters"), "{err}");
+    }
+
+    #[test]
+    fn repeated_rows_and_cells_stop_at_the_size_limit() {
+        // Each table is tiny in the file but repeats into thousands of
+        // paragraphs; many of them must not all be built.
+        let table = r#"<table:table><table:table-column/><table:table-row table:number-rows-repeated="1000"><table:table-cell table:number-columns-repeated="255"><text:p/></table:table-cell></table:table-row></table:table>"#;
+        let c = xml::parse(content(&table.repeat(40), "").as_bytes()).unwrap();
+        let err = build(&c, None, None, None, &|_| None).err().unwrap();
+        assert!(err.contains("too large"), "{err}");
+    }
+
+    #[test]
     fn border_colors_take_exactly_six_digits() {
         assert_eq!(
             border(Some("0.5pt solid #ff000000"), None).color,
@@ -2809,5 +2877,26 @@ mod tests {
     fn base64_decodes_pictures() {
         assert_eq!(base64_decode("aGVs\nbG8=").unwrap(), b"hello");
         assert!(base64_decode("not*base64").is_none());
+    }
+
+    #[test]
+    fn repeated_picture_files_are_converted_once() {
+        let gif = base64_decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==").unwrap();
+        let c = xml::parse(
+            content(
+                r#"<text:p><draw:frame text:anchor-type="as-char"><draw:image xlink:href="Pictures/a.gif"/></draw:frame></text:p><text:p><draw:frame text:anchor-type="as-char"><draw:image xlink:href="Pictures/a.gif"/></draw:frame></text:p>"#,
+                "",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let (doc, _) = build(&c, None, None, None, &|_| Some(gif.clone().into())).unwrap();
+        let Object::Picture(picture) = &doc.objects[0] else {
+            panic!("pictures were not read")
+        };
+        assert_eq!(doc.objects.len(), 1);
+        assert_eq!(picture.format, quill_core::ImageFormat::Png);
+        assert_eq!(doc.main.paras[0].runs[0].chp.object, 1);
+        assert_eq!(doc.main.paras[1].runs[0].chp.object, 1);
     }
 }

@@ -11,7 +11,7 @@
 
 <p align="center"><a href="https://quillwp.com">quillwp.com</a></p>
 
-**Status: alpha · version 0.17.0.** Alpha testers wanted.
+**Status: alpha · version 0.18.0.** Alpha testers wanted.
 **[Download a build](https://github.com/QuillWP/quill/releases)** from the releases page.
 
 ![Quill editing a document set in Avenir Next with headings, a bulleted list and a table](docs/images/screenshot.png)
@@ -22,12 +22,12 @@ Everything in the app, measured from the release build for Apple Silicon Macs:
 
 | Part | Size |
 |---|---:|
-| The program itself | 5.5 MB |
+| The program itself | 5.3 MB |
 | Thesaurus data | 1.4 MB |
-| Icons and About artwork | 0.9 MB |
+| Icons and About artwork | 0.8 MB |
 | Licenses, notices and readme | 0.2 MB |
-| **Whole app** | **8.0 MB** |
-| **Download (disk image)** | **5.4 MB** |
+| **Whole app** | **7.7 MB** |
+| **Download (disk image)** | **5.2 MB** |
 
 Quill is written from scratch in Rust, draws its own pages and uses native Mac
 menus and dialogs. It uses the fonts already installed on your Mac.
@@ -82,7 +82,16 @@ Quill is a good fit if you use a Mac with a recent macOS, write real documents
 try, and are willing to report what breaks. Please
 [open an issue](https://github.com/QuillWP/quill/issues) for anything that breaks, changes or looks wrong.
 
-Not yet: screen readers cannot read the document area.
+Not yet: screen readers cannot read the document area. See
+[KNOWN-ISSUES.md](KNOWN-ISSUES.md) for what is missing or different, and
+[CONTRIBUTING.md](CONTRIBUTING.md) for how to report a problem.
+
+### About the AI agent files
+
+`AGENTS.md` and `CLAUDE.md` are in the repository because AI coding agents are
+used to work on Quill. They hold the rules those agents follow (build commands,
+limits, how dialogs behave). Everything is reviewed and tested by the
+maintainer before release.
 
 ### Installing an alpha build
 

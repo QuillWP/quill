@@ -80,14 +80,19 @@ const IROHA: &str = "イロハニホヘトチリヌルヲワカヨタレソツ�
 const IROHA_HALF: &str = "ｲﾛﾊﾆﾎﾍﾄﾁﾘﾇﾙｦﾜｶﾖﾀﾚｿﾂﾈﾅﾗﾑｳヰﾉｵｸﾔﾏｹﾌｺｴﾃｱｻｷﾕﾒﾐｼヱﾋﾓｾｽ";
 const RUSSIAN: &str = "абвгдежзиклмнопрстуфхцчшщэюя";
 
-/// a, b ... z, then aa, bb ... as Word does.
+/// Most times a letter or mark is repeated. Word writes as many as the
+/// number needs; a huge start value must not make a huge string.
+const MAX_REPEAT: usize = 10;
+
+/// a, b ... z, then aa, bb ... as Word does, up to ten of a letter.
 pub(crate) fn letters(n: i32, upper: bool) -> String {
     if n < 1 {
         return n.to_string();
     }
     let base = if upper { b'A' } else { b'a' };
     let c = (base + ((n - 1) % 26) as u8) as char;
-    c.to_string().repeat(((n - 1) / 26 + 1) as usize)
+    c.to_string()
+        .repeat((((n - 1) / 26 + 1) as usize).min(MAX_REPEAT))
 }
 
 pub fn roman(mut n: i32) -> String {
@@ -244,7 +249,7 @@ fn chicago(n: i32) -> String {
     let marks = ['*', '†', '‡', '§'];
     marks[(n as usize - 1) % 4]
         .to_string()
-        .repeat((n as usize - 1) / 4 + 1)
+        .repeat(((n as usize - 1) / 4 + 1).min(MAX_REPEAT))
 }
 
 /// A custom format's pattern: "001, 002, 003, ..." pads to its first
@@ -354,6 +359,13 @@ fn english(n: i32, ordinal: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_letters_and_marks_stop_growing() {
+        assert_eq!(letters(1_000_000, false).len(), 10);
+        assert_eq!(chicago(1_000_000).chars().count(), 10);
+        assert_eq!(letters(27, false), "aa");
+    }
 
     #[test]
     fn words() {

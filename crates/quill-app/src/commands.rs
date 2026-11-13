@@ -34,6 +34,7 @@ commands! {
     Quit,
     // Edit
     Undo,
+    Redo,
     Repeat,
     Cut,
     Copy,
@@ -354,6 +355,7 @@ impl Cmd {
             Preferences => "Preferences…",
             Quit => "Quit",
             Undo => "Undo",
+            Redo => "Redo",
             Repeat => "Repeat",
             Cut => "Cut",
             Copy => "Copy",
@@ -795,7 +797,7 @@ fn default_lookup(key: &Key, physical_char: Option<char>, mods: Mods) -> Option<
         (K::Ch('-'), true, false, false) => ZoomOut,
         (K::Ch('`'), true, false, false) => NonbreakingHyphen,
 
-        (K::Ch('z'), true, true, false) => PlainText,
+        (K::Ch('z'), true, true, false) => Redo,
         (K::Ch(']'), true, true, false) => WordUnderline,
         (K::Ch('['), true, true, false) => DoubleUnderline,
         (K::Ch('\\'), true, true, false) => DottedUnderline,
@@ -911,6 +913,7 @@ pub fn shortcut_label(cmd: Cmd) -> &'static str {
         SaveAs => "⌘⇧S",
         Quit => "⌘Q",
         Undo => "⌘Z",
+        Redo => "⌘⇧Z",
         Repeat => "⌘Y",
         Cut => "⌘X",
         Copy => "⌘C",
@@ -938,7 +941,6 @@ pub fn shortcut_label(cmd: Cmd) -> &'static str {
         Bold => "⌘B",
         Italic => "⌘I",
         Underline => "⌘U",
-        PlainText => "⌘⇧Z",
         RevertToStyle => "⌘⇧␣",
         CycleCase => "⇧F3",
         LargerFontSize => "⌘⇧>",
@@ -996,10 +998,9 @@ mod tests {
         assert_eq!(lookup(&ch("f"), None, cmd()), Some(Cmd::Find));
         assert_eq!(lookup(&ch("F"), Some('f'), cmd_shift()), Some(Cmd::Replace));
         assert_eq!(lookup(&ch("b"), None, cmd()), Some(Cmd::Bold));
-        assert_eq!(
-            lookup(&ch("Z"), Some('z'), cmd_shift()),
-            Some(Cmd::PlainText)
-        );
+        // Command-Shift-Z is Redo, as on every other Mac app, and no longer
+        // strips formatting from the selection.
+        assert_eq!(lookup(&ch("Z"), Some('z'), cmd_shift()), Some(Cmd::Redo));
         assert_eq!(lookup(&ch("z"), None, cmd()), Some(Cmd::Undo));
         assert_eq!(lookup(&ch("s"), None, cmd()), Some(Cmd::Save));
         assert_eq!(lookup(&ch("S"), Some('s'), cmd_shift()), Some(Cmd::SaveAs));

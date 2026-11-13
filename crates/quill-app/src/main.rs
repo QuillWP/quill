@@ -5,6 +5,7 @@
 
 mod advanced;
 mod advanced_dialog;
+mod alerts;
 mod app;
 mod bars;
 mod border_dialog;

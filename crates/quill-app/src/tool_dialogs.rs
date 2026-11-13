@@ -202,7 +202,7 @@ pub fn read_renumber(d: &Dialog) -> Option<Renumber> {
         .trim()
         .parse()
         .ok()
-        .filter(|n| *n > 0)?;
+        .filter(|n| (1..=quill_core::tools::MAX_RENUMBER_START).contains(n))?;
     Some(Renumber {
         only_numbered: d.radio_on(1) == "numbered",
         start,
@@ -275,6 +275,16 @@ mod tests {
     use super::*;
     use crate::dialog::Kind;
     use quill_core::Document;
+
+    #[test]
+    fn renumber_refuses_an_unbounded_start() {
+        let mut d = renumber();
+        d.set_field(
+            "start",
+            &(quill_core::tools::MAX_RENUMBER_START + 1).to_string(),
+        );
+        assert!(read_renumber(&d).is_none());
+    }
 
     #[test]
     fn word_count_is_standard_controls_and_updates_each_column() {

@@ -37,9 +37,9 @@ PACKAGE_NOTICES = ROOT / "target/notices/THIRD-PARTY-NOTICES.txt"
 EXCLUDED_DIRS = {"target", "dist", ".git", "__pycache__", "Quill.app", "drafts"}
 
 
-def run(*command: str, capture: bool = False) -> str:
+def run(*command: str, capture: bool = False, env: dict | None = None) -> str:
     print("+ " + " ".join(command), flush=True)
-    result = subprocess.run(command, cwd=ROOT, check=True, text=True,
+    result = subprocess.run(command, cwd=ROOT, check=True, text=True, env=env,
                             stdout=subprocess.PIPE if capture else None)
     return result.stdout or ""
 
@@ -104,6 +104,23 @@ def native_target() -> tuple[str, str]:
     return system, target
 
 
+def remapped_environment() -> dict:
+    """The environment for building, with source paths shortened so the binary
+    does not carry the builder's home folder (panic messages keep the crate,
+    file and line)."""
+    cargo_home = Path(os.environ.get("CARGO_HOME") or Path.home() / ".cargo")
+    remaps = [f"--remap-path-prefix={ROOT}=quill"]
+    registry = cargo_home / "registry" / "src"
+    if registry.is_dir():
+        for index in sorted(registry.iterdir()):
+            remaps.append(f"--remap-path-prefix={index}=crates.io")
+    env = dict(os.environ)
+    # RUSTFLAGS is split on spaces, so a path with one is left unmapped.
+    remaps = [r for r in remaps if " " not in r]
+    env["RUSTFLAGS"] = " ".join(filter(None, [env.get("RUSTFLAGS"), *remaps]))
+    return env
+
+
 def build(check: bool, debug: bool) -> Path:
     if check:
         run("cargo", "fmt", "--all", "--check")
@@ -116,7 +133,8 @@ def build(check: bool, debug: bool) -> Path:
     profile = [] if debug else ["--release"]
     messages = run("cargo", "build", *profile, "--locked",
                    "--package", "quill-app", "--bin", "quill",
-                   "--message-format=json-render-diagnostics", capture=True)
+                   "--message-format=json-render-diagnostics", capture=True,
+                   env=remapped_environment())
     for line in reversed(messages.splitlines()):
         message = json.loads(line)
         if (message.get("reason") == "compiler-artifact"
@@ -189,7 +207,6 @@ def mac_app(executable: Path, app: Path, version: str, identity: str | None, deb
     copy_common(resources, mac=True)
     shutil.copy2(ROOT / "assets/quill.icns", resources / "Quill.icns")
     shutil.copy2(ROOT / "assets/quill-document.icns", resources / "QuillDocument.icns")
-    shutil.copy2(ROOT / "assets/quill-about.jpg", resources / "quill-about.jpg")
     info = plistlib.loads((ROOT / "tools/Info.plist").read_bytes())
     info["CFBundleVersion"] = info["CFBundleShortVersionString"] = version
     if debug:

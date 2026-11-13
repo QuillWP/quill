@@ -4,12 +4,32 @@ use quill_core::Document;
 use std::path::{Path, PathBuf};
 
 const EXTENSION: &str = "wrec";
+const OPENING: &str = ".opening";
 /// Beside a recovery copy of Markdown source that was being edited: the
 /// formatted document the source was made from.
 const ORIGINAL: &str = "wreco";
 
 fn original_path(path: &Path) -> PathBuf {
     path.with_extension(ORIGINAL)
+}
+
+fn opening_path(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("recovery");
+    path.with_file_name(format!("{stem}{OPENING}.{EXTENSION}"))
+}
+
+fn is_opening(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.ends_with(OPENING))
+}
+
+fn path_before_opening(path: &Path) -> Option<PathBuf> {
+    let stem = path.file_stem()?.to_str()?.strip_suffix(OPENING)?;
+    Some(path.with_file_name(format!("{stem}.{EXTENSION}")))
 }
 
 fn native_bytes(doc: &Document) -> Vec<u8> {
@@ -105,6 +125,80 @@ pub struct Recovered {
     pub original: Option<Document>,
 }
 
+/// Recovery files whose previous opening did not finish. They stay aside
+/// until the person explicitly chooses to try them again.
+pub fn interrupted() -> Vec<PathBuf> {
+    let Some(dir) = directory() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(EXTENSION) && is_opening(p))
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Put interrupted files back in the normal recovery queue.
+pub fn retry_interrupted(paths: &[PathBuf]) {
+    for opening in paths {
+        let Some(path) = path_before_opening(opening) else {
+            continue;
+        };
+        if let Err(e) = std::fs::rename(opening, &path) {
+            eprintln!("quill: could not retry recovery {}: {e}", opening.display());
+        }
+    }
+}
+
+fn load_one(path: PathBuf) -> Option<Recovered> {
+    let opening = opening_path(&path);
+    if let Err(e) = std::fs::rename(&path, &opening) {
+        eprintln!("quill: could not guard recovery {}: {e}", path.display());
+        return None;
+    }
+    let loaded = quill_formats::load(&opening);
+    let recovered = match loaded {
+        Ok(mut doc) => {
+            doc.touch();
+            let title = title_from_path(&path);
+            let beside = original_path(&path);
+            let original = beside
+                .is_file()
+                .then(|| quill_formats::load(&beside))
+                .and_then(|r| match r {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        eprintln!("quill: could not recover {}: {e}", beside.display());
+                        None
+                    }
+                });
+            Some(Recovered {
+                path: path.clone(),
+                title,
+                doc,
+                original,
+            })
+        }
+        Err(e) => {
+            eprintln!("quill: could not recover {}: {e}", path.display());
+            None
+        }
+    };
+    if let Err(e) = std::fs::rename(&opening, &path) {
+        eprintln!(
+            "quill: could not finish recovery {}: {e}",
+            opening.display()
+        );
+        return None;
+    }
+    recovered
+}
+
 /// Recovery files left by an earlier process. Damaged files remain on disk
 /// for manual salvage; valid ones retain their slot until saved or closed.
 pub fn load_all() -> Vec<Recovered> {
@@ -117,39 +211,10 @@ pub fn load_all() -> Vec<Recovered> {
     let mut paths: Vec<PathBuf> = entries
         .filter_map(Result::ok)
         .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(EXTENSION))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some(EXTENSION) && !is_opening(p))
         .collect();
     paths.sort();
-    paths
-        .into_iter()
-        .filter_map(|path| match quill_formats::load(&path) {
-            Ok(mut doc) => {
-                doc.touch();
-                let title = title_from_path(&path);
-                let beside = original_path(&path);
-                let original = beside
-                    .is_file()
-                    .then(|| quill_formats::load(&beside))
-                    .and_then(|r| match r {
-                        Ok(d) => Some(d),
-                        Err(e) => {
-                            eprintln!("quill: could not recover {}: {e}", beside.display());
-                            None
-                        }
-                    });
-                Some(Recovered {
-                    path,
-                    title,
-                    doc,
-                    original,
-                })
-            }
-            Err(e) => {
-                eprintln!("quill: could not recover {}: {e}", path.display());
-                None
-            }
-        })
-        .collect()
+    paths.into_iter().filter_map(load_one).collect()
 }
 
 pub fn remove(path: Option<PathBuf>) {
@@ -169,6 +234,12 @@ mod tests {
         let path = new_path(dir, "Draft/One: revised.qwp", 7);
         assert_eq!(path.extension().and_then(|e| e.to_str()), Some("wrec"));
         assert_eq!(title_from_path(&path), "Draft_One_ revised_qwp");
+        let opening = opening_path(&path);
+        assert!(is_opening(&opening));
+        assert_eq!(
+            path_before_opening(&opening).as_deref(),
+            Some(path.as_path())
+        );
     }
 
     #[test]
@@ -209,6 +280,37 @@ mod tests {
         save(Some(&path), &source, Some(&original), "Draft", 1).unwrap();
         remove(Some(path));
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn opening_a_recovery_file_uses_a_crash_marker() {
+        let dir = std::env::temp_dir().join(format!("quill-recovery-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("7-Draft.wrec");
+        save(
+            Some(&path),
+            &quill_core::text::from_plain_text("Draft"),
+            None,
+            "Draft",
+            1,
+        )
+        .unwrap();
+
+        let recovered = load_one(path.clone()).unwrap();
+        assert_eq!(recovered.doc.main.paras[0].text, "Draft");
+        assert!(path.is_file());
+        assert!(!opening_path(&path).exists());
+
+        std::fs::rename(&path, opening_path(&path)).unwrap();
+        let opening = opening_path(&path);
+        assert_eq!(
+            path_before_opening(&opening).as_deref(),
+            Some(path.as_path())
+        );
+        retry_interrupted(std::slice::from_ref(&opening));
+        assert!(path.is_file());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

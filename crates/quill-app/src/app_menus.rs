@@ -339,12 +339,14 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
 
     let undo = v.undo_label();
     let can_undo = v.can_undo();
+    let redo = v.redo_label();
     let repeat = v.repeat_label();
     let can_repeat = !repeat.starts_with("Can't");
     let edit = Menu {
         title: "Edit".into(),
         items: vec![
             b.cmd(&undo, Cmd::Undo).enabled(can_undo),
+            b.cmd(&redo, Cmd::Redo).enabled(v.can_redo()),
             b.cmd(&repeat, Cmd::Repeat).enabled(can_repeat),
             sep(),
             b.cmd("Cut", Cmd::Cut).enabled(has_sel),

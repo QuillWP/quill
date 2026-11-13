@@ -73,10 +73,6 @@ impl GlyphCache {
         }
         &self.map[&key]
     }
-
-    pub fn memory(&self) -> usize {
-        self.bytes
-    }
 }
 
 fn rasterize(fonts: &Fonts, key: FaceKey, glyph: GlyphId, px: f32, sub: f32) -> Mask {

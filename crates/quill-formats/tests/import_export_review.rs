@@ -69,7 +69,7 @@ fn odt_cells_read_background_and_border() {
 <table:table table:name="T" table:style-name="Tbl"><table:table-column table:number-columns-repeated="2"/>
 <table:table-row><table:table-cell table:style-name="Red" office:value-type="string"><text:p>red</text:p></table:table-cell><table:table-cell table:style-name="Plain" office:value-type="string"><text:p>plain</text:p></table:table-cell></table:table-row></table:table>
 <text:p>after</text:p></office:text></office:body></office:document>"##;
-    let d = odt_read::read_flat(x.as_bytes()).unwrap();
+    let d = odt_read::read_flat_reported(x.as_bytes()).unwrap().0;
     let row = quill_core::table::row_at(&d.main.paras, 0).unwrap();
     let p = quill_core::table::row_props(&d.main.paras, &row, 6000);
     assert!(p.cells[0].shading > 0);
@@ -94,7 +94,7 @@ fn odt_character_formats_come_through_common_and_derived_paragraph_styles() {
 <text:p text:style-name="Sub">child</text:p>
 <text:p text:style-name="P1">auto</text:p>
 </office:text></office:body></office:document>"##;
-    let d = odt_read::read_flat(x.as_bytes()).unwrap();
+    let d = odt_read::read_flat_reported(x.as_bytes()).unwrap().0;
     for p in &d.main.paras[..3] {
         let c = p.chp_of_char(0);
         assert!(c.bold && c.italic, "{:?}", p.text);

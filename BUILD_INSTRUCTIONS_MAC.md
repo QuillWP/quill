@@ -116,4 +116,4 @@ stopped, at the cost of running much more slowly:
 
     python3 tools/package.py --debug
 
-It is made at `target/debug/Quill.app`.
+It is made at `target/debug/Quill Debug.app`.
