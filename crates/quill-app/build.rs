@@ -1,5 +1,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=windows.manifest");
+    build_info();
     let target = std::env::var("TARGET").unwrap_or_default();
     if target.ends_with("windows-msvc") {
         let manifest = std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap())
@@ -60,4 +61,76 @@ fn embed_icons(target: &str) {
         .expect("run Windows SDK resource compiler");
     assert!(status.success(), "compile Quill icon resources");
     println!("cargo:rustc-link-arg-bin=quill={}", resource.display());
+}
+
+/// Record when the program was built and from which branch and commit, for
+/// the About window (`build_info.rs`). This runs again whenever any crate's
+/// source or the checked-out commit changes, so the time is that of the
+/// build that last changed the program. Without git (a source zip) only the
+/// time is recorded.
+fn build_info() {
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    for dir in [
+        "src",
+        "../quill-core/src",
+        "../quill-formats/src",
+        "../quill-layout/src",
+    ] {
+        println!("cargo:rerun-if-changed={dir}");
+    }
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    // A commit or a branch switch moves HEAD or the branch's ref.
+    for path in ["HEAD", "packed-refs"] {
+        if let Some(p) = git(&["rev-parse", "--git-path", path]) {
+            println!("cargo:rerun-if-changed={p}");
+        }
+    }
+    let branch = git(&["symbolic-ref", "-q", "--short", "HEAD"]);
+    if let Some(branch) = &branch
+        && let Some(p) = git(&["rev-parse", "--git-path", &format!("refs/heads/{branch}")])
+    {
+        println!("cargo:rerun-if-changed={p}");
+    }
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    println!("cargo:rustc-env=QUILL_BUILD_TIME={secs}");
+    // The same time on the building machine's clock, when `date` can say it
+    // (-r on the Mac and BSD, -d on Linux). The app falls back to UTC.
+    let local = ["-r", "-d"].iter().find_map(|flag| {
+        let at = if *flag == "-d" {
+            format!("@{secs}")
+        } else {
+            secs.to_string()
+        };
+        Command::new("date")
+            .args([*flag, at.as_str(), "+%Y-%m-%d %H:%M %Z"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+    });
+    if let Some(local) = local {
+        println!("cargo:rustc-env=QUILL_BUILD_LOCAL_TIME={local}");
+    }
+    if let Some(commit) = git(&["rev-parse", "--short", "HEAD"]) {
+        println!("cargo:rustc-env=QUILL_BUILD_COMMIT={commit}");
+        // Changes to tracked files that are not committed.
+        let dirty =
+            git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
+        println!("cargo:rustc-env=QUILL_BUILD_DIRTY={}", u8::from(dirty));
+    }
+    if let Some(branch) = branch {
+        println!("cargo:rustc-env=QUILL_BUILD_BRANCH={branch}");
+    }
 }

@@ -533,16 +533,17 @@ impl DocView {
         let clip = c.set_clip(area);
         let ox = self.area.x + self.text_x();
         let n = self.layouts.len();
-        // In dark mode only the desk round the pages goes dark; the pages,
-        // and Normal view's text, keep the document's own colors.
-        let dark = std::mem::replace(&mut c.dark, false);
+        // In dark mode the desk round the pages takes the interface's dark
+        // colors and the pages and their text a dark page's (`page_ink`).
+        // Only the drawing changes: the document keeps its own colors.
+        let dark_page = std::mem::replace(&mut c.dark_page, c.dark);
         if self.page_view {
-            c.dark = dark;
+            c.dark_page = false;
             c.fill(
                 area,
                 crate::settings::with(|s| s.page_layout_color_background),
             );
-            c.dark = false;
+            c.dark_page = c.dark;
             let (_, ph) = self.page_size();
             let left = area.x + self.page_left();
             for k in 0..self.pages.len() {
@@ -633,7 +634,7 @@ impl DocView {
         if focused {
             self.draw_table_handle(c);
         }
-        c.dark = dark;
+        c.dark_page = dark_page;
         c.restore_clip(clip);
     }
 

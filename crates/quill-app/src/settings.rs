@@ -55,6 +55,46 @@ impl DefaultView {
     }
 }
 
+/// Light or dark windows (Preferences > View). Auto follows the system.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Appearance {
+    #[default]
+    Auto,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Appearance::Auto, Appearance::Light, Appearance::Dark];
+
+    /// The name Preferences shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            Appearance::Auto => "Auto",
+            Appearance::Light => "Light",
+            Appearance::Dark => "Dark",
+        }
+    }
+
+    /// The name the settings file uses.
+    fn key(self) -> &'static str {
+        match self {
+            Appearance::Auto => "auto",
+            Appearance::Light => "light",
+            Appearance::Dark => "dark",
+        }
+    }
+
+    /// Whether windows draw dark, given whether the system is dark now.
+    pub fn is_dark(self, system_dark: bool) -> bool {
+        match self {
+            Appearance::Auto => system_dark,
+            Appearance::Light => false,
+            Appearance::Dark => true,
+        }
+    }
+}
+
 /// Whether Quill opens again the documents that were open when it last quit
 /// (Preferences > Open And Save).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -180,6 +220,8 @@ pub struct Settings {
     pub page_layout_color_page_border: u32,
     pub text_boundaries: bool,
     pub default_view: DefaultView,
+    /// Light, dark, or as the system is.
+    pub appearance: Appearance,
     pub open_with_ruler: bool,
     pub open_with_formatting_toolbar: bool,
     pub open_with_paragraph_toolbar: bool,
@@ -249,6 +291,11 @@ pub struct Settings {
     pub paragraph_toolbar_tabs: bool,
     /// 0 top (horizontal), 1 left, 2 right (vertical).
     pub toolbar_position: u8,
+    /// The Style Sheets palette: shown, docked at the right (not floating),
+    /// and its tab (0 All, 1 Paragraph, 2 Character).
+    pub show_styles_palette: bool,
+    pub styles_palette_docked: bool,
+    pub styles_palette_tab: u8,
     /// Customized buttons: position, picture and command name.
     pub toolbar_buttons: Vec<(usize, usize, String)>,
     /// Colors saved for every document, each with its name.
@@ -353,6 +400,9 @@ impl Default for Settings {
             ruler_background: 0xFFFFFF,
             ruler_foreground: 0x000000,
             toolbar_position: 0,
+            show_styles_palette: false,
+            styles_palette_docked: true,
+            styles_palette_tab: 0,
             toolbar_buttons: Vec::new(),
             named_colors: Vec::new(),
             accepted_fonts: Vec::new(),
@@ -382,6 +432,7 @@ impl Default for Settings {
             page_layout_color_page_border: DEFAULT_PAGE_BORDER,
             text_boundaries: false,
             default_view: DefaultView::Normal,
+            appearance: Appearance::Auto,
             open_with_ruler: true,
             open_with_formatting_toolbar: true,
             open_with_paragraph_toolbar: true,
@@ -477,6 +528,7 @@ impl Settings {
             "default_view",
             self.default_view.key().to_string(),
         );
+        put(&mut out, "appearance", self.appearance.key().to_string());
         put(&mut out, "open_with_ruler", b(self.open_with_ruler));
         put(
             &mut out,
@@ -615,6 +667,17 @@ impl Settings {
             &mut out,
             "toolbar_position",
             self.toolbar_position.to_string(),
+        );
+        put(&mut out, "show_styles_palette", b(self.show_styles_palette));
+        put(
+            &mut out,
+            "styles_palette_docked",
+            b(self.styles_palette_docked),
+        );
+        put(
+            &mut out,
+            "styles_palette_tab",
+            self.styles_palette_tab.to_string(),
         );
         put(
             &mut out,
@@ -829,6 +892,9 @@ impl Settings {
                 }
                 "line_color" => s.line_color = html_color(v).unwrap_or(s.line_color),
                 "toolbar_position" => s.toolbar_position = v.parse().unwrap_or(0u8).min(2),
+                "show_styles_palette" => s.show_styles_palette = flag,
+                "styles_palette_docked" => s.styles_palette_docked = flag,
+                "styles_palette_tab" => s.styles_palette_tab = v.parse().unwrap_or(0u8).min(2),
                 "toolbar_buttons" => {
                     s.toolbar_buttons = v
                         .split(';')
@@ -912,6 +978,12 @@ impl Settings {
                     s.default_view = DefaultView::ALL
                         .into_iter()
                         .find(|d| d.key() == v)
+                        .unwrap_or_default()
+                }
+                "appearance" => {
+                    s.appearance = Appearance::ALL
+                        .into_iter()
+                        .find(|a| a.key() == v)
                         .unwrap_or_default()
                 }
                 "open_with_ruler" => s.open_with_ruler = flag,
@@ -1276,6 +1348,9 @@ mod tests {
         };
         s.document.margin_left = 2000;
         s.document.footnote_position = FootnotePosition::EndOfSection;
+        s.show_styles_palette = true;
+        s.styles_palette_docked = false;
+        s.styles_palette_tab = 2;
         s.section.columns = 3;
         s.section.start = SectionStart::OddPage;
         s.section.page_number_format = PageNumberFormat::UpperLetter;
@@ -1465,6 +1540,28 @@ mod tests {
             0x999999
         );
     }
+    #[test]
+    fn appearance_reads_back_and_defaults_to_auto() {
+        assert_eq!(Settings::default().appearance, Appearance::Auto);
+        for a in Appearance::ALL {
+            let s = Settings {
+                appearance: a,
+                ..Settings::default()
+            };
+            assert_eq!(Settings::from_text(&s.to_text()).appearance, a);
+        }
+        let s = Settings::from_text("appearance = purple\n");
+        assert_eq!(s.appearance, Appearance::Auto);
+    }
+
+    #[test]
+    fn appearance_decides_dark_with_the_system() {
+        assert!(Appearance::Auto.is_dark(true));
+        assert!(!Appearance::Auto.is_dark(false));
+        assert!(!Appearance::Light.is_dark(true));
+        assert!(Appearance::Dark.is_dark(false));
+    }
+
     #[test]
     fn default_view_reads_back() {
         for d in DefaultView::ALL {

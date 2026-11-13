@@ -98,16 +98,14 @@ pub fn style(view: &DocView) -> (Dialog, StyleState) {
     d.popup_owned("basedon", names.clone(), 0, 116.0, 293.0, 218.0);
     d.popup_owned("next", names, 0, 116.0, 319.0, 218.0);
     d.text("Character Style:", 15.0, 348.0);
-    let characters = std::iter::once("No Style".to_string())
-        .chain(
-            view.doc
-                .styles
-                .characters
-                .iter()
-                .map(|style| style.name.clone()),
-        )
-        .collect();
-    d.popup_owned("character_style", characters, 0, 116.0, 345.0, 218.0);
+    d.popup_owned(
+        "character_style",
+        character_choices(view),
+        0,
+        116.0,
+        345.0,
+        218.0,
+    );
     d.note("character_status", "", 15.0, 375.0, 454.0);
     d.note(
         "actions_help",
@@ -132,6 +130,36 @@ pub fn style(view: &DocView) -> (Dialog, StyleState) {
         select(&mut st, &mut d, view, i);
     }
     (d, st)
+}
+
+/// The Character Style popup: No Style, the document's character styles,
+/// and a last choice that makes a new one.
+fn character_choices(view: &DocView) -> Vec<String> {
+    std::iter::once("No Style".to_string())
+        .chain(view.doc.styles.characters.iter().map(|s| s.name.clone()))
+        .chain(std::iter::once("New Character Style\u{2026}".to_string()))
+        .collect()
+}
+
+/// A character style was made from the popup's New Character Style: list it
+/// and link the style being edited to it.
+pub fn character_saved(st: &mut StyleState, d: &mut Dialog, view: &DocView, id: u16) {
+    st.character = id;
+    d.set_options("character_style", character_choices(view), id as usize);
+    update_description(st, d, view);
+}
+
+/// Show style `id` (None for New Style) when the dialog opens from the Style
+/// Sheets palette. A style the Document Styles list leaves out (an
+/// automatic one not used yet) switches the list to All Styles.
+pub fn choose(st: &mut StyleState, d: &mut Dialog, view: &DocView, id: Option<StyleId>) {
+    if !st.entries.contains(&id) && id.is_some() {
+        d.set_on("allstyles", true);
+        changed(st, d, view, "allstyles");
+    }
+    if let Some(i) = st.entries.iter().position(|e| *e == id) {
+        select(st, d, view, i);
+    }
 }
 
 /// Show entry `i` in the fields.
@@ -383,18 +411,66 @@ pub fn apply(st: &mut StyleState, d: &mut Dialog, view: &mut DocView) -> bool {
     true
 }
 
-/// Delete the chosen style; its paragraphs return to Normal.
-pub fn delete(st: &mut StyleState, d: &mut Dialog, view: &mut DocView) {
-    let Some(id) = st.entries[st.selected] else {
-        return;
-    };
-    if view.doc.styles.get(id).builtin {
-        return;
+/// A name for a copy of `name` that `taken` says is free, as the Finder
+/// names copies: "Emphasis copy", then "Emphasis copy 2", whichever is
+/// copied. Paragraph and character styles both name their copies this way.
+pub fn copy_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
+    let mut base = name;
+    if let Some((stem, n)) = base.rsplit_once(" copy ")
+        && n.parse::<u32>().is_ok()
+    {
+        base = stem;
+    }
+    let base = base.strip_suffix(" copy").unwrap_or(base);
+    let base: String = base.chars().take(240).collect();
+    let mut candidate = format!("{base} copy");
+    let mut n = 2;
+    while taken(&candidate) {
+        candidate = format!("{base} copy {n}");
+        n += 1;
+    }
+    candidate
+}
+
+/// Copy style `id` under a "... copy" name, as one undoable step, and
+/// return the copy. A style whose next style is itself gives a copy whose
+/// next style is the copy.
+pub fn duplicate(view: &mut DocView, id: StyleId) -> StyleId {
+    let s = view.doc.styles.get(id).clone();
+    let name = copy_name(&s.display_name(), |n| view.doc.styles.find(n).is_some());
+    let next = (s.next != id).then_some(s.next);
+    view.doc.begin("Define Style", view.sel);
+    let new = view
+        .doc
+        .add_style(&name, s.based_on.unwrap_or(0), next, s.pap.clone(), s.own());
+    view.doc
+        .redefine_style_linked(new, s.pap.clone(), s.own(), s.character);
+    view.doc.commit(view.sel);
+    view.invalidate_layout();
+    new
+}
+
+/// Delete style `id` as one undoable step; its paragraphs return to
+/// Normal. Normal and the automatic styles stay. True when it went.
+pub fn delete_style(view: &mut DocView, id: StyleId) -> bool {
+    if id == 0 || view.doc.styles.get(id).builtin {
+        return false;
     }
     view.doc.begin("Delete Style", view.sel);
     view.doc.delete_style(id);
     view.doc.commit(view.sel);
     view.invalidate_layout();
+    true
+}
+
+/// Delete the chosen style; its paragraphs return to Normal.
+pub fn delete(st: &mut StyleState, d: &mut Dialog, view: &mut DocView) {
+    let Some(id) = st.entries[st.selected] else {
+        return;
+    };
+    if !delete_style(view, id) {
+        return;
+    }
     st.choices = sorted(&view.doc, 0..view.doc.styles.styles.len() as StyleId);
     let names = choice_names(view, &st.choices);
     d.set_options("basedon", names.clone(), 0);

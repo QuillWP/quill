@@ -61,10 +61,35 @@ pub fn install(proxy: EventLoopProxy<UserEvent>) {
     }
 }
 
+/// Make the whole application light (`Some(false)`), dark (`Some(true)`)
+/// or follow the system (`None`). Every window, alert and Open or Save
+/// panel takes it from here.
+pub fn set_app_appearance(dark: Option<bool>) {
+    // SAFETY: called on the main thread; NSApplication retains the
+    // appearance, and nil returns it to the system's.
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let appearance: *mut AnyObject = match dark {
+            None => std::ptr::null_mut(),
+            Some(dark) => {
+                let name = objc2_foundation::NSString::from_str(if dark {
+                    "NSAppearanceNameDarkAqua"
+                } else {
+                    "NSAppearanceNameAqua"
+                });
+                msg_send![class!(NSAppearance), appearanceNamed: &*name]
+            }
+        };
+        let _: () = msg_send![app, setAppearance: appearance];
+    }
+}
+
 pub struct MacScrollbars {
     primary: MacScrollbar,
     secondary: MacScrollbar,
     horizontal: MacScrollbar,
+    /// Whether the knobs are light ones, for a dark page.
+    light_knobs: Cell<bool>,
 }
 
 struct MacScrollbar {
@@ -112,6 +137,7 @@ impl MacScrollbars {
             primary,
             secondary,
             horizontal,
+            light_knobs: Cell::new(false),
         })
     }
 
@@ -124,6 +150,25 @@ impl MacScrollbars {
             Some(2)
         } else {
             None
+        }
+    }
+
+    /// Light knobs over a dark page, dark ones over a light page.
+    pub fn set_dark(&self, dark: bool) {
+        if self.light_knobs.replace(dark) == dark {
+            return;
+        }
+        let style = if dark {
+            NSScrollerKnobStyle::Light
+        } else {
+            NSScrollerKnobStyle::Dark
+        };
+        for bar in [&self.primary, &self.secondary, &self.horizontal] {
+            // SAFETY: the controls are alive and used only on the main thread.
+            unsafe {
+                bar.container.setScrollerKnobStyle(style);
+                bar.scroller.setKnobStyle(style);
+            }
         }
     }
 

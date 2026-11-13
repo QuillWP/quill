@@ -40,6 +40,7 @@ mod commands;
 mod dialogs;
 mod files;
 mod markdown;
+mod palette_window;
 mod panes;
 #[cfg(target_os = "macos")]
 mod platform;
@@ -49,6 +50,7 @@ mod preferences;
 mod printing;
 mod revisions;
 mod snapshot;
+mod styles;
 #[cfg(not(target_os = "macos"))]
 mod system_preview;
 mod window_ui;
@@ -184,12 +186,16 @@ pub struct WinState {
     /// Screen-only scale for the document. Layout and saved measurements stay
     /// in document points.
     document_zoom: f32,
-    /// macOS is in dark mode: the interface round the page goes dark.
+    /// Drawing in dark mode (Preferences > View > Appearance, or the
+    /// system's when that is Auto): the interface and the page go dark.
     pub dark: bool,
     zoom_edit: Option<zoom::Edit>,
     review_filter: revisions::Filter,
     review_closed: bool,
     review_width: Option<f32>,
+    /// The Style Sheets palette's own state; whether it shows, its tab and
+    /// whether it is docked are the settings'.
+    palette: crate::styles_palette::Palette,
     review_resize: Option<f32>,
     review_resize_text_width: Option<f32>,
     /// Where the document was scrolled to when the comments last followed it,
@@ -271,6 +277,27 @@ pub struct WinState {
 /// as any other; icons are vector and text is drawn at size, so the uneven
 /// pixel scale does not blur them. Windows and Linux use 1.25, nearer
 /// their own menus.
+/// Make `window` light, dark or as the system is, for Preferences >
+/// View > Appearance. On macOS the whole application takes the setting
+/// instead (`App::sync_appearance`), so its alerts and panels match.
+fn set_window_appearance(window: &Window, appearance: crate::settings::Appearance) {
+    #[cfg(not(target_os = "macos"))]
+    window.set_theme(match appearance {
+        crate::settings::Appearance::Auto => None,
+        crate::settings::Appearance::Light => Some(winit::window::Theme::Light),
+        crate::settings::Appearance::Dark => Some(winit::window::Theme::Dark),
+    });
+    #[cfg(target_os = "macos")]
+    let _ = (window, appearance);
+}
+
+/// Whether `window` should draw dark: the Appearance setting, or the
+/// system's look when that is Auto.
+fn appearance_is_dark(window: &Window) -> bool {
+    crate::settings::with(|s| s.appearance)
+        .is_dark(window.theme() == Some(winit::window::Theme::Dark))
+}
+
 pub fn ui_scale(_display_scale: f32) -> f32 {
     let base = if cfg!(target_os = "macos") {
         1.2375
@@ -361,6 +388,7 @@ impl WinState {
             review_filter: revisions::Filter::All,
             review_closed: false,
             review_width: None,
+            palette: crate::styles_palette::Palette::new(crate::styles_palette::Tab::All, true),
             review_resize: None,
             review_resize_text_width: None,
             comment_sync: None,
@@ -560,6 +588,9 @@ impl WinState {
             }
             return;
         }
+        if self.palette_wheel(cx, cy, dy) {
+            return;
+        }
         if self.review_wheel(cx, cy, dy) {
             return;
         }
@@ -662,6 +693,7 @@ impl WinState {
                 self.show_toolbar = crate::settings::with(|s| s.view_toolbar);
             }
             Action::ToggleRuler => self.show_ruler = !self.show_ruler,
+            Action::ToggleStylesPalette => self.toggle_palette(),
             Action::ToggleMissingFonts => crate::settings::update(|s| {
                 s.highlight_missing_fonts = !s.highlight_missing_fonts;
             }),
@@ -758,6 +790,9 @@ impl WinState {
                 self.horizontal_step(part);
             }
             return Effect::None;
+        }
+        if let Some(effect) = self.palette_click(cx, cy, env, clip) {
+            return effect;
         }
         if self.review_divider_hit(cx, cy) {
             self.review_resize = self.revisions_bounds().map(|r| cx - r.x);
@@ -1060,6 +1095,9 @@ impl WinState {
         let (cx, cy) = (x / self.ui, y / self.ui);
         let (dx, dy) = self.document_point(x, y);
         self.pointer = (cx, cy);
+        if self.palette_move(cx, cy) {
+            return true;
+        }
         if self.review_resize.is_some() {
             self.resize_review(cx);
             return true;
@@ -1552,6 +1590,12 @@ pub struct App {
     editor_wake: Option<Instant>,
     /// The window in front, which menu commands act on.
     front: Option<WindowId>,
+    /// The Appearance setting the windows were last given.
+    appearance: Option<crate::settings::Appearance>,
+    /// The Style Sheets palette's own window, while it shows undocked, and
+    /// where it was when last closed.
+    palette_window: Option<palette_window::PaletteWindow>,
+    palette_at: Option<winit::dpi::PhysicalPosition<i32>>,
     /// Stands in for a document when no window is open, so the menus can
     /// still be built (File > New and Open must work).
     #[cfg(target_os = "macos")]
@@ -1627,6 +1671,9 @@ impl App {
             #[cfg(target_os = "macos")]
             native_print_window: None,
             front: None,
+            appearance: None,
+            palette_window: None,
+            palette_at: None,
             #[cfg(target_os = "macos")]
             blank: DocView::new(crate::settings::get().new_document(), String::new()),
             proxy,
@@ -2070,7 +2117,9 @@ impl App {
         {
             st.own_menu_bar = !window.has_native_menu();
         }
-        st.dark = window.theme() == Some(winit::window::Theme::Dark);
+        self.sync_appearance();
+        set_window_appearance(&window, crate::settings::with(|s| s.appearance));
+        st.dark = appearance_is_dark(&window);
         #[cfg(target_os = "macos")]
         {
             st.native_scrollbars = scrollbars.is_some();
@@ -2100,7 +2149,33 @@ impl App {
         ));
     }
 
+    /// Give every window the Appearance setting, after Preferences changed
+    /// it. Each window then draws dark or light to match.
+    pub(super) fn sync_appearance(&mut self) {
+        let want = crate::settings::with(|s| s.appearance);
+        if self.appearance == Some(want) {
+            return;
+        }
+        self.appearance = Some(want);
+        #[cfg(target_os = "macos")]
+        crate::mac_widgets::set_app_appearance(match want {
+            crate::settings::Appearance::Auto => None,
+            crate::settings::Appearance::Light => Some(false),
+            crate::settings::Appearance::Dark => Some(true),
+        });
+        for (_, w) in &mut self.windows {
+            set_window_appearance(&w.window, want);
+            w.st.dark = appearance_is_dark(&w.window);
+            w.window.request_redraw();
+        }
+        if let Some(p) = &self.palette_window {
+            set_window_appearance(&p.window, want);
+        }
+        self.refresh_palette_window();
+    }
+
     fn redraw(&mut self, id: WindowId) {
+        self.sync_appearance();
         self.ensure_fonts();
         let list = self.window_list(id);
         let Some(i) = self.index(id) else {
@@ -2249,6 +2324,7 @@ impl App {
                 hidden: max <= 0.0 || w.st.horizontal_bar().w < 3.0 * BAR,
                 enabled: max > 0.0,
             };
+            scrollbars.set_dark(w.st.dark);
             scrollbars.sync(state, other, horizontal, w.st.ui);
         }
     }
@@ -3121,8 +3197,13 @@ fn about() {
         .set_level(rfd::MessageLevel::Info)
         .set_title("About Quill")
         .set_description(format!(
-            "Quill {}\n\nA small word processor written in Rust, inspired by Lucas's favorite word processor from 1992.\n\n{}\nhttps://quillwp.com\nSee Help > Licenses… for the full text.",
+            "Quill {}{}\n\nA small word processor written in Rust, inspired by Lucas's favorite word processor from 1992.\n\n{}\nhttps://quillwp.com\nSee Help > Licenses… for the full text.",
             env!("CARGO_PKG_VERSION"),
+            if cfg!(debug_assertions) {
+                format!("\n{}", crate::build_info::summary())
+            } else {
+                String::new()
+            },
             crate::licenses::SUMMARY
         ))
         .set_buttons(rfd::MessageButtons::Ok)
@@ -3602,6 +3683,10 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.is_palette_window(id) {
+            self.palette_window_event(el, event);
+            return;
+        }
         let Some(i) = self.index(id) else {
             return;
         };
@@ -3674,10 +3759,14 @@ impl ApplicationHandler<UserEvent> for App {
                 self.handle_effect(el, id, Effect::Close);
                 self.sync_menus();
             }
-            WindowEvent::RedrawRequested => self.redraw(id),
+            WindowEvent::RedrawRequested => {
+                self.redraw(id);
+                self.refresh_palette_window();
+            }
             WindowEvent::ThemeChanged(theme) => {
                 let w = &mut self.windows[i].1;
-                w.st.dark = theme == winit::window::Theme::Dark;
+                w.st.dark = crate::settings::with(|s| s.appearance)
+                    .is_dark(theme == winit::window::Theme::Dark);
                 w.window.request_redraw();
             }
             WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
@@ -3851,6 +3940,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        self.sync_palette_window(el);
         #[cfg(target_os = "linux")]
         crate::linux_window::poll();
         #[cfg(target_os = "macos")]
@@ -3994,6 +4084,56 @@ mod tests {
         }
     }
     use quill_core::{Position, Selection};
+
+    #[test]
+    fn the_style_dialogs_character_style_menu_makes_a_new_style_and_comes_back_to_it() {
+        let doc = quill_core::text::from_plain_text("Body text");
+        let mut state = WinState::new(DocView::new(doc, "Doc".into()));
+        let (d, st) = crate::style_dialog::style(&state.view);
+        state.dialogs.push((Which::Style(st), d));
+        let mut clip = Clipboard::new();
+        let none = state.view.doc.styles.characters.len();
+        let last = none + 1;
+        // The menu's last choice is the one that makes a style.
+        assert_eq!(
+            state.dialogs[0]
+                .1
+                .options("character_style")
+                .last()
+                .map(String::as_str),
+            Some("New Character Style\u{2026}")
+        );
+        state.dialogs[0].1.set_selected("character_style", last);
+        state.dialog_outcome(Outcome::Changed("character_style"), &mut clip);
+        assert!(matches!(
+            state.dialogs[1].0,
+            Which::CharacterStyleEdit(None)
+        ));
+        // The menu goes back to what the style had until the new one is saved.
+        assert_eq!(state.dialogs[0].1.selected("character_style"), 0);
+        state.dialogs[1].1.set_field("name", "Aside");
+        state.dialogs[1].1.set_on("bold", true);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.dialogs.len(), 1, "back in the Style dialog");
+        let id = state.view.doc.styles.find_character("Aside").unwrap();
+        let d = &state.dialogs[0].1;
+        assert_eq!(d.selected("character_style"), id as usize);
+        assert!(d.options("character_style").iter().any(|o| o == "Aside"));
+        let Which::Style(st) = &state.dialogs[0].0 else {
+            panic!("the Style dialog");
+        };
+        assert_eq!(st.character, id);
+        // Cancelling the editor leaves everything as it was.
+        let count = state.view.doc.styles.characters.len();
+        state.dialogs[0]
+            .1
+            .set_selected("character_style", count + 1);
+        state.dialog_outcome(Outcome::Changed("character_style"), &mut clip);
+        state.dialog_outcome(Outcome::Cancel, &mut clip);
+        assert_eq!(state.dialogs.len(), 1);
+        assert_eq!(state.view.doc.styles.characters.len(), count);
+        assert_eq!(state.dialogs[0].1.selected("character_style"), id as usize);
+    }
 
     #[test]
     fn character_styles_window_edits_and_adds_styles_through_its_editor() {
@@ -4160,7 +4300,10 @@ mod tests {
         let mut state = WinState::new(DocView::new(doc, "Doc".into()));
         let (mut d, st) = crate::style_dialog::style(&state.view);
         let manual = st.chp;
-        assert_eq!(d.options("character_style"), &["No Style", "Emphasis"]);
+        assert_eq!(
+            d.options("character_style"),
+            &["No Style", "Emphasis", "New Character Style\u{2026}"]
+        );
         d.set_selected("character_style", 1);
         state.dialogs.push((Which::Style(st), d));
         let mut clip = Clipboard::new();

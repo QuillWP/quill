@@ -8,6 +8,7 @@ mod advanced_dialog;
 mod app;
 mod bars;
 mod border_dialog;
+mod build_info;
 mod canvas;
 mod character_style_dialog;
 mod chrome;
@@ -51,6 +52,8 @@ mod mac_lookup;
 #[cfg(target_os = "macos")]
 mod mac_open;
 #[cfg(target_os = "macos")]
+mod mac_palette;
+#[cfg(target_os = "macos")]
 mod mac_print;
 #[cfg(target_os = "macos")]
 mod mac_save;
@@ -83,6 +86,7 @@ mod review_dialog;
 mod settings;
 mod spellcheck;
 mod style_dialog;
+mod styles_palette;
 mod system_clipboard;
 mod table_dialogs;
 mod tool_dialogs;

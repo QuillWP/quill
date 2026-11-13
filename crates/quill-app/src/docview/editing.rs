@@ -1276,6 +1276,21 @@ impl DocView {
         self.finish_edit(sel);
     }
 
+    /// The Style Sheets palette's paragraph "No Style": the selected
+    /// paragraphs go back to Normal and lose their character styles, as one
+    /// undoable step. Manual formatting stays.
+    pub fn clear_styles(&mut self) {
+        let (first, last) = self.selected_paras();
+        self.doc.begin("Style", self.sel);
+        self.doc.apply_style(MAIN, first, last, 0);
+        let end = Position::new(last, self.doc.main.paras[last].len());
+        self.doc
+            .apply_character_style(MAIN, Position::new(first, 0), end, 0);
+        self.typing_chp = None;
+        let sel = self.sel;
+        self.finish_edit(sel);
+    }
+
     /// Start dragging something on the ruler. Returns the formats of the
     /// selected paragraphs as they are now, to apply the drag to.
     pub fn begin_ruler_drag(&mut self) -> Vec<ParaProps> {

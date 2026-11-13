@@ -153,6 +153,13 @@ impl WinState {
     /// How far the text area starts from the left, and how much narrower
     /// it is, for a toolbar docked at the side.
     pub(super) fn side_toolbar(&self) -> (f32, f32) {
+        let (x, narrower) = self.toolbar_side();
+        (x, narrower + Self::palette_dock_width())
+    }
+
+    /// The same for the toolbar alone, without the docked Style Sheets
+    /// palette that sits between it and the text.
+    pub(super) fn toolbar_side(&self) -> (f32, f32) {
         match (self.show_toolbar, self.toolbar_position()) {
             (true, 1) => (toolbar::thickness(true), toolbar::thickness(true)),
             (true, 2) => (0.0, toolbar::thickness(true)),
@@ -582,6 +589,7 @@ impl WinState {
             );
             c.restore_clip(clip);
         }
+        self.draw_palette(c, &mut label);
         if self.show_formatting_toolbar {
             let chp = self.view.current_chp();
             let font = self.view.doc.font_name(chp.font).to_string();

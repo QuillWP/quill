@@ -171,7 +171,11 @@ fn make_about() -> *mut AnyObject {
         let _: () = msg_send![image, setImageScaling: 3usize];
         let _: () = msg_send![content, addSubview: image];
         let _: () = msg_send![image, release];
-        for (string, y, size) in [
+        // A debug build also says when and from what it was built, which
+        // takes a line from the credits below.
+        let build = cfg!(debug_assertions).then(crate::build_info::summary);
+        let low = if build.is_some() { 20.0 } else { 0.0 };
+        let mut lines = vec![
             (
                 if cfg!(debug_assertions) {
                     "Quill Debug".to_owned()
@@ -188,10 +192,14 @@ fn make_about() -> *mut AnyObject {
             ),
             (
                 "Copyright \u{a9} 2026 Lucas Krupinski and Quill contributors".to_owned(),
-                438.0,
+                438.0 - low,
                 11.0,
             ),
-        ] {
+        ];
+        if let Some(build) = build {
+            lines.push((build, 440.0, 10.0));
+        }
+        for (string, y, size) in lines {
             let label: *mut AnyObject =
                 msg_send![class!(NSTextField), labelWithString: &*NSString::from_str(&string)];
             let _: () = msg_send![label, setFrame: NSRect::new(NSPoint::new(20.0, y), NSSize::new(380.0, 28.0))];
@@ -201,7 +209,7 @@ fn make_about() -> *mut AnyObject {
             let _: () = msg_send![content, addSubview: label];
         }
         let scroll: *mut AnyObject = msg_send![class!(NSTextView), scrollableTextView];
-        let _: () = msg_send![scroll, setFrame: NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(380.0, 406.0))];
+        let _: () = msg_send![scroll, setFrame: NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(380.0, 406.0 - low))];
         let _: () = msg_send![scroll, setHasVerticalScroller: true];
         let _: () = msg_send![scroll, setAutohidesScrollers: true];
         let text: *mut AnyObject = msg_send![scroll, documentView];

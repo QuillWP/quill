@@ -226,6 +226,16 @@ pub fn preferences_with(
                 .position(|z| *z == s.interface_scale)
                 .unwrap_or(1);
             d.popup_owned("ui_size", names, at, 110.0, 300.0, 90.0);
+            d.text("Appearance:", 216.0, 303.0);
+            let names: Vec<&str> = settings::Appearance::ALL
+                .iter()
+                .map(|a| a.label())
+                .collect();
+            let at = settings::Appearance::ALL
+                .iter()
+                .position(|a| *a == s.appearance)
+                .unwrap_or(0);
+            d.popup("appearance", &names, at, 290.0, 300.0, 80.0);
         }
         2 => {
             d.check("rtf", "Always Interpret RTF", 13.0, 45.0, s.interpret_rtf);
@@ -643,6 +653,10 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
             s.open_with_formatting_toolbar = on("formatting");
             s.open_with_paragraph_toolbar = on("paragraph");
             s.recent_files = on("recent");
+            s.appearance = settings::Appearance::ALL
+                .get(d.selected("appearance"))
+                .copied()
+                .unwrap_or_default();
             if id == "ui_size" {
                 s.interface_scale = INTERFACE_SIZES[d.selected("ui_size").min(4)];
             }
@@ -804,6 +818,7 @@ pub fn save(original: &mut settings::Settings, draft: &settings::Settings) {
             text_boundaries,
             table_gridlines,
             default_view,
+            appearance,
             open_with_ruler,
             open_with_formatting_toolbar,
             open_with_paragraph_toolbar,
@@ -1111,6 +1126,18 @@ mod tests {
         d.set_selected("ui_size", 3);
         changed(1, &mut d, "ui_size");
         assert_eq!(settings::get().interface_scale, 125);
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
+    fn appearance_is_chosen_in_the_view_panel() {
+        let mut d = preferences(1, &[]);
+        assert_eq!(d.selected("appearance"), 0);
+        d.set_selected("appearance", 2);
+        changed(1, &mut d, "appearance");
+        assert_eq!(settings::get().appearance, settings::Appearance::Dark);
+        let d = preferences(1, &[]);
+        assert_eq!(d.selected("appearance"), 2);
         settings::update(|s| *s = settings::Settings::default());
     }
 

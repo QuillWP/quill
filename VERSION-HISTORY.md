@@ -7,6 +7,40 @@ Add an entry for every new tag as part of the release process.
 
 Versions 0.1.0 to 0.14.0 were all tagged on 2026-11-05.
 
+## 0.16.0 - 2026-11-11
+
+The Style Sheets palette, a Light, Dark or Auto appearance and a build stamp
+in debug builds.
+
+- View > Style Sheets is one list of paragraph and character styles with All,
+  Paragraph and Character tabs (Para and Char when it is narrow). Clicking a
+  row applies the style the way the toolbar's style menus do. New, Edit, Copy
+  and Delete sit beside it and leave Normal, the automatic styles and No Style
+  alone.
+- It docks to the right of the text, or comes out into a small window of its
+  own with the system's title bar (a floating tool window on the Mac that
+  hides when Quill is not in front). Whether it shows, its tab and whether it
+  is docked are saved in the settings.
+- No Style at the top of the paragraph styles puts the selected paragraphs
+  back to Normal and takes off their character styles, as one undo step.
+- The Style dialog's Character Style menu ends with New Character Style, which
+  opens the editor and returns with the new style linked.
+- The palette and the style dialogs now share one copy and one delete. That
+  fixes the next text taking the wrong style after deleting a character style
+  and copies being named "Body copy copy".
+- Preferences > View has Appearance: Auto (follows the system while Quill
+  runs), Light or Dark. On the Mac the whole application takes it, including
+  alerts and the Open and Save panels.
+- In dark mode the page is drawn dark: white paper goes near-black, black and
+  automatic text near-white, white text dark, and colors keep their hue.
+  Pictures are not touched. Printing, PDF and export are as before.
+- A debug build's About window shows when and from what it was built (time,
+  branch, commit, and "modified" for uncommitted changes). Release builds are
+  unchanged.
+- tools/smoketest.py checks a build quickly (version, drawing, opening a small
+  document in each main format) in a scratch home folder with its own profile,
+  so it never touches real settings.
+
 ## 0.15.0 - 2026-11-08
 
 Saving safety, pattern tools, Markdown editing, page breaks and many fixes

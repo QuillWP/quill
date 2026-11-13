@@ -74,6 +74,7 @@ impl App {
                     w.window.request_redraw();
                 }
             }
+            self.sync_appearance();
             return;
         }
         let Some(i) = self.windows.iter().position(|(_, w)| {
@@ -137,6 +138,7 @@ impl App {
         let outcome = crate::mac_dialog::NativeDialog::outcome(dialog, id);
         w.st.dialog_outcome(outcome, clip);
         w.window.request_redraw();
+        self.sync_appearance();
         let scale_changed = crate::settings::with(|s| s.interface_scale) != old_scale;
         if scale_changed {
             for (j, (_, w)) in self.windows.iter().enumerate() {

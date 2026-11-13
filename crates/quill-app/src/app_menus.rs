@@ -29,6 +29,8 @@ pub enum Action {
     ToggleParagraphToolbar,
     ToggleToolbar,
     ToggleRuler,
+    /// Show or hide the Style Sheets palette.
+    ToggleStylesPalette,
     ToggleMissingFonts,
     ToggleFullScreen,
     /// Dock the toolbar: 0 top, 1 left, 2 right.
@@ -435,6 +437,8 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.item("Ruler", Action::ToggleRuler)
                 .key("⌘R")
                 .checked(cx.show_ruler),
+            b.item("Style Sheets", Action::ToggleStylesPalette)
+                .checked(crate::settings::with(|s| s.show_styles_palette)),
             b.cmd("Print Merge Helper…", Cmd::PrintMergeHelper),
             sep(),
             b.cmd("Zoom In", Cmd::ZoomIn),

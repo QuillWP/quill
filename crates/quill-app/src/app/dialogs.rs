@@ -583,9 +583,15 @@ impl WinState {
                     let id = *id;
                     let n = self.dialogs.len();
                     let (rest, last) = self.dialogs.split_at_mut(n - 1);
-                    let Some((Which::CharacterStyles, list)) = rest.last_mut() else {
-                        self.dialogs.pop();
-                        return true;
+                    // Opened from the Style Sheets palette there is no list
+                    // underneath; a stand-in takes the list's refresh.
+                    let mut stand_in;
+                    let list = match rest.last_mut() {
+                        Some((Which::CharacterStyles, list)) => list,
+                        _ => {
+                            stand_in = crate::character_style_dialog::dialog(&self.view);
+                            &mut stand_in
+                        }
                     };
                     match crate::character_style_dialog::finish_editor(
                         &last[0].1,
@@ -593,9 +599,14 @@ impl WinState {
                         &mut self.view,
                         id,
                     ) {
-                        Ok(_) => {
+                        Ok(saved) => {
                             self.dialogs.pop();
                             crate::palette::drop_edits();
+                            // Back in the Style dialog, which now lists the
+                            // new style and links the style to it.
+                            if let Some((Which::Style(st), style)) = self.dialogs.last_mut() {
+                                crate::style_dialog::character_saved(st, style, &self.view, saved);
+                            }
                         }
                         Err(why) => self.alert(why, format_dialogs::Alert::Info),
                     }
@@ -1366,6 +1377,19 @@ impl WinState {
                 }
                 let (palette, st) = crate::palette::palette(start, &self.view.doc);
                 self.dialogs.push((Which::Palette(st), palette));
+            }
+            // The Style dialog's last Character Style choice makes a new one.
+            Outcome::Changed("character_style")
+                if matches!(which, Which::Style(_))
+                    && d.selected("character_style")
+                        == self.view.doc.styles.characters.len() + 1 =>
+            {
+                if let Which::Style(st) = which {
+                    d.set_selected("character_style", st.character as usize);
+                }
+                let editor =
+                    crate::character_style_dialog::editor(&self.view, &self.font_families, None);
+                self.dialogs.push((Which::CharacterStyleEdit(None), editor));
             }
             Outcome::Changed(id) => format_dialogs::changed(which, d, &self.view, id),
             Outcome::Clicked(..) | Outcome::Swatch { .. } => {}

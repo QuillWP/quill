@@ -310,24 +310,52 @@ pub fn finish_editor(
     Ok(id)
 }
 
-/// A name for a copy of `name` that no style has yet, as the Finder names
-/// copies: "Emphasis copy", then "Emphasis copy 2", whichever is copied.
-fn copy_name(doc: &Document, name: &str) -> String {
-    let mut base = name;
-    if let Some((stem, n)) = base.rsplit_once(" copy ")
-        && n.parse::<u32>().is_ok()
-    {
-        base = stem;
+/// A name for a copy of character style `name` that no character style has
+/// yet. See `style_dialog::copy_name`.
+pub fn copy_name(doc: &Document, name: &str) -> String {
+    crate::style_dialog::copy_name(name, |n| doc.styles.find_character(n).is_some())
+}
+
+/// Copy character style `id` under a "... copy" name, as one undoable step.
+/// Returns the copy's number.
+pub fn duplicate(view: &mut DocView, id: u16) -> Option<u16> {
+    let old = view.doc.styles.character(id).cloned()?;
+    let name = copy_name(&view.doc, &old.name);
+    view.doc.begin("Character Style", view.sel);
+    let made = view.doc.add_character_style(&name, old.format);
+    view.doc.commit(view.sel);
+    if made.is_some() {
+        view.finish_character_style_edit(None);
     }
-    let base = base.strip_suffix(" copy").unwrap_or(base);
-    let base: String = base.chars().take(240).collect();
-    let mut candidate = format!("{base} copy");
-    let mut n = 2;
-    while doc.styles.find_character(&candidate).is_some() {
-        candidate = format!("{base} copy {n}");
-        n += 1;
+    made
+}
+
+/// Delete character style `id` as one undoable step. The styles after it
+/// move down a number, so typing at the caret keeps its look: it loses the
+/// style if that was the one deleted, and follows its style down otherwise.
+pub fn delete(view: &mut DocView, id: u16) -> bool {
+    if id == 0 {
+        return false;
     }
-    candidate
+    let props = view.current_chp();
+    view.doc.begin("Character Style", view.sel);
+    let gone = view.doc.delete_character_style(id);
+    view.doc.commit(view.sel);
+    if !gone {
+        return false;
+    }
+    let caret = view.sel.is_empty().then(|| {
+        let mut c = props;
+        if c.character_style == id {
+            c.character_style = 0;
+            c.direct_format = 0;
+        } else if c.character_style > id {
+            c.character_style -= 1;
+        }
+        c
+    });
+    view.finish_character_style_edit(caret);
+    true
 }
 
 /// Bring in the character styles of `source` that this document lacks by
@@ -358,6 +386,22 @@ pub fn import(list: &mut Dialog, view: &mut DocView, source: &Document) -> (usiz
     (added, skipped)
 }
 
+/// Redefine character style `id` from the selection, as one undoable step.
+/// The selection's own formatting joins what the style already set.
+fn update(view: &mut DocView, id: u16) -> Option<u16> {
+    let old = view.doc.styles.character(id).cloned()?;
+    let base = view.doc.styles.get(view.current_pap().style).chp;
+    let mut format = CharacterFormat::from_selection(view.current_chp(), base);
+    format.mask |= old.format.mask;
+    view.doc.begin("Character Style", view.sel);
+    let changed = view.doc.redefine_character_style(id, format);
+    view.doc.commit(view.sel);
+    if changed {
+        view.finish_character_style_edit(None);
+    }
+    changed.then_some(id)
+}
+
 /// The list window's own buttons: everything but +, Edit…, Import… and
 /// Close, which open other windows.
 pub fn button(d: &mut Dialog, view: &mut DocView, action: &str) {
@@ -374,45 +418,15 @@ pub fn button(d: &mut Dialog, view: &mut DocView, action: &str) {
         "update" | "duplicate" | "delete" if id != 0 => {}
         _ => return,
     }
-    let props = view.current_chp();
-    let Some(old) = view.doc.styles.character(id).cloned() else {
-        return;
-    };
-    view.doc.begin("Character Style", view.sel);
     let changed = match action {
-        "update" => {
-            // The selection's own formatting joins what the style set.
-            let base = view.doc.styles.get(view.current_pap().style).chp;
-            let mut format = CharacterFormat::from_selection(props, base);
-            format.mask |= old.format.mask;
-            view.doc.redefine_character_style(id, format).then_some(id)
-        }
-        "duplicate" => {
-            let name = copy_name(&view.doc, &old.name);
-            view.doc.add_character_style(&name, old.format)
-        }
-        _ => view
-            .doc
-            .delete_character_style(id)
-            .then_some(id.saturating_sub(1).max(1)),
+        "update" => update(view, id),
+        "duplicate" => duplicate(view, id),
+        _ => delete(view, id).then_some(id.saturating_sub(1).max(1)),
     };
-    view.doc.commit(view.sel);
     let Some(chosen) = changed else {
         d.set_label("status", "No changes.");
         return;
     };
-    // Typing at the caret keeps its look when its style goes or moves down.
-    let caret = (view.sel.is_empty() && action == "delete").then(|| {
-        let mut c = props;
-        if c.character_style == id {
-            c.character_style = 0;
-            c.direct_format = 0;
-        } else if c.character_style > id {
-            c.character_style -= 1;
-        }
-        c
-    });
-    view.finish_character_style_edit(caret);
     if action == "update" {
         view.set_character_style(id);
     }

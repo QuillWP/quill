@@ -33,6 +33,8 @@ pub fn snapshot(
     crate::font_names::use_family_names(&mut doc);
     let mut st = WinState::new(DocView::new(doc, "Untitled1".into()));
     st.ui = ui_scale(scale);
+    // There is no system to follow offscreen: Auto draws light.
+    st.dark = crate::settings::with(|s| s.appearance).is_dark(false);
     let mut clip = Clipboard::new();
     let (pw, ph) = (
         (width as f32 * scale) as u32,
@@ -111,6 +113,7 @@ pub fn snapshot(
             "setting" => {
                 let text = format!("{}{arg}\n", crate::settings::get().to_text());
                 crate::settings::update(|s| *s = crate::settings::Settings::from_text(&text));
+                st.dark = crate::settings::with(|s| s.appearance).is_dark(st.dark);
             }
             // Set only the screen magnification, leaving document measurements alone.
             "zoom" => {

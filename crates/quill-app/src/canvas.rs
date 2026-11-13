@@ -86,6 +86,38 @@ pub fn dark_ink(c: u32) -> u32 {
     c
 }
 
+/// Darkest and lightest grays a dark page uses: white paper turns this
+/// near-black, black (and automatic) text this near-white.
+pub const PAGE_DARK: u32 = 0x16;
+pub const PAGE_LIGHT: u32 = 0xEE;
+
+/// Color `c` as a dark page shows it. Brightness turns over, judged by how
+/// bright the eye sees each color, so white paper goes near-black, black
+/// text near-white and white text dark, and any text keeps the contrast it
+/// had with its highlight or shading. Grays turn over fully; colors move
+/// only part of the way, so red still reads as red and blue as blue.
+pub fn page_ink(c: u32) -> u32 {
+    let (r, g, b) = ((c >> 16) & 255, (c >> 8) & 255, c & 255);
+    let chroma = (r.max(g).max(b) - r.min(g).min(b)) as f32;
+    let (r, g, b) = (r as f32, g as f32, b as f32);
+    let y = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0;
+    let (lo, hi) = (PAGE_DARK as f32 / 255.0, PAGE_LIGHT as f32 / 255.0);
+    let turned = lo + (1.0 - y) * (hi - lo);
+    let k = 1.0 - 0.3 * (chroma / 96.0).min(1.0);
+    let t = y + (turned - y) * k;
+    // Darken by scaling toward black, lighten by mixing toward white: both
+    // keep the hue.
+    let map = |v: f32| {
+        let v = if t <= y {
+            v * t / y.max(1e-6)
+        } else {
+            255.0 - (255.0 - v) * (1.0 - t) / (1.0 - y).max(1e-6)
+        };
+        v.round().clamp(0.0, 255.0) as u32
+    };
+    map(r) << 16 | map(g) << 8 | map(b)
+}
+
 /// Color `c` of a toolbar icon in dark mode. Mid grays, which turning over
 /// leaves where they were, lift so they stand out on the dark bar.
 fn dark_icon_ink(c: u32) -> u32 {
@@ -122,9 +154,12 @@ pub struct Canvas<'a> {
     clip: Px,
     /// Clips saved by `push_clip`.
     clips: Vec<Px>,
-    /// Draw in dark mode's colors (see `dark_ink`). Off while the page
-    /// and its text are drawn, which keep their own colors.
+    /// Draw in dark mode's colors (see `dark_ink`).
     pub dark: bool,
+    /// Draw the page and its text in a dark page's colors (see
+    /// `page_ink`). Set only while the document is drawn in dark mode, never
+    /// for printing or export, which do not draw on a `Canvas`.
+    pub dark_page: bool,
 }
 
 impl<'a> Canvas<'a> {
@@ -144,12 +179,19 @@ impl<'a> Canvas<'a> {
             },
             clips: Vec::new(),
             dark: false,
+            dark_page: false,
         }
     }
 
     /// The color to draw `c` in: itself, or its dark mode color.
     fn ink(&self, c: u32) -> u32 {
-        if self.dark { dark_ink(c) } else { c }
+        if self.dark_page {
+            page_ink(c)
+        } else if self.dark {
+            dark_ink(c)
+        } else {
+            c
+        }
     }
 
     /// Size of the canvas in points.
@@ -774,6 +816,41 @@ mod tests {
         c.fill(Rect::new(1.0, 0.0, 1.0, 1.0), color::WHITE);
         assert_eq!(buf[0], color::WHITE);
         assert_eq!(buf[1], dark_ink(color::WHITE));
+    }
+
+    #[test]
+    fn a_dark_page_turns_brightness_over_and_keeps_hues() {
+        let gray = |c: u32| c & 0xFF;
+        assert_eq!(page_ink(color::WHITE), 0x161616);
+        assert_eq!(page_ink(color::BLACK), 0xEEEEEE);
+        // Grays keep their order, the other way round.
+        assert!(gray(page_ink(0x404040)) > gray(page_ink(0xC0C0C0)));
+        let parts = |c: u32| ((c >> 16) & 255, (c >> 8) & 255, c & 255);
+        // Red stays red, lighter; navy turns light but stays blue.
+        let (r, g, b) = parts(page_ink(0xFF0000));
+        assert!(r == 255 && g > 0x40 && g == b);
+        let (r, g, b) = parts(page_ink(0x000080));
+        assert!(b > r && r == g && r > 0x80);
+        // A yellow highlight goes dark, so the white text on it can be read.
+        let (r, g, b) = parts(page_ink(0xFFFF00));
+        assert!(r == g && r < 0x80 && b == 0);
+        // Text keeps its contrast with what is behind it.
+        let luma = |c: u32| {
+            let (r, g, b) = parts(c);
+            0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32
+        };
+        for (text, back) in [(0x000000, 0xFFFF00), (0xFFFFFF, 0x000080)] {
+            let before = luma(back) - luma(text);
+            let after = luma(page_ink(back)) - luma(page_ink(text));
+            assert!(before * after < 0.0 && after.abs() > 80.0);
+        }
+        // The page's colors win over the interface's while it is drawn.
+        let mut buf = vec![0u32; 1];
+        let mut c = Canvas::new(&mut buf, 1, 1, 1.0);
+        c.dark = true;
+        c.dark_page = true;
+        c.fill(Rect::new(0.0, 0.0, 1.0, 1.0), color::WHITE);
+        assert_eq!(buf[0], page_ink(color::WHITE));
     }
 
     #[test]

@@ -284,6 +284,29 @@ that and closes the dialog. None of these writes the document file: use **Save**
 Cancel discards edits not yet defined or applied. Page margins are document settings
 in **Format > Document Setup...**. **Use As Default** remains unavailable.
 
+**View > Style Sheets** shows the Style Sheets palette: one list of the document's
+paragraph styles (marked with a paragraph sign) and character styles (marked with an A),
+with **All**, **Paragraph** and **Character** tabs (shortened to Para and Char in a narrow
+palette) that choose what the list shows. Clicking a style applies it to the selected
+paragraphs or text. **No Style** at the top of the paragraph styles puts the selected
+paragraphs back to Normal and takes their character styles off, so styles can be applied
+afresh (manual formatting stays); **No Style** at the top of the character styles takes only
+the character style off. The row for the style at
+the insertion point is highlighted. **New** and **Edit** open the style's editor, **Copy**
+makes a copy named "... copy", and **Delete** removes a style the document defines (Normal,
+the automatic styles and No Style cannot be deleted); each of these can be undone. The
+palette starts docked at the right of the document window, taking its width from the text.
+The button at the right of its title bar (or in the tab row) moves it into a small window of
+its own, which can be dragged anywhere on the screen, outside the document window too, and
+back again. That window has the system's title bar and close button, and follows whichever
+document window is in front. Whether it
+shows, its tab and whether it is docked are saved in the settings (`show_styles_palette`,
+`styles_palette_tab`, `styles_palette_docked`).
+
+The bottom **Character Style** menu ends with **New Character Style...**, which opens the
+character style editor. Saving it closes the editor and returns to this dialog with the new
+style listed and chosen; Cancel leaves the menu as it was.
+
 The bottom **Character Style** menu is a link preview. **No Style** uses the manual
 character defaults. Selecting a named style strikes the manual summary through;
 returning to **No Style** restores its display without losing any manual values.
@@ -339,6 +362,14 @@ A document opens in the view it was saved in; Preferences > View > In View is fo
 documents. The Custom row of the color palette holds the colors saved in Preferences >
 Colors, for every document, and then the colors this document uses. Pointing at a saved
 color shows its name. Preferences > View has Interface Size, and Advanced has Smart Quotes.
+
+Preferences > View > Appearance chooses Light, Dark or Auto. Auto, the default, follows
+the system's light or dark setting and changes with it while Quill is running. In Dark the
+toolbars, rulers, panes and dialogs go dark, and so does the document: the page turns
+near-black, black and automatic text shows white, white text shows dark, and other colors
+turn lighter or darker so text stays as readable against its highlight or shading as it was.
+Pictures keep their colors. Only the screen changes: the document keeps its own colors, and
+printing, Save as PDF and every saved format are the same as in Light.
 
 ## Building
 
