@@ -37,6 +37,31 @@ impl WinState {
     }
 
     /// Open one of the original's dialogs over this window.
+    /// The paragraph style editor on style `id`, or on a new style.
+    pub(super) fn open_style_editor(&mut self, id: Option<quill_core::props::StyleId>) {
+        let (d, st) = crate::style_dialog::editor(&self.view, id);
+        self.dialogs.push((Which::Style(st), d));
+    }
+
+    /// Delete paragraph style `id`. When paragraphs use it, ask first what
+    /// they become.
+    pub(super) fn delete_style_asking(&mut self, id: quill_core::props::StyleId) {
+        if let Some((d, choices)) = crate::style_dialog::delete_from_list(&mut self.view, id) {
+            self.dialogs.push((Which::DeleteStyle { id, choices }, d));
+        } else {
+            self.refresh_style_list(None);
+        }
+    }
+
+    /// Bring the Paragraph Styles list up to date when it is in front,
+    /// after a style was made, changed or deleted above it.
+    pub(super) fn refresh_style_list(&mut self, keep: Option<quill_core::props::StyleId>) {
+        let view = &self.view;
+        if let Some((Which::ParagraphStyles(st), d)) = self.dialogs.last_mut() {
+            crate::style_dialog::refresh_list(st, d, view, keep);
+        }
+    }
+
     pub fn open_dialog(&mut self, id: DialogId, env: &Env) {
         if matches!(id, DialogId::ReviewChanges) {
             self.focus_main();
@@ -221,8 +246,8 @@ impl WinState {
                 Which::CharacterStyles,
             ),
             DialogId::Style => {
-                let (d, st) = crate::style_dialog::style(&self.view);
-                (d, Which::Style(st))
+                let (d, st) = crate::style_dialog::list(&self.view);
+                (d, Which::ParagraphStyles(st))
             }
             // Opened above.
             DialogId::Spelling | DialogId::Hyphenation | DialogId::Thesaurus => return,
@@ -1252,6 +1277,34 @@ impl WinState {
 
     /// Act on what happened in the open dialog.
     pub(super) fn dialog_outcome(&mut self, o: Outcome, clip: &mut Clipboard) {
+        if let Some((Which::FontSources(draft), d)) = self.dialogs.last_mut() {
+            crate::prefs_dialog::font_sources_changed(d, draft);
+            match o {
+                Outcome::Ok => {
+                    let mut sources = draft.font_folders.clone();
+                    sources.retain(|f| !f.path.as_os_str().is_empty());
+                    let levels = draft.font_folder_levels;
+                    self.dialogs.pop();
+                    if let Some((Which::Preferences { draft, .. }, _)) = self.dialogs.last_mut() {
+                        draft.font_folders = sources;
+                        draft.font_folder_levels = levels;
+                    }
+                }
+                Outcome::Cancel => {
+                    self.dialogs.pop();
+                }
+                Outcome::Button(id)
+                    if id == "source_add" || crate::prefs_dialog::is_folder_button(id) =>
+                {
+                    crate::prefs_dialog::font_sources_button(id, draft);
+                    let origin = d.origin;
+                    *d = crate::prefs_dialog::font_sources(draft);
+                    d.origin = origin;
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.tool_outcome(&o, clip) {
             return;
         }
@@ -1301,10 +1354,16 @@ impl WinState {
                     _ => None,
                 };
                 if format_dialogs::apply(which, d, &mut self.view) {
+                    // The list under the style editor goes to the style saved.
+                    let saved = match which {
+                        Which::Style(st) => crate::style_dialog::editing(st),
+                        _ => None,
+                    };
                     self.dialogs.pop();
                     if let Some((d, st)) = next {
                         self.dialogs.push((Which::ReplaceFonts(st), d));
                     }
+                    self.refresh_style_list(saved);
                 } else if matches!(which, Which::Document) {
                     // Say why OK did nothing, as the original does.
                     self.alert(
@@ -1312,6 +1371,11 @@ impl WinState {
                          number, and that the margins leave at least half an inch for text.",
                         format_dialogs::Alert::Info,
                     );
+                }
+            }
+            Outcome::Apply if matches!(which, Which::Style(_)) => {
+                if let Which::Style(st) = which {
+                    crate::style_dialog::apply(st, d, &mut self.view);
                 }
             }
             Outcome::Apply if matches!(which, Which::CharacterStyles) => {
@@ -1330,6 +1394,8 @@ impl WinState {
             Outcome::Cancel => {
                 crate::palette::drop_edits();
                 self.dialogs.pop();
+                // The editor's Apply may have saved a style before Cancel.
+                self.refresh_style_list(None);
             }
             Outcome::Button("color") if matches!(which, Which::Character(_)) => {
                 self.toggle_color_popout("color");
@@ -1399,22 +1465,17 @@ impl WinState {
                 }
             }
             Outcome::Button(id) => match which {
+                Which::Preferences { panel, draft, .. } if id == "font_sources" => {
+                    crate::prefs_dialog::changed_in(*panel, d, id, draft);
+                    let mut sources = draft.clone();
+                    crate::prefs_dialog::ensure_source_row(&mut sources);
+                    let dialog = crate::prefs_dialog::font_sources(&sources);
+                    self.dialogs.push((Which::FontSources(sources), dialog));
+                }
                 Which::Preferences { .. } if id == "reset" => crate::language::reset_ignored(),
                 Which::Preferences { .. } if id == "customize" => {
                     let (d, st) = crate::customize::dialog();
                     self.dialogs.push((Which::Customize(st), d));
-                }
-                Which::Preferences {
-                    panel,
-                    families,
-                    draft,
-                    ..
-                } if crate::prefs_dialog::is_folder_button(id) => {
-                    crate::prefs_dialog::changed_in(*panel, d, id, draft);
-                    crate::prefs_dialog::folder_button(id, draft);
-                    let origin = d.origin;
-                    *d = crate::prefs_dialog::preferences_with(*panel, families, draft);
-                    d.origin = origin;
                 }
                 Which::Preferences {
                     panel,
@@ -1498,11 +1559,18 @@ impl WinState {
                         .retain(|item| !matches!(item.id, "apply" | "tabs" | "border" | "frame"));
                     self.dialogs.push((Which::StyleParagraph(base), editor));
                 }
-                Which::Style(st) if id == "define" => {
-                    crate::style_dialog::define(st, d, &mut self.view);
+                Which::ParagraphStyles(st) if matches!(id, "new" | "edit") => {
+                    let style = crate::style_dialog::list_selected(st, d);
+                    if id == "edit" && style.is_none() {
+                        return;
+                    }
+                    let style = if id == "edit" { style } else { None };
+                    self.open_style_editor(style);
                 }
-                Which::Style(st) if id == "delete" => {
-                    crate::style_dialog::delete(st, d, &mut self.view);
+                Which::ParagraphStyles(st) if id == "delete" => {
+                    if let Some(style) = crate::style_dialog::list_selected(st, d) {
+                        self.delete_style_asking(style);
+                    }
                 }
                 Which::Tabs { .. } => format_dialogs::tabs_button(which, d, id),
                 Which::Section if id == "linenumbers" => {

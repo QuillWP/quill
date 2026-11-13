@@ -37,6 +37,50 @@ fn byte_offset(text: &str, units: usize) -> usize {
 
 const SCALE: f64 = 1.25;
 
+/// Let font sources include application bundles without asking the user to
+/// reveal their contents in Finder first. Other folder pickers keep treating
+/// packages as files.
+pub fn pick_font_folder(directory: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    objc2::rc::autoreleasepool(|_| {
+        // SAFETY: Preferences calls this on AppKit's main thread. The retained
+        // panel and autorelease pool keep its URL and strings alive until the
+        // selected filesystem path has been copied.
+        unsafe {
+            let raw: *mut AnyObject = msg_send![class!(NSOpenPanel), openPanel];
+            let panel = Retained::retain(raw)?;
+            let panel = &*panel;
+            let title = NSString::from_str("Choose a Font Folder or App");
+            let _: () = msg_send![panel, setTitle: &*title];
+            let _: () = msg_send![panel, setCanChooseDirectories: true];
+            let _: () = msg_send![panel, setCanChooseFiles: false];
+            let _: () = msg_send![panel, setAllowsMultipleSelection: false];
+            let _: () = msg_send![panel, setTreatsFilePackagesAsDirectories: true];
+            if let Some(directory) = directory {
+                let path = NSString::from_str(&directory.to_string_lossy());
+                let url: *mut AnyObject =
+                    msg_send![class!(NSURL), fileURLWithPath: &*path isDirectory: true];
+                let _: () = msg_send![panel, setDirectoryURL: url];
+            }
+            let response: isize = msg_send![panel, runModal];
+            if response != 1 {
+                return None;
+            }
+            let url: *mut AnyObject = msg_send![panel, URL];
+            if url.is_null() {
+                return None;
+            }
+            let path: *const c_char = msg_send![url, fileSystemRepresentation];
+            if path.is_null() {
+                return None;
+            }
+            use std::os::unix::ffi::OsStrExt;
+            Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+                CStr::from_ptr(path).to_bytes(),
+            )))
+        }
+    })
+}
+
 static PROXY: OnceLock<Mutex<EventLoopProxy<UserEvent>>> = OnceLock::new();
 static ACTIONS: OnceLock<Mutex<Vec<ActionTarget>>> = OnceLock::new();
 static TABLES: OnceLock<Mutex<Vec<TableData>>> = OnceLock::new();

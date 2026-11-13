@@ -5,7 +5,7 @@ use super::*;
 use crate::styles_palette::{self as sp, Button, Entry, Hit, Tab};
 
 impl WinState {
-    /// Whether the palette is showing in this window (View > Style Sheets
+    /// Whether the palette is showing in this window (Window > Style Sheets
     /// is for every window).
     pub(super) fn palette_shown() -> bool {
         crate::settings::with(|s| s.show_styles_palette)
@@ -189,13 +189,11 @@ impl WinState {
         self.dialogs.push((Which::CharacterStyleEdit(id), editor));
     }
 
-    /// The Style dialog on style `id`, or on New Style.
+    /// The paragraph style editor on style `id`, or on a new style.
     fn palette_style_dialog(&mut self, id: Option<quill_core::props::StyleId>, env: &Env) {
-        self.open_dialog(DialogId::Style, env);
-        let view = &self.view;
-        if let Some((Which::Style(st), d)) = self.dialogs.last_mut() {
-            crate::style_dialog::choose(st, d, view, id);
-        }
+        self.font_names = env.font_names.to_vec();
+        self.font_families = env.font_families.to_vec();
+        self.open_style_editor(id);
     }
 
     fn palette_copy(&mut self, target: Entry) {
@@ -215,15 +213,13 @@ impl WinState {
     }
 
     fn palette_delete(&mut self, target: Entry) {
-        let view = &mut self.view;
         match target {
             Entry::NoParagraph => {}
             Entry::Character(id) => {
-                crate::character_style_dialog::delete(view, id);
+                crate::character_style_dialog::delete(&mut self.view, id);
             }
-            Entry::Paragraph(id) => {
-                crate::style_dialog::delete_style(view, id);
-            }
+            // A style in use asks what its paragraphs become.
+            Entry::Paragraph(id) => self.delete_style_asking(id),
         }
         self.palette.chosen = None;
     }

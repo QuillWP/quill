@@ -3,7 +3,7 @@
 
     python3 tools/smoketest.py                     # finds a build in this repo
     python3 tools/smoketest.py --app "dist/Quill.app"
-    python3 tools/smoketest.py --app target/debug/quill --launch
+    python3 tools/smoketest.py --app target/debug/quill-debug --launch
 
 It runs the app with its own scratch HOME (and APPDATA and XDG folders, and a
 profile name of its own), so settings, recovery files and crash logs never
@@ -104,6 +104,7 @@ def default_app():
         "target/release/Quill.app",
         "target/debug/Quill Debug.app",
         "target/release/quill",
+        "target/debug/quill-debug",
         "target/debug/quill",
     ]
     found = [os.path.join(ROOT, c) for c in candidates if os.path.exists(os.path.join(ROOT, c))]

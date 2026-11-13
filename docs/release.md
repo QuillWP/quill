@@ -62,8 +62,10 @@ for all three platforms through GitHub Actions. Only tag pushes create a draft r
       all succeed for the public package.
 - [ ] Windows (.zip): unzip anywhere, run quill.exe, Spelling works, Open
       and Save dialogs appear, printing hands a PDF to the default handler.
-- [ ] Linux (.tar.gz): runs on X11 and Wayland, Spelling works, printing
-      goes through lp. Run install-linux.sh from the unpacked folder to get
+- [ ] Linux (.tar.gz): runs on X11 and Wayland (on a Wayland desktop it
+      opens through XWayland, with the theme's title bar and GTK's menu bar;
+      also try `QUILL_BACKEND=wayland`), Spelling works, printing
+      goes through lp. The debug package's program is quill-debug. Run install-linux.sh from the unpacked folder to get
       Quill in the application menu with its icon (Wayland shows no icon
       without it).
 - [ ] Each opens a .docx made by current Microsoft Word, and Word opens

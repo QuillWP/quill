@@ -11,11 +11,51 @@ pub use write::{PictureFile, write, write_with_pictures};
 
 use quill_core::Document;
 
-/// The font code and Source view are set in.
+/// The font code is set in.
 pub const MONO: &str = "Courier New";
 
+/// The fonts Markdown is shown in, set from the Preferences. Sizes are in
+/// half-points, as everywhere in a document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fonts {
+    /// Source view, where the Markdown text is edited.
+    pub source_font: String,
+    pub source_size: u16,
+    /// The formatted document made from a Markdown file: its body text,
+    /// with the headings sized from it.
+    pub display_font: String,
+    pub display_size: u16,
+}
+
+impl Default for Fonts {
+    fn default() -> Self {
+        Fonts {
+            source_font: MONO.into(),
+            source_size: 20,
+            display_font: "New York".into(),
+            display_size: 24,
+        }
+    }
+}
+
+static FONTS: std::sync::Mutex<Option<Fonts>> = std::sync::Mutex::new(None);
+
+/// Use `fonts` for Markdown documents opened or shown from now on.
+pub fn set_fonts(fonts: Fonts) {
+    *FONTS.lock().unwrap_or_else(|e| e.into_inner()) = Some(fonts);
+}
+
+/// The fonts in use: the ones set, or the defaults.
+pub fn fonts() -> Fonts {
+    FONTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
 /// Whether a font is a fixed-width one, by its name.
-pub(crate) fn is_mono(name: &str) -> bool {
+pub fn is_mono(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     [
         "courier",
@@ -56,13 +96,18 @@ pub fn leave_quote(pap: &mut quill_core::ParaProps) -> bool {
 }
 
 /// A document holding `text` as it stands, one paragraph per line, in a
-/// fixed-width font: what View > Markdown > Source edits.
+/// the Markdown source font (fixed-width unless chosen otherwise): what
+/// View > Markdown > Source edits.
 pub fn source_document(text: &str) -> Document {
+    source_document_in(text, &fonts())
+}
+
+fn source_document_in(text: &str, fonts: &Fonts) -> Document {
     let mut doc = quill_core::text::from_plain_text(text);
-    let mono = doc.font_id(MONO);
+    let mono = doc.font_id(&fonts.source_font);
     let set = |c: &mut quill_core::CharProps| {
         c.font = mono;
-        c.size = 20;
+        c.size = fonts.source_size;
     };
     set(&mut doc.styles.styles[0].chp);
     for p in &mut doc.main.paras {
@@ -99,6 +144,32 @@ mod tests {
             (0, quill_core::props::BorderStyle::None)
         );
         assert!(!leave_quote(&mut pap));
+    }
+
+    #[test]
+    fn source_view_uses_the_source_font_and_size() {
+        let fonts = Fonts {
+            source_font: "Menlo".into(),
+            source_size: 26,
+            ..Fonts::default()
+        };
+        let doc = source_document_in("a\nb", &fonts);
+        let chp = doc.main.paras[1].mark_chp;
+        assert_eq!((doc.font_name(chp.font), chp.size), ("Menlo", 26));
+    }
+
+    #[test]
+    fn the_display_font_sets_the_body_and_scales_the_headings() {
+        let fonts = Fonts {
+            display_font: "Georgia".into(),
+            display_size: 48,
+            ..Fonts::default()
+        };
+        let doc = read::Reader::new_with(None, &fonts).doc;
+        let normal = doc.styles.get(0).chp;
+        assert_eq!((doc.font_name(normal.font), normal.size), ("Georgia", 48));
+        let h1 = doc.styles.find("heading 1").unwrap();
+        assert_eq!(doc.styles.get(h1).chp.size, 80);
     }
 
     fn texts(doc: &Document) -> Vec<String> {

@@ -9,11 +9,13 @@ set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 
 # In the unpacked package everything sits beside this script. In a source
-# checkout the files are in tools/ and assets/, and the program is under
-# target/; or name the program: install-linux.sh /path/to/quill
+# checkout the files are in tools/ and assets/, and the program is
+# target/release/quill; or name the program: install-linux.sh /path/to/quill
+# The debug build (quill-debug) is a separate program and is not installed
+# as Quill.
 first() { for f in "$@"; do [ -e "$f" ] && { echo "$f"; return 0; }; done; return 1; }
 [ -z "${1:-}" ] || [ -e "$1" ] || { echo "install-linux.sh: $1 does not exist" >&2; exit 1; }
-program=$(first "${1:-}" "$here/quill" "$here/../target/release/quill" "$here/../target/debug/quill") ||
+program=$(first "${1:-}" "$here/quill" "$here/../target/release/quill") ||
     { echo "install-linux.sh: cannot find the quill program (name it as an argument)" >&2; exit 1; }
 program=$(cd "$(dirname "$program")" && pwd)/$(basename "$program")
 icon=$(first "$here/quill.png" "$here/../assets/quill.png") ||

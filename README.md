@@ -11,7 +11,7 @@
 
 <p align="center"><a href="https://quillwp.com">quillwp.com</a></p>
 
-**Status: alpha · version 0.16.0.** Alpha testers wanted.
+**Status: alpha · version 0.17.0.** Alpha testers wanted.
 **[Download a build](https://github.com/QuillWP/quill/releases)** from the releases page.
 
 ![Quill editing a document set in Avenir Next with headings, a bulleted list and a table](docs/images/screenshot.png)
@@ -26,7 +26,7 @@ Everything in the app, measured from the release build for Apple Silicon Macs:
 | Thesaurus data | 1.4 MB |
 | Icons and About artwork | 0.9 MB |
 | Licenses, notices and readme | 0.2 MB |
-| **Whole app** | **7.9 MB** |
+| **Whole app** | **8.0 MB** |
 | **Download (disk image)** | **5.4 MB** |
 
 Quill is written from scratch in Rust, draws its own pages and uses native Mac
@@ -109,7 +109,7 @@ Xcode Command Line Tools, Rust and Python 3.11 or newer.
 
 ```sh
 python3 tools/package.py            # target/release/Quill.app on the Mac
-python3 tools/package.py --debug    # debug build
+python3 tools/package.py --debug    # debug build (Linux: target/debug/quill-debug)
 python3 tools/package.py --check    # fmt, clippy and the full test suite first
 cargo test --workspace
 ```

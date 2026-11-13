@@ -896,8 +896,8 @@ fn known_tag(inner: &str) -> Option<(Option<Tag>, bool)> {
     Some((Some(tag), !closing))
 }
 
-struct Reader {
-    doc: Document,
+pub(super) struct Reader {
+    pub(super) doc: Document,
     base: Option<PathBuf>,
     report: ImportReport,
     refs: HashMap<String, String>,
@@ -919,11 +919,17 @@ struct Ctx {
 
 impl Reader {
     fn new(base: Option<&Path>) -> Reader {
-        let mut doc = Document::new();
+        Reader::new_with(base, &super::fonts())
+    }
+
+    pub(super) fn new_with(base: Option<&Path>, fonts: &super::Fonts) -> Reader {
+        let mut doc = Document::with_default_font(&fonts.display_font, fonts.display_size);
         let font = doc.styles.styles[0].chp.font;
         doc.styles.styles[0].pap.after = 120;
-        // Headings by size and weight alone, in the body font.
-        for (level, size) in [40u16, 32, 28, 26, 24, 24].into_iter().enumerate() {
+        // Headings by size and weight alone, in the body font. Their sizes
+        // are the usual ones for a 12 pt body, scaled to the body size.
+        for (level, size) in [40u32, 32, 28, 26, 24, 24].into_iter().enumerate() {
+            let size = (size * u32::from(fonts.display_size) / 24).clamp(2, 3276) as u16;
             if let Some(id) = doc.styles.find(&format!("heading {}", level + 1)) {
                 let style = &mut doc.styles.styles[id as usize];
                 style.chp.font = font;

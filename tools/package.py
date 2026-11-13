@@ -3,7 +3,8 @@
 source ZIP for any build host.
 
 By default the app is built inside the build folder (target/release/Quill.app,
-or target/debug/Quill Debug.app with --debug). --dist makes the packages in dist/.
+or target/debug/Quill Debug.app with --debug; on Linux target/release/quill or
+target/debug/quill-debug). --dist makes the packages in dist/.
 
 Python 3.11+, standard library only. Run --help for options.
 """
@@ -140,7 +141,7 @@ def copy_common(destination: Path, mac: bool = False) -> None:
 def unix_modes(info: tarfile.TarInfo) -> tarfile.TarInfo:
     """Set the permissions a tar.gz unpacks with, rather than taking them
     from the disk: a package built on Windows has no execute bits to copy."""
-    executable = info.name.rsplit("/", 1)[-1] in ("quill", "install-linux.sh")
+    executable = info.name.rsplit("/", 1)[-1] in ("quill", "quill-debug", "install-linux.sh")
     info.mode = 0o755 if info.isdir() or executable else 0o644
     return info
 
@@ -153,7 +154,7 @@ def portable_package(executable: Path, output: Path, version: str,
     with tempfile.TemporaryDirectory(prefix=".qwp-package-", dir=output) as tmp:
         stage = Path(tmp) / name
         stage.mkdir()
-        shutil.copy2(executable, stage / ("quill.exe" if system == "windows" else "quill"))
+        shutil.copy2(executable, stage / program_name(system, debug))
         copy_common(stage)
         shutil.copy2(ROOT / "assets/quill.png", stage / "quill.png")
         for asset in ("quill.ico", "quill-document.png", "quill-document.ico", "quill-mime.xml", "quill-about.jpg"):
@@ -216,11 +217,30 @@ def replace_app(staged: Path, app: Path) -> None:
     shutil.move(str(staged), str(app))
 
 
+def program_name(system: str, debug: bool) -> str:
+    """The program's file name in a portable package or beside the build.
+    The Linux debug build is quill-debug, a separate program from Quill, as
+    the Mac's debug build is the separate Quill Debug app."""
+    if system == "windows":
+        return "quill.exe"
+    return "quill-debug" if debug and system == "linux" else "quill"
+
+
 def dev_app(executable: Path, version: str, system: str, debug: bool = False) -> Path:
     """Put a runnable app beside the build, in target/<profile>/."""
     if system != "macos":
         # Off the Mac the bare program finds its data in the source tree.
-        return executable
+        # Cargo always names it quill, so copy the debug build to its own
+        # name. Replacing the file, rather than writing into it, leaves a
+        # copy that is running untouched.
+        name = program_name(system, debug)
+        if name == executable.name:
+            return executable
+        program = executable.parent / name
+        staged = executable.parent / f".{name}.new"
+        shutil.copy2(executable, staged)
+        os.replace(staged, program)
+        return program
     name = "Quill Debug.app" if debug else "Quill.app"
     app = executable.parent / name
     # Replacing the app under a running copy would pull it out from under

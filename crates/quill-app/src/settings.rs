@@ -172,7 +172,7 @@ pub const MAX_NAMED_COLORS: usize = 8;
 /// How many documents' kept fonts are remembered, newest last.
 pub const MAX_ACCEPTED_DOCUMENTS: usize = 200;
 
-/// Slots for extra font folders in Preferences > Advanced.
+/// Maximum sources in Preferences > Fonts > Additional Font Sources.
 pub const MAX_FONT_FOLDERS: usize = 10;
 pub const DEFAULT_FONT_LEVELS: u8 = 4;
 pub const MAX_FONT_LEVELS: u8 = 7;
@@ -309,6 +309,11 @@ pub struct Settings {
     pub highlight_missing_fonts: bool,
     /// Say where to deal with missing fonts after going on without them.
     pub missing_font_reminder: bool,
+    /// Markdown source and display fonts, sizes in half-points.
+    pub markdown_source_font: String,
+    pub markdown_source_size: u16,
+    pub markdown_display_font: String,
+    pub markdown_display_size: u16,
     // Commands: (menu or key, command name) added to or taken from the original's.
     pub menu_add: Vec<(String, String)>,
     pub menu_remove: Vec<(String, String)>,
@@ -408,6 +413,10 @@ impl Default for Settings {
             accepted_fonts: Vec::new(),
             highlight_missing_fonts: false,
             missing_font_reminder: true,
+            markdown_source_font: "Courier New".into(),
+            markdown_source_size: 20,
+            markdown_display_font: "New York".into(),
+            markdown_display_size: 24,
             menu_add: Vec::new(),
             menu_remove: Vec::new(),
             keys_add: Vec::new(),
@@ -708,6 +717,26 @@ impl Settings {
             "missing_font_reminder",
             b(self.missing_font_reminder),
         );
+        put(
+            &mut out,
+            "markdown_source_font",
+            self.markdown_source_font.clone(),
+        );
+        put(
+            &mut out,
+            "markdown_source_size",
+            self.markdown_source_size.to_string(),
+        );
+        put(
+            &mut out,
+            "markdown_display_font",
+            self.markdown_display_font.clone(),
+        );
+        put(
+            &mut out,
+            "markdown_display_size",
+            self.markdown_display_size.to_string(),
+        );
         for (color, name) in &self.named_colors {
             put(&mut out, "named_color", format!("{color:06X}\t{name}"));
         }
@@ -921,6 +950,14 @@ impl Settings {
                 }
                 "highlight_missing_fonts" => s.highlight_missing_fonts = flag,
                 "missing_font_reminder" => s.missing_font_reminder = flag,
+                "markdown_source_font" if !v.is_empty() => s.markdown_source_font = v.into(),
+                "markdown_source_size" => {
+                    s.markdown_source_size = v.parse().unwrap_or(20u16).clamp(2, 3276)
+                }
+                "markdown_display_font" if !v.is_empty() => s.markdown_display_font = v.into(),
+                "markdown_display_size" => {
+                    s.markdown_display_size = v.parse().unwrap_or(24u16).clamp(2, 3276)
+                }
                 "named_color" => {
                     // A color with no name has nothing after its tab.
                     let (color, name) = v.split_once('\t').unwrap_or((v, ""));
@@ -1226,7 +1263,37 @@ pub fn load() {
         }
         CURRENT.with(|c| *c.borrow_mut() = s);
     }
+    sync_markdown_fonts();
     PERSIST.store(true, Ordering::Relaxed);
+}
+
+thread_local! {
+    /// Markdown fonts changed since the windows last looked: the fonts
+    /// before the first change and the ones now.
+    static MARKDOWN_CHANGE: RefCell<Option<(quill_formats::markdown::Fonts, quill_formats::markdown::Fonts)>> =
+        const { RefCell::new(None) };
+}
+
+fn markdown_fonts_of(s: &Settings) -> quill_formats::markdown::Fonts {
+    quill_formats::markdown::Fonts {
+        source_font: s.markdown_source_font.clone(),
+        source_size: s.markdown_source_size,
+        display_font: s.markdown_display_font.clone(),
+        display_size: s.markdown_display_size,
+    }
+}
+
+/// The Markdown font change the open windows have not been given yet, once.
+pub fn take_markdown_font_change() -> Option<(
+    quill_formats::markdown::Fonts,
+    quill_formats::markdown::Fonts,
+)> {
+    MARKDOWN_CHANGE.with(|c| c.borrow_mut().take())
+}
+
+/// Tell the Markdown reader which fonts the settings choose.
+fn sync_markdown_fonts() {
+    quill_formats::markdown::set_fonts(with(markdown_fonts_of));
 }
 
 /// A copy of the current settings.
@@ -1243,9 +1310,19 @@ pub fn with<R>(f: impl FnOnce(&Settings) -> R) -> R {
 pub fn update(f: impl FnOnce(&mut Settings)) {
     let text = CURRENT.with(|c| {
         let mut s = c.borrow_mut();
+        let before = markdown_fonts_of(&s);
         f(&mut s);
+        let after = markdown_fonts_of(&s);
+        if before != after {
+            MARKDOWN_CHANGE.with(|m| {
+                let mut m = m.borrow_mut();
+                let first = m.take().map_or(before, |(first, _)| first);
+                *m = Some((first, after));
+            });
+        }
         s.to_text()
     });
+    sync_markdown_fonts();
     if !PERSIST.load(Ordering::Relaxed) {
         return;
     }
@@ -1259,9 +1336,60 @@ pub fn update(f: impl FnOnce(&mut Settings)) {
     }
 }
 
+/// Take out the extra font sources that are no longer there: moved,
+/// renamed or deleted. Checked at launch and then at most every few
+/// seconds, since it looks at the disk and is asked on every wake.
+pub fn drop_missing_font_folders() {
+    use std::time::{Duration, Instant};
+    thread_local! {
+        static LAST: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    }
+    let now = Instant::now();
+    if LAST
+        .get()
+        .is_some_and(|at| now < at + Duration::from_secs(3))
+    {
+        return;
+    }
+    LAST.set(Some(now));
+    let mut folders = with(|s| s.font_folders.clone());
+    if without_missing(&mut folders) {
+        update(|s| s.font_folders = folders);
+    }
+}
+
+/// Drop the sources whose path is gone, and say whether any were.
+fn without_missing(folders: &mut Vec<FontFolder>) -> bool {
+    let before = folders.len();
+    folders.retain(|f| f.path.exists());
+    folders.len() != before
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn font_sources_that_are_gone_are_dropped() {
+        let here = std::env::temp_dir().join(format!("quill-font-source-{}", std::process::id()));
+        std::fs::create_dir_all(&here).unwrap();
+        let gone = here.join("moved away");
+        let mut folders = vec![
+            FontFolder {
+                path: here.clone(),
+                enabled: true,
+            },
+            FontFolder {
+                path: gone,
+                enabled: false,
+            },
+        ];
+        assert!(without_missing(&mut folders));
+        assert_eq!(folders.len(), 1);
+        assert_eq!(folders[0].path, here);
+        assert!(!without_missing(&mut folders));
+        std::fs::remove_dir_all(&here).unwrap();
+    }
 
     #[test]
     fn preferences_persist_explicit_choices() {
@@ -1276,6 +1404,10 @@ mod tests {
             custom_dictionary: Some(PathBuf::from("/Custom/100%\nwords.txt")),
             words_to_system: true,
             quit_cleanly: false,
+            markdown_source_font: "Menlo".into(),
+            markdown_source_size: 26,
+            markdown_display_font: "Georgia".into(),
+            markdown_display_size: 28,
             ..Default::default()
         };
         assert_eq!(Settings::from_text(&s.to_text()), s);

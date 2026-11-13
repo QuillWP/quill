@@ -347,7 +347,7 @@ impl Cmd {
             ConvertToTable => "Convert to Table",
             UpdateToc => "Update Table of Contents",
             MakeTocEditable => "Make Table of Contents Editable",
-            StyleDialog => "Style…",
+            StyleDialog => "Paragraph Styles…",
             CharacterStylesDialog => "Character Styles…",
             DefaultFont => "Default Font…",
             ToolbarMenu => "Toolbar Menu",

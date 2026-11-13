@@ -274,17 +274,25 @@ the table keeps its borders, and Format > Border changes them. Gridlines are a s
 guide for cells with no border, as in tables from other programs, and have their own
 `table_gridline_color` and `table_gridline_dotted`.
 
-**Format > Style...** manages paragraph styles. Select a style and choose
-**Paragraph...** to edit its indents, spacing and pagination, or **Character...**
-to edit its manual font, size, color and character formatting. Each editor's OK
-returns to the style dialog without changing the document. **Define** saves the
-definition in this document and updates paragraphs using that style, leaving the
-dialog open. **Apply** also applies the style to selected paragraphs; **OK** does
-that and closes the dialog. None of these writes the document file: use **Save**.
-Cancel discards edits not yet defined or applied. Page margins are document settings
-in **Format > Document Setup...**. **Use As Default** remains unavailable.
+**Format > Paragraph Styles...** (Command-T) lists paragraph styles: **This Document**
+shows Normal, the styles the document uses and the styles it defines; **All Styles** adds
+the automatic ones. Under the list are the chosen style's description and how many
+paragraphs use it. **New...** opens the style editor on a new style made from the
+selection's formatting, and **Edit...** (or a double-click) opens it on the chosen style.
+**Delete** removes a style the document defines (Normal and the automatic styles stay). When
+paragraphs use it, Quill asks what they become: **No Style (Normal)** or another style
+chosen from the menu. Deleting can be undone.
 
-**View > Style Sheets** shows the Style Sheets palette: one list of the document's
+In the style editor, **Paragraph...** edits the style's indents, spacing and pagination,
+and **Character...** its manual font, size, color and character formatting. Each of those
+returns to the editor without changing the document. **OK** saves the style in this
+document, updating the paragraphs that use it, and closes the editor; it does not restyle
+the selection. **Apply** saves it and also gives it to the selected paragraphs, leaving the
+editor open. None of these writes the document file: use **Save**. Cancel discards edits
+not yet saved. Page margins are document settings in **Format > Document Setup...**.
+**Use As Default** remains unavailable.
+
+**Window > Style Sheets** shows the Style Sheets palette: one list of the document's
 paragraph styles (marked with a paragraph sign) and character styles (marked with an A),
 with **All**, **Paragraph** and **Character** tabs (shortened to Para and Char in a narrow
 palette) that choose what the list shows. Clicking a style applies it to the selected
@@ -294,36 +302,38 @@ afresh (manual formatting stays); **No Style** at the top of the character style
 the character style off. The row for the style at
 the insertion point is highlighted. **New** and **Edit** open the style's editor, **Copy**
 makes a copy named "... copy", and **Delete** removes a style the document defines (Normal,
-the automatic styles and No Style cannot be deleted); each of these can be undone. The
+the automatic styles and No Style cannot be deleted), asking first what the paragraphs of a
+paragraph style in use become; each of these can be undone. The
 palette starts docked at the right of the document window, taking its width from the text.
 The button at the right of its title bar (or in the tab row) moves it into a small window of
 its own, which can be dragged anywhere on the screen, outside the document window too, and
 back again. That window has the system's title bar and close button, and follows whichever
-document window is in front. Whether it
+document window is in front: it lists that document's styles, and the row chosen for Edit,
+Copy and Delete is cleared when another document comes in front. It stays above Quill's
+document windows and hides while another program is in front. Whether it
 shows, its tab and whether it is docked are saved in the settings (`show_styles_palette`,
 `styles_palette_tab`, `styles_palette_docked`).
 
 The bottom **Character Style** menu ends with **New Character Style...**, which opens the
-character style editor. Saving it closes the editor and returns to this dialog with the new
-style listed and chosen; Cancel leaves the menu as it was.
+character style editor. Saving it closes the editor and returns to the style editor with the
+new style listed and chosen; Cancel leaves the menu as it was.
 
-The bottom **Character Style** menu is a link preview. **No Style** uses the manual
-character defaults. Selecting a named style strikes the manual summary through;
-returning to **No Style** restores its display without losing any manual values.
-Saving a linked definition is not implemented yet, so Define, Apply and OK are
-unavailable while previewing a named style. Choose No Style to save manual defaults.
+The **Character Style** menu links the paragraph style to a character style. **No Style**
+uses the manual character formatting. Choosing a named style strikes the manual summary
+through, and saving makes the style's text take the character style; going back to **No
+Style** brings the manual values back.
 
-Character styles have a temporary **Character Styles** menu. To make
-one, format and select some text, choose **Manage Character Styles...**, enter a name
-and press **Define New**. Select other text and choose that style from the menu, or
-choose it at the caret before typing. The style stores differences from the paragraph's
+**Format > Character Styles...** lists the document's character styles. To make one,
+format and select some text, press **+**, name it and save it. Select other text and
+press **Apply**, or click the style in the Style Sheets palette, or choose it at the
+caret before typing. The style stores differences from the paragraph's
 character defaults, so an emphasis style can inherit the paragraph's font and size.
 Bold, italic and similar flags follow DOCX character-style toggle rules.
 
-To change a style, format an example, select it, choose the style in the manager and
-press **Redefine**. Direct overrides on other text stay in place. **Rename** changes
-only its name. **None** or **Remove** takes off the named layer; **Delete Style** removes
-the definition and leaves its text looking as it does now. These changes support Undo.
+To change a style, format an example, select it, choose the style in the list and
+press **Update to Selection**, or press **Edit...** to change what it sets. Direct
+overrides on other text stay in place. **Remove Style** takes off the named layer; **-**
+deletes the definition and leaves its text looking as it does now. These changes support Undo.
 Manage definitions in the main document; existing styles can be applied in editing panes.
 Redefinition updates notes, comments and section headers as well as the main text.
 
@@ -363,6 +373,31 @@ documents. The Custom row of the color palette holds the colors saved in Prefere
 Colors, for every document, and then the colors this document uses. Pointing at a saved
 color shows its name. Preferences > View has Interface Size, and Advanced has Smart Quotes.
 
+In Preferences > Fonts, Additional Font Sources opens a separate dialog for
+loading fonts without installing them. Choose fills a source row, + Add Source
+adds a row, and Delete removes it. Done returns changes to Preferences; Save or
+Save and Close applies them. Cancel leaves the previous settings unchanged.
+On macOS, Choose also accepts `.app` bundles: select an application to use the
+fonts stored inside it. Inside an application Quill searches only
+`Contents/Resources` and `Contents/Library/Fonts`, and the folder search depth counts
+from the application, so the default of four levels reaches `Contents/Resources/Fonts`.
+Increase it for fonts stored deeper inside an application. Keep the source checked to use its fonts.
+If the application is moved, removed, or updated, its fonts may no longer be
+available, and documents that use them may look different. When a font family is
+installed on the system and also in a source, the system's copy is used; when two
+sources have the same family, the one added first is used. A family is taken whole from
+one place, so two versions of a font never mix. A source that is no longer there
+(moved, renamed or deleted) is taken off the list.
+
+So that one source cannot set Quill searching a whole disk, Choose refuses the top of a
+disk, the home folder or a folder holding it, the folders the system already loads fonts
+from, and the big program and system folders (`/Applications`, `/System` and `/Library`
+on macOS; `C:\Windows`, `Program Files` and `ProgramData` on Windows; `/usr`, `/opt` and
+the like on Linux). A folder inside one of them, such as one application, is fine. One
+search looks in at most 2,000 folders and takes at most 20,000 font files across all the
+sources; when it stops early, Additional Font Sources says so. The sources are searched in
+the background, and the new fonts come into use when the search is done.
+
 Preferences > View > Appearance chooses Light, Dark or Auto. Auto, the default, follows
 the system's light or dark setting and changes with it while Quill is running. In Dark the
 toolbars, rulers, panes and dialogs go dark, and so does the document: the page turns
@@ -376,8 +411,18 @@ printing, Save as PDF and every saved format are the same as in Light.
     cargo build --release               # target/release/quill
     python3 tools/package.py            # the Mac app, in target/release/Quill.app
     python3 tools/package.py --debug    # a debug build, in target/debug/Quill Debug.app
+                                        # (on Linux, the program target/debug/quill-debug)
     python3 tools/package.py --dist     # the disk image to share, in dist/
     python3 tools/footprint.py          # sizes and memory against the budget
+
+The debug build is a separate program from Quill, with its own settings and
+recovery files under the "Quill Debug" profile. On Linux it is called `quill-debug`,
+and its debug package does not install itself as Quill.
+
+On Linux, Quill opens its windows through X11 whenever it can, which on a Wayland
+desktop means XWayland. There the desktop draws the title bar in its own theme and
+the menu bar is GTK's. Set `QUILL_BACKEND=wayland` to open native Wayland windows
+instead; GNOME then leaves the title bar to Quill, which draws a plain one.
 
 Packaging requires Python 3.11 or newer and the Rust toolchain. Without
 `--dist` the script builds the app to run in place; with `--dist` it also makes

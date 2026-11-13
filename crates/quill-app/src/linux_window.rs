@@ -15,7 +15,16 @@ use winit::raw_window_handle::{
     DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawDisplayHandle,
     RawWindowHandle, WindowHandle,
 };
-use winit::window::{Fullscreen, ResizeDirection, WindowAttributes};
+use winit::window::{Fullscreen, ResizeDirection, Theme, WindowAttributes};
+
+/// The program's name, which desktops use to match a window to its .desktop
+/// entry. The debug build is quill-debug, a separate program like the Mac's
+/// Quill Debug app, so it never borrows the installed Quill's entry or icon.
+pub const PROGRAM: &str = if cfg!(debug_assertions) {
+    "quill-debug"
+} else {
+    "quill"
+};
 
 pub struct Window {
     // Destroy the embedded window before destroying its GTK parent.
@@ -77,8 +86,12 @@ impl Window {
                 gtk::gdk::set_allowed_backends("x11");
                 // The program name becomes the window class, which is how
                 // a desktop matches the window to quill.desktop.
-                gtk::glib::set_prgname(Some("quill"));
-                gtk::glib::set_application_name("Quill");
+                gtk::glib::set_prgname(Some(PROGRAM));
+                gtk::glib::set_application_name(if cfg!(debug_assertions) {
+                    "Quill Debug"
+                } else {
+                    "Quill"
+                });
             }
             match gtk::init() {
                 Ok(()) => Some(Host::new(&attrs, proxy)),
@@ -160,6 +173,49 @@ impl Window {
         }
         host.bar.set_sensitive(!blocked);
         host.syncing.set(false);
+    }
+
+    /// Light or dark, or the system's look for `None`. GTK draws the menu bar
+    /// and, under X11, tells the window manager which title bar to draw, so
+    /// a Dark setting turns those dark too.
+    pub fn set_theme(&self, theme: Option<Theme>) {
+        self.inner.set_theme(theme);
+        if self.host.is_some()
+            && let Some(settings) = gtk::Settings::default()
+        {
+            settings.set_gtk_application_prefer_dark_theme(theme == Some(Theme::Dark));
+        }
+    }
+
+    /// Whether this window has the keyboard. A GTK-hosted window counts as
+    /// active while its embedded editor has the focus.
+    pub fn is_active(&self) -> bool {
+        self.host.as_ref().is_some_and(|h| h.window.is_active()) || self.inner.has_focus()
+    }
+
+    /// Show or hide the window. A hosted window is GTK's top-level window,
+    /// so hide that rather than the embedded one inside it.
+    pub fn set_visible(&self, visible: bool) {
+        match &self.host {
+            Some(host) if visible => host.window.show(),
+            Some(host) => host.window.hide(),
+            None => self.inner.set_visible(visible),
+        }
+    }
+
+    /// Make this window a floating palette: kept above the document
+    /// windows, out of the task bar and window switcher, and never given the
+    /// keyboard, so typing stays in the document. It has no menu bar.
+    pub fn make_palette(&self) {
+        let Some(host) = &self.host else { return };
+        host.bar.hide();
+        host.bar.set_no_show_all(true);
+        host.window.set_type_hint(gtk::gdk::WindowTypeHint::Utility);
+        host.window.set_keep_above(true);
+        host.window.set_skip_taskbar_hint(true);
+        host.window.set_skip_pager_hint(true);
+        host.window.set_accept_focus(false);
+        host.window.set_focus_on_map(false);
     }
 
     pub fn set_title(&self, title: &str) {
@@ -437,6 +493,67 @@ fn sync_items(menu: &Menu, nodes: &[gtk::MenuItem], index: &mut usize) {
             sync_items(menu, nodes, index);
         }
     }
+}
+
+/// Whether the desktop is set to dark. winit cannot say on Linux: X11 has no
+/// theme, and Wayland reports only what Quill asked for. Ubuntu's Appearance
+/// settings and GNOME's write `color-scheme` (and a "-dark" GTK theme on
+/// older releases), and GTK_THEME overrides both, as it does for GTK.
+pub fn system_dark() -> bool {
+    use gtk::gio::prelude::SettingsExt;
+    if let Ok(theme) = std::env::var("GTK_THEME") {
+        return theme.to_ascii_lowercase().contains("dark");
+    }
+    thread_local! {
+        static INTERFACE: Option<(gtk::gio::Settings, bool)> = gnome_interface();
+    }
+    INTERFACE.with(|interface| {
+        let Some((settings, has_scheme)) = interface else {
+            return false;
+        };
+        if *has_scheme {
+            match settings.string("color-scheme").as_str() {
+                "prefer-dark" => return true,
+                "prefer-light" => return false,
+                _ => {}
+            }
+        }
+        settings
+            .string("gtk-theme")
+            .to_ascii_lowercase()
+            .contains("dark")
+    })
+}
+
+/// GNOME's interface settings, when the desktop has them. Opening a schema
+/// or key that is not installed would abort, so look both up first.
+fn gnome_interface() -> Option<(gtk::gio::Settings, bool)> {
+    let schema =
+        gtk::gio::SettingsSchemaSource::default()?.lookup("org.gnome.desktop.interface", true)?;
+    if !schema.has_key("gtk-theme") {
+        return None;
+    }
+    let has_scheme = schema.has_key("color-scheme");
+    let settings = gtk::gio::Settings::new_full(&schema, None::<&gtk::gio::SettingsBackend>, None);
+    Some((settings, has_scheme))
+}
+
+/// The system's dark setting when it has changed since the last call, at
+/// most every half second. Reading a setting is cheap but not free, and
+/// this is asked each time the event loop goes idle.
+pub fn system_dark_changed() -> Option<bool> {
+    use std::time::{Duration, Instant};
+    thread_local! {
+        static LAST: Cell<Option<(bool, Instant)>> = const { Cell::new(None) };
+    }
+    let now = Instant::now();
+    let last = LAST.get();
+    if last.is_some_and(|(_, at)| now < at + Duration::from_millis(500)) {
+        return None;
+    }
+    let dark = system_dark();
+    LAST.set(Some((dark, now)));
+    (last.is_some_and(|(was, _)| was != dark)).then_some(dark)
 }
 
 /// Service GTK on the same thread as winit. A bounded drain avoids starving

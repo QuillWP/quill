@@ -114,6 +114,44 @@ impl DocView {
         std::mem::replace(self, fresh).doc
     }
 
+    /// The Markdown fonts in the Preferences changed: give this document
+    /// the new ones, as Replace Fonts would. Source view and a Markdown
+    /// file are changed; any other document has its own fonts. Code (in a
+    /// fixed-width font) keeps its font. The change belongs to the view,
+    /// not the document, so it is not an undo step or an edit.
+    pub fn restyle_markdown_fonts(&mut self, old: &markdown::Fonts, new: &markdown::Fonts) {
+        let source = self.in_markdown_source();
+        if !source && !self.is_markdown_file() {
+            return;
+        }
+        let unchanged = if source {
+            (&old.source_font, old.source_size) == (&new.source_font, new.source_size)
+        } else {
+            (&old.display_font, old.display_size) == (&new.display_font, new.display_size)
+        };
+        if unchanged {
+            return;
+        }
+        let was_modified = self.doc.is_modified();
+        self.doc.begin("Markdown Fonts", self.sel);
+        if source {
+            // Source view is all one font, whatever it was left in.
+            let to = self.doc.font_id(&new.source_font);
+            self.doc.set_font_everywhere(to, new.source_size);
+        } else {
+            // Sizes follow the document's own body size, so the change is
+            // right even if text came back from an earlier undo.
+            let base = u32::from(self.doc.styles.get(0).chp.size);
+            let to = self.doc.font_id(&new.display_font);
+            self.doc
+                .replace_font_scaled(markdown::is_mono, to, u32::from(new.display_size), base);
+        }
+        self.typing_chp = None;
+        let sel = self.sel;
+        self.finish_edit(sel);
+        self.doc.forget_last_step(was_modified);
+    }
+
     /// View > Markdown > Source.
     pub fn show_markdown_source(&mut self) {
         if self.md_source.is_some() {
@@ -164,6 +202,57 @@ mod tests {
 
     fn texts(view: &DocView) -> Vec<String> {
         view.doc.main.paras.iter().map(|p| p.text.clone()).collect()
+    }
+
+    #[test]
+    fn new_markdown_fonts_restyle_an_open_document_in_place() {
+        let old = markdown::Fonts::default();
+        let new = markdown::Fonts {
+            source_font: "Menlo".into(),
+            source_size: 30,
+            display_font: "Georgia".into(),
+            display_size: 48,
+        };
+        let face = |v: &DocView, para: usize| {
+            let chp = v.doc.main.paras[para].mark_chp;
+            (v.doc.font_name(chp.font).to_string(), chp.size)
+        };
+        // Source view takes the source font and size.
+        let mut view = view_of("# Head\n\nSome words.\n");
+        view.path = Some("/tmp/Notes.md".into());
+        view.show_markdown_source();
+        let text = texts(&view);
+        view.restyle_markdown_fonts(&old, &new);
+        assert_eq!(face(&view, 0), ("Menlo".to_string(), 30));
+        assert_eq!(texts(&view), text);
+        assert!(!view.doc.is_modified());
+        // A formatted Markdown file takes the display font and size.
+        let mut view = view_of("# Head\n\nSome words.\n");
+        view.path = Some("/tmp/Notes.md".into());
+        view.restyle_markdown_fonts(&old, &new);
+        let body = view.doc.main.paras[1].chp_of_char(0);
+        assert_eq!((view.doc.font_name(body.font), body.size), ("Georgia", 48));
+        // The change is one undo step, and it does not count as an edit.
+        assert!(!view.doc.is_modified());
+        assert_eq!(view.doc.undo_label(), None);
+        // A change to the display font leaves Source view alone.
+        let mut view = view_of("# Head\n");
+        view.show_markdown_source();
+        let before = face(&view, 0);
+        view.restyle_markdown_fonts(
+            &old,
+            &markdown::Fonts {
+                display_font: "Georgia".into(),
+                display_size: 48,
+                ..old.clone()
+            },
+        );
+        assert_eq!(face(&view, 0), before);
+        // Another kind of document keeps its own fonts.
+        let mut view = view_of("Plain\n");
+        let before = view.doc.main.paras[0].chp_of_char(0);
+        view.restyle_markdown_fonts(&old, &new);
+        assert_eq!(view.doc.main.paras[0].chp_of_char(0), before);
     }
 
     #[test]

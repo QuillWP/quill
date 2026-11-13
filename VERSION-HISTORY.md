@@ -7,39 +7,40 @@ Add an entry for every new tag as part of the release process.
 
 Versions 0.1.0 to 0.14.0 were all tagged on 2026-11-05.
 
-## 0.16.0 - 2026-11-11
+## 0.17.0 - 2026-11-11
 
-The Style Sheets palette, a Light, Dark or Auto appearance and a build stamp
-in debug builds.
+Font sources get their own preferences, Linux windows and appearance behave,
+and Format > Style becomes a Paragraph Styles list.
 
-- View > Style Sheets is one list of paragraph and character styles with All,
-  Paragraph and Character tabs (Para and Char when it is narrow). Clicking a
-  row applies the style the way the toolbar's style menus do. New, Edit, Copy
-  and Delete sit beside it and leave Normal, the automatic styles and No Style
-  alone.
-- It docks to the right of the text, or comes out into a small window of its
-  own with the system's title bar (a floating tool window on the Mac that
-  hides when Quill is not in front). Whether it shows, its tab and whether it
-  is docked are saved in the settings.
-- No Style at the top of the paragraph styles puts the selected paragraphs
-  back to Normal and takes off their character styles, as one undo step.
-- The Style dialog's Character Style menu ends with New Character Style, which
-  opens the editor and returns with the new style linked.
-- The palette and the style dialogs now share one copy and one delete. That
-  fixes the next text taking the wrong style after deleting a character style
-  and copies being named "Body copy copy".
-- Preferences > View has Appearance: Auto (follows the system while Quill
-  runs), Light or Dark. On the Mac the whole application takes it, including
-  alerts and the Open and Save panels.
-- In dark mode the page is drawn dark: white paper goes near-black, black and
-  automatic text near-white, white text dark, and colors keep their hue.
-  Pictures are not touched. Printing, PDF and export are as before.
-- A debug build's About window shows when and from what it was built (time,
-  branch, commit, and "modified" for uncommitted changes). Release builds are
-  unchanged.
-- tools/smoketest.py checks a build quickly (version, drawing, opening a small
-  document in each main format) in a scratch home folder with its own profile,
-  so it never touches real settings.
+- Additional font sources move into Preferences > Fonts, and a macOS app
+  bundle can be a source (only its Resources and Library/Fonts are searched).
+- Preferences > Fonts has Markdown settings: the font and size of Source view
+  (default Courier New 10) and the body font and size of Markdown files
+  (default New York 12). Open documents take a change in place without being
+  marked modified.
+- Sources are added one at a time in the order they were added. A family the
+  system already has keeps its own faces, and a later copy is left out whole.
+- A source that has been moved or deleted is dropped from the list. Choose
+  refuses the top of a disk, the home folder and system and program folders.
+  One search visits at most 2,000 folders and 20,000 font files, and runs on a
+  thread of its own so the window does not stop.
+- Add Source is greyed out while a row is still waiting for its folder.
+- Windows open through X11 (XWayland on a Wayland desktop) so they get the
+  theme's title bar and GTK's menu bar. QUILL_BACKEND=wayland keeps native
+  Wayland windows.
+- The debug program is quill-debug, with its own window class and app ID.
+- Auto appearance follows GNOME's color-scheme setting (or a -dark GTK theme,
+  or GTK_THEME). The Style Sheets window stays above the documents without
+  taking the keyboard, and the palette's chosen row starts over when another
+  document comes to the front.
+- Style Sheets moves from View to Window. The Character Styles menu is gone;
+  Character Styles... is in Format.
+- Format > Style is now Paragraph Styles... (still Command-T): a list with
+  This Document or All Styles, the style's description and use count, and New,
+  Edit and Delete. OK in the editor saves the style without restyling the
+  selection; Apply saves it and also gives it to the selected paragraphs.
+- Deleting a style that paragraphs use asks what they become: No Style
+  (Normal) or another style.
 
 ## 0.15.0 - 2026-11-08
 

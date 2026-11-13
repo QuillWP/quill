@@ -294,8 +294,14 @@ fn set_window_appearance(window: &Window, appearance: crate::settings::Appearanc
 /// Whether `window` should draw dark: the Appearance setting, or the
 /// system's look when that is Auto.
 fn appearance_is_dark(window: &Window) -> bool {
-    crate::settings::with(|s| s.appearance)
-        .is_dark(window.theme() == Some(winit::window::Theme::Dark))
+    #[cfg(target_os = "linux")]
+    let system = {
+        let _ = window;
+        crate::linux_window::system_dark()
+    };
+    #[cfg(not(target_os = "linux"))]
+    let system = window.theme() == Some(winit::window::Theme::Dark);
+    crate::settings::with(|s| s.appearance).is_dark(system)
 }
 
 pub fn ui_scale(_display_scale: f32) -> f32 {
@@ -1506,6 +1512,8 @@ fn hand_over(a: &mut WinState, a_port: &mut Port, b: &mut WinState, b_port: &mut
 /// Events the app sends itself.
 #[derive(Debug)]
 pub enum UserEvent {
+    /// A search of the font sources finished.
+    FontsFound,
     #[cfg(target_os = "linux")]
     LinuxMenu { window: WindowId, action: Action },
     #[cfg(target_os = "linux")]
@@ -1606,7 +1614,10 @@ pub struct App {
     /// What each item of the last native context menu does.
     #[cfg(target_os = "macos")]
     context_actions: Vec<Action>,
-    fonts_scan: Option<JoinHandle<Catalog>>,
+    fonts_scan: Option<FontLoad>,
+    /// A search of the font sources running after they changed, and the
+    /// sources it is for. The old fonts stay in use until it is done.
+    font_rescan: Option<(FontFolders, JoinHandle<Catalog>)>,
     /// The pointer for cropping a picture, made once.
     crop_cursor: Option<CustomCursor>,
     /// The installed fonts alone, kept so the extra font folders can be
@@ -1642,12 +1653,15 @@ struct FontFolders {
 }
 
 impl FontFolders {
+    /// The sources switched on in the settings. One that is too broad to
+    /// search (the settings file can be edited by hand) is left out.
     fn current() -> Self {
         crate::settings::with(|s| FontFolders {
             paths: s
                 .font_folders
                 .iter()
                 .filter(|f| f.enabled)
+                .filter(|f| quill_layout::fonts::source_refusal(&f.path).is_none())
                 .map(|f| f.path.clone())
                 .collect(),
             levels: s.font_folder_levels,
@@ -1659,12 +1673,34 @@ impl FontFolders {
     }
 }
 
+/// Finding the fonts at launch: the system's, then the extra sources'
+/// with them, on a thread of its own while the window system starts up.
+pub struct FontLoad {
+    folders: FontFolders,
+    /// The system's fonts alone, and with the sources added.
+    found: JoinHandle<(Catalog, Catalog)>,
+}
+
+/// Start finding the fonts. Call it after the settings are loaded.
+pub fn start_font_load() -> FontLoad {
+    crate::settings::drop_missing_font_folders();
+    let folders = FontFolders::current();
+    let wanted = folders.clone();
+    let found = std::thread::spawn(move || {
+        let system = Catalog::scan_system();
+        let all = wanted.apply(&system);
+        (system, all)
+    });
+    FontLoad { folders, found }
+}
+
 impl App {
     pub fn new(
-        fonts_scan: JoinHandle<Catalog>,
+        fonts_scan: FontLoad,
         files: Vec<PathBuf>,
         proxy: EventLoopProxy<UserEvent>,
     ) -> Self {
+        let loaded = fonts_scan.folders.clone();
         App {
             #[cfg(target_os = "macos")]
             preferences: None,
@@ -1689,7 +1725,8 @@ impl App {
             fonts_scan: Some(fonts_scan),
             crop_cursor: None,
             system_catalog: None,
-            font_folders_loaded: FontFolders::current(),
+            font_folders_loaded: loaded,
+            font_rescan: None,
             font_catalog: None,
             fonts: None,
             font_names: Vec::new(),
@@ -1709,45 +1746,70 @@ impl App {
 
     fn ensure_fonts(&mut self) {
         if self.fonts.is_none() {
-            let system = self
+            let (system, catalog) = self
                 .fonts_scan
                 .take()
-                .and_then(|h| h.join().ok())
+                .and_then(|load| load.found.join().ok())
                 .unwrap_or_default();
-            let folders = FontFolders::current();
-            let catalog = folders.apply(&system);
-            crate::font_names::set(&catalog);
             self.system_catalog = Some(system);
-            self.font_folders_loaded = folders;
-            self.font_catalog = Some(catalog.clone());
-            let fonts = Fonts::new(catalog);
-            self.font_names = fonts.family_names().iter().map(|s| s.to_string()).collect();
-            self.font_families = fonts.family_info();
-            self.fonts = Some(fonts);
+            self.use_catalog(catalog);
         }
     }
 
-    /// Preferences > Advanced switched a font folder on or off, or changed
-    /// how deep to search: rebuild the font list and lay every document out
-    /// again with it.
-    fn refresh_font_folders(&mut self) {
-        let folders = FontFolders::current();
-        if folders == self.font_folders_loaded {
-            return;
-        }
-        let Some(system) = &self.system_catalog else {
-            // Fonts aren't loaded yet; they will pick the folders up.
-            self.font_folders_loaded = folders;
-            return;
-        };
-        let catalog = folders.apply(system);
+    /// Make `catalog` the fonts every document draws with.
+    fn use_catalog(&mut self, catalog: Catalog) {
         crate::font_names::set(&catalog);
-        self.font_folders_loaded = folders;
+        crate::prefs_dialog::set_sources_cut_short(catalog.sources_cut_short());
         let fonts = Fonts::new(catalog.clone());
         self.font_names = fonts.family_names().iter().map(|s| s.to_string()).collect();
         self.font_families = fonts.family_info();
         self.font_catalog = Some(catalog);
         self.fonts = Some(fonts);
+    }
+
+    /// Preferences > Fonts switched a font source on or off, or changed
+    /// how deep to search: search the sources again on a thread of its
+    /// own, so a big source cannot stop the window, and when it is done
+    /// rebuild the font list and lay every document out again with it.
+    fn refresh_font_folders(&mut self) {
+        if self
+            .font_rescan
+            .as_ref()
+            .is_some_and(|(_, found)| found.is_finished())
+        {
+            let (folders, found) = self.font_rescan.take().unwrap();
+            // Taken as done even if the search failed, so it is not
+            // started again and again.
+            self.font_folders_loaded = folders;
+            if let Ok(catalog) = found.join() {
+                self.use_new_fonts(catalog);
+            }
+        }
+        if self.font_rescan.is_some() {
+            return;
+        }
+        crate::settings::drop_missing_font_folders();
+        let folders = FontFolders::current();
+        if folders == self.font_folders_loaded {
+            return;
+        }
+        // Before the fonts are first in use, this runs again once they are.
+        let Some(system) = self.system_catalog.clone() else {
+            return;
+        };
+        let wanted = folders.clone();
+        let proxy = self.proxy.clone();
+        let found = std::thread::spawn(move || {
+            let catalog = wanted.apply(&system);
+            // Wake the event loop to put the fonts in.
+            let _ = proxy.send_event(UserEvent::FontsFound);
+            catalog
+        });
+        self.font_rescan = Some((folders, found));
+    }
+
+    fn use_new_fonts(&mut self, catalog: Catalog) {
+        self.use_catalog(catalog);
         self.cache = GlyphCache::new();
         for (_, w) in &mut self.windows {
             w.st.view.invalidate_layout();
@@ -2081,10 +2143,11 @@ impl App {
         let attrs = attrs.with_window_icon(window_icon());
         // Wayland has no window icons: the desktop looks the icon up from
         // the application ID, which names quill.desktop (and its Icon=).
+        // The debug build's ID is quill-debug, so it is a separate program.
         #[cfg(target_os = "linux")]
         let attrs = {
             use winit::platform::wayland::WindowAttributesExtWayland;
-            attrs.with_name("quill", "quill")
+            attrs.with_name(crate::linux_window::PROGRAM, crate::linux_window::PROGRAM)
         };
         #[cfg(target_os = "linux")]
         let created = Window::create(el, attrs, self.proxy.clone());
@@ -3479,6 +3542,7 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(not(target_os = "macos"))]
         let _ = el;
         match event {
+            UserEvent::FontsFound => {}
             #[cfg(target_os = "linux")]
             UserEvent::LinuxMenu { window, action } => {
                 if self.index(window).is_some() {
@@ -3941,8 +4005,29 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         self.sync_palette_window(el);
+        // New Markdown fonts from the Preferences reach the open windows.
+        if let Some((old, new)) = crate::settings::take_markdown_font_change() {
+            for (_, w) in &mut self.windows {
+                w.st.main_view_mut().restyle_markdown_fonts(&old, &new);
+                w.window.request_redraw();
+            }
+        }
         #[cfg(target_os = "linux")]
         crate::linux_window::poll();
+        // winit sends no ThemeChanged on Linux, so watch the setting here.
+        #[cfg(target_os = "linux")]
+        if let Some(dark) = crate::linux_window::system_dark_changed() {
+            let appearance = crate::settings::with(|s| s.appearance);
+            for (_, w) in &mut self.windows {
+                w.st.dark = appearance.is_dark(dark);
+                w.window.request_redraw();
+            }
+            self.refresh_palette_window();
+        }
+        #[cfg(target_os = "linux")]
+        let palette_wake = self.sync_palette_shown();
+        #[cfg(not(target_os = "linux"))]
+        let palette_wake: Option<Instant> = None;
         #[cfg(target_os = "macos")]
         crate::mac_open::set_unsaved(
             self.windows
@@ -3995,6 +4080,7 @@ impl ApplicationHandler<UserEvent> for App {
             .flatten()
             .min();
         let next = spelling.map_or(next, |t| t.min(next));
+        let next = palette_wake.map_or(next, |t| t.min(next));
         #[cfg(target_os = "linux")]
         {
             self.editor_wake = Some(next);
@@ -4086,10 +4172,71 @@ mod tests {
     use quill_core::{Position, Selection};
 
     #[test]
+    fn paragraph_styles_lists_styles_and_its_buttons_make_edit_and_delete_them() {
+        let doc = quill_core::text::from_plain_text("One\nTwo");
+        let mut state = WinState::new(DocView::new(doc, "Doc".into()));
+        let env = Env {
+            font_names: &[],
+            font_families: &[],
+            recent: &[],
+            windows: &[],
+        };
+        let mut clip = Clipboard::new();
+        state.open_dialog(DialogId::Style, &env);
+        assert!(matches!(state.dialogs[0].0, Which::ParagraphStyles(_)));
+        // New opens the editor; OK saves the style without applying it, and
+        // the list comes back on it.
+        state.dialog_outcome(Outcome::Button("new"), &mut clip);
+        assert!(matches!(&state.dialogs[1].0, Which::Style(st) if st.selected == 0));
+        state.dialogs[1].1.set_field("name", "Quote");
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.dialogs.len(), 1);
+        let quote = state.view.doc.styles.find("Quote").unwrap();
+        assert_eq!(state.view.doc.main.paras[0].pap.style, 0);
+        let selected = |state: &WinState| match &state.dialogs[0] {
+            (Which::ParagraphStyles(st), d) => crate::style_dialog::list_selected(st, d),
+            _ => None,
+        };
+        assert_eq!(selected(&state), Some(quote));
+        // Edit opens the editor on the chosen style.
+        state.dialog_outcome(Outcome::Button("edit"), &mut clip);
+        assert!(matches!(
+            &state.dialogs[1].0,
+            Which::Style(st) if crate::style_dialog::editing(st) == Some(quote)
+        ));
+        state.dialog_outcome(Outcome::Cancel, &mut clip);
+        // Delete on a style in use asks; Cancel leaves it.
+        state
+            .view
+            .set_selection(Selection::caret(Position::new(1, 0)));
+        state.view.set_style(quote);
+        state.dialog_outcome(Outcome::Button("delete"), &mut clip);
+        assert!(matches!(state.dialogs[1].0, Which::DeleteStyle { .. }));
+        state.dialog_outcome(Outcome::Cancel, &mut clip);
+        assert!(state.view.doc.styles.find("Quote").is_some());
+        // Delete there sets the paragraph to No Style and the list moves on.
+        state.dialog_outcome(Outcome::Button("delete"), &mut clip);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.dialogs.len(), 1);
+        assert!(state.view.doc.styles.find("Quote").is_none());
+        assert_eq!(state.view.doc.main.paras[1].pap.style, 0);
+        assert!(selected(&state).is_some());
+    }
+
+    /// Save what the style editor in front shows, keeping it open.
+    fn define_in_editor(state: &mut WinState) {
+        let Some((Which::Style(st), d)) = state.dialogs.last_mut() else {
+            panic!("the style editor is in front");
+        };
+        crate::style_dialog::define(st, d, &mut state.view);
+    }
+
+    #[test]
     fn the_style_dialogs_character_style_menu_makes_a_new_style_and_comes_back_to_it() {
         let doc = quill_core::text::from_plain_text("Body text");
         let mut state = WinState::new(DocView::new(doc, "Doc".into()));
-        let (d, st) = crate::style_dialog::style(&state.view);
+        let (d, st) =
+            crate::style_dialog::editor(&state.view, Some(state.view.current_pap().style));
         state.dialogs.push((Which::Style(st), d));
         let mut clip = Clipboard::new();
         let none = state.view.doc.styles.characters.len();
@@ -4207,7 +4354,8 @@ mod tests {
     fn character_style_dialog_edits_stay_pending_and_cancel_does_not_add_fonts() {
         let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
         let original = quill_formats::native::write(&state.view.doc, 0);
-        let (d, st) = crate::style_dialog::style(&state.view);
+        let (d, st) =
+            crate::style_dialog::editor(&state.view, Some(state.view.current_pap().style));
         state.dialogs.push((Which::Style(st), d));
         let mut clip = Clipboard::new();
         state.dialog_outcome(Outcome::Button("character"), &mut clip);
@@ -4223,25 +4371,23 @@ mod tests {
         assert_eq!(quill_formats::native::write(&state.view.doc, 0), original);
         assert!(!state.view.doc.is_modified());
 
-        let (d, st) = crate::style_dialog::style(&state.view);
+        let (d, st) =
+            crate::style_dialog::editor(&state.view, Some(state.view.current_pap().style));
         state.dialogs.push((Which::Style(st), d));
         state.dialog_outcome(Outcome::Button("character"), &mut clip);
         state.dialogs.last_mut().unwrap().1.set_field("size", "22");
         state.dialog_outcome(Outcome::Cancel, &mut clip);
-        state.dialog_outcome(Outcome::Button("define"), &mut clip);
         assert_eq!(quill_formats::native::write(&state.view.doc, 0), original);
         assert!(!state.view.doc.is_modified());
     }
 
     #[test]
-    fn character_editor_defines_manual_defaults_and_ok_applies_the_defined_style() {
+    fn character_editor_defines_manual_defaults_and_apply_applies_the_defined_style() {
         let doc = quill_core::text::from_plain_text("Body text");
         let mut state = WinState::new(DocView::new(doc, "Doc".into()));
-        let (mut d, st) = crate::style_dialog::style(&state.view);
-        d.set_selected("list", 0);
+        let (d, st) = crate::style_dialog::editor(&state.view, None);
         state.dialogs.push((Which::Style(st), d));
         let mut clip = Clipboard::new();
-        state.dialog_outcome(Outcome::Changed("list"), &mut clip);
         state
             .dialogs
             .last_mut()
@@ -4255,7 +4401,7 @@ mod tests {
         editor.set_options("font", vec!["A new style font".into()], 0);
         state.dialog_outcome(Outcome::Ok, &mut clip);
         assert!(!state.view.doc.fonts.contains(&"A new style font".into()));
-        state.dialog_outcome(Outcome::Button("define"), &mut clip);
+        define_in_editor(&mut state);
         let id = state.view.doc.styles.find("Large body").unwrap();
         assert_eq!(state.view.doc.styles.get(id).chp.size, 36);
         assert!(state.view.doc.styles.get(id).chp.bold);
@@ -4271,6 +4417,8 @@ mod tests {
             "Define does not apply the new style"
         );
         assert_eq!(state.dialogs.len(), 1, "Define keeps the dialog open");
+        state.dialog_outcome(Outcome::Apply, &mut clip);
+        assert_eq!(state.dialogs.len(), 1, "Apply keeps the editor open");
         state.dialog_outcome(Outcome::Ok, &mut clip);
         assert!(state.dialogs.is_empty());
         assert_eq!(state.view.doc.main.paras[0].pap.style, id);
@@ -4298,7 +4446,8 @@ mod tests {
         doc.forget_history();
         let original = quill_formats::native::write(&doc, 0);
         let mut state = WinState::new(DocView::new(doc, "Doc".into()));
-        let (mut d, st) = crate::style_dialog::style(&state.view);
+        let (mut d, st) =
+            crate::style_dialog::editor(&state.view, Some(state.view.current_pap().style));
         let manual = st.chp;
         assert_eq!(
             d.options("character_style"),
@@ -4334,7 +4483,7 @@ mod tests {
         );
 
         // Define saves the link; the text in that style takes Italic.
-        state.dialog_outcome(Outcome::Button("define"), &mut clip);
+        define_in_editor(&mut state);
         let normal = state.view.doc.styles.get(0);
         assert_eq!(normal.character, 1);
         assert_eq!(normal.own(), manual);
@@ -4362,7 +4511,8 @@ mod tests {
     #[test]
     fn paragraph_style_editor_stages_changes_and_cancel_keeps_the_document_clean() {
         let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
-        let (d, st) = crate::style_dialog::style(&state.view);
+        let (d, st) =
+            crate::style_dialog::editor(&state.view, Some(state.view.current_pap().style));
         state.dialogs.push((Which::Style(st), d));
         let original = state.view.doc.styles.clone();
         let mut clip = Clipboard::new();
@@ -4383,7 +4533,8 @@ mod tests {
         assert_eq!(state.view.doc.styles, original);
         assert!(!state.view.doc.is_modified());
 
-        let (d, st) = crate::style_dialog::style(&state.view);
+        let (d, st) =
+            crate::style_dialog::editor(&state.view, Some(state.view.current_pap().style));
         state.dialogs.push((Which::Style(st), d));
         state.dialog_outcome(Outcome::Button("paragraph"), &mut clip);
         state
@@ -4393,7 +4544,6 @@ mod tests {
             .1
             .set_field("before", "18 pt");
         state.dialog_outcome(Outcome::Cancel, &mut clip);
-        state.dialog_outcome(Outcome::Button("define"), &mut clip);
         assert_eq!(state.view.doc.styles, original);
         assert!(!state.view.doc.is_modified());
         assert!(state.view.doc.undo_label().is_none());
@@ -4407,16 +4557,9 @@ mod tests {
         doc.forget_history();
         let original = quill_formats::native::write(&doc, 0);
         let mut state = WinState::new(DocView::new(doc, "Doc".into()));
-        let (mut d, st) = crate::style_dialog::style(&state.view);
-        let index = st
-            .entries
-            .iter()
-            .position(|entry| *entry == Some(heading))
-            .unwrap();
-        d.set_selected("list", index);
+        let (d, st) = crate::style_dialog::editor(&state.view, Some(heading));
         state.dialogs.push((Which::Style(st), d));
         let mut clip = Clipboard::new();
-        state.dialog_outcome(Outcome::Changed("list"), &mut clip);
         let body = state.view.doc.main.paras[0].clone();
         let font = state.view.doc.styles.get(heading).chp;
         state.dialog_outcome(Outcome::Button("paragraph"), &mut clip);
@@ -4435,7 +4578,9 @@ mod tests {
         state.dialog_outcome(Outcome::Ok, &mut clip);
         assert_eq!(state.view.doc.main.paras[0], body);
         assert!(!state.view.doc.is_modified());
-        state.dialog_outcome(Outcome::Button("define"), &mut clip);
+        // OK saves the style and closes, without restyling the selection.
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert!(state.dialogs.is_empty());
         let style = state.view.doc.styles.get(heading);
         assert_eq!(style.chp, font);
         assert_eq!(
@@ -5739,6 +5884,72 @@ mod tests {
         assert!(!state.view.doc.is_modified());
         assert_eq!(pop_item(&state, "cus0").rgb, Some(0x336699));
         crate::palette::drop_edits();
+    }
+
+    #[test]
+    fn font_sources_are_staged_until_preferences_save_and_cancel_discards_edits() {
+        let before = crate::settings::get();
+        let mut draft = before.clone();
+        draft.font_folders.clear();
+        let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+        state.dialogs.push((
+            Which::Preferences {
+                panel: crate::prefs_dialog::DEFAULT_FONT_PANEL,
+                families: Vec::new(),
+                original: Box::new(before.clone()),
+                draft: Box::new(draft.clone()),
+            },
+            crate::prefs_dialog::preferences_with(
+                crate::prefs_dialog::DEFAULT_FONT_PANEL,
+                &[],
+                &draft,
+            ),
+        ));
+        let mut clip = Clipboard::without_system();
+        state.dialog_outcome(Outcome::Button("font_sources"), &mut clip);
+        assert_eq!(state.dialogs.len(), 2);
+        if let Which::FontSources(sources) = &mut state.dialogs.last_mut().unwrap().0 {
+            sources.font_folders[0] = crate::settings::FontFolder {
+                path: "/Fonts/Test".into(),
+                enabled: true,
+            };
+        } else {
+            panic!("expected font sources");
+        }
+        state
+            .dialogs
+            .last_mut()
+            .unwrap()
+            .1
+            .set_field("font_levels", "6");
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        assert_eq!(state.dialogs.len(), 1);
+        assert_eq!(crate::settings::get().font_folders, before.font_folders);
+        state.dialog_outcome(Outcome::Button("font_sources"), &mut clip);
+        state.dialog_outcome(Outcome::Button("fclear0"), &mut clip);
+        state.dialog_outcome(Outcome::Cancel, &mut clip);
+        if let Which::Preferences { draft, .. } = &state.dialogs[0].0 {
+            assert_eq!(draft.font_folders.len(), 1);
+            assert_eq!(draft.font_folder_levels, 6);
+        } else {
+            panic!("expected preferences");
+        }
+        state.dialog_outcome(Outcome::Button("save"), &mut clip);
+        assert_eq!(
+            crate::settings::get().font_folders[0].path,
+            std::path::Path::new("/Fonts/Test")
+        );
+        assert_eq!(crate::settings::get().font_folder_levels, 6);
+        state.dialog_outcome(Outcome::Button("font_sources"), &mut clip);
+        state.dialog_outcome(Outcome::Button("fclear0"), &mut clip);
+        state.dialog_outcome(Outcome::Button("source_add"), &mut clip);
+        state.dialog_outcome(Outcome::Ok, &mut clip);
+        if let Which::Preferences { draft, .. } = &state.dialogs[0].0 {
+            assert!(draft.font_folders.is_empty(), "empty rows are discarded");
+        }
+        state.dialog_outcome(Outcome::Cancel, &mut clip);
+        assert_eq!(crate::settings::get().font_folders.len(), 1);
+        crate::settings::update(|s| *s = before);
     }
 
     #[test]

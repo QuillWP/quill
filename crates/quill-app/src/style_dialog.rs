@@ -1,8 +1,10 @@
-//! Format > Style (⌘T): the document's style sheet. Pick a style to see
-//! its description, Based On and Next Style; type a name under New Style
-//! and Define to make a style from the selection's formatting. Paragraph
-//! edits the pending paragraph properties; Define saves them to the style,
-//! and Apply puts the style on the selected paragraphs.
+//! Format > Paragraph Styles (⌘T): a list of the document's paragraph
+//! styles, or of every style, with New, Edit and Delete beside it. New and
+//! Edit open the style editor, which shows a style's description, Based On
+//! and Next Style; Paragraph and Character there edit the pending
+//! formatting, OK saves it to the style, and Apply also puts the style on
+//! the selected paragraphs. Deleting a style that is in use asks what its
+//! paragraphs become.
 
 use crate::dialog::{Dialog, units};
 use crate::docview::DocView;
@@ -14,9 +16,7 @@ use quill_core::{Document, StoryId};
 
 #[derive(Clone, Debug)]
 pub struct StyleState {
-    /// Show every style, not just the document's.
-    pub all: bool,
-    /// The list: None is "New Style".
+    /// The styles the editor can be on: None is a new style.
     pub entries: Vec<Option<StyleId>>,
     pub selected: usize,
     /// Formatting being edited; the document changes only on Define or Apply.
@@ -47,76 +47,219 @@ fn document_styles(view: &DocView) -> Vec<StyleId> {
     sorted(doc, used.chain(made).chain([0, view.current_pap().style]))
 }
 
-fn entries(view: &DocView, all: bool) -> Vec<Option<StyleId>> {
-    let ids = if all {
+/// Every style the editor can be on: a new one, then all the styles.
+fn entries(view: &DocView) -> Vec<Option<StyleId>> {
+    std::iter::once(None)
+        .chain(
+            sorted(&view.doc, 0..view.doc.styles.styles.len() as StyleId)
+                .into_iter()
+                .map(Some),
+        )
+        .collect()
+}
+
+// ----- the Paragraph Styles list -----
+
+/// What the Paragraph Styles list shows: the document's styles or all of
+/// them, and the style of each row.
+#[derive(Clone, Debug, Default)]
+pub struct ListState {
+    pub all: bool,
+    pub ids: Vec<StyleId>,
+}
+
+/// Format > Paragraph Styles: the list, on the current paragraph's style.
+pub fn list(view: &DocView) -> (Dialog, ListState) {
+    let mut d = Dialog::new("Paragraph Styles", 460.0, 300.0);
+    d.radio("docstyles", "This Document", 12.0, 12.0, 1, true);
+    d.radio("allstyles", "All Styles", 140.0, 12.0, 1, false);
+    let mut st = ListState {
+        all: false,
+        ids: document_styles(view),
+    };
+    let rows = list_names(view, &st.ids);
+    d.list("list", rows, 0, 12.0, 36.0, 256.0, 176.0, Some("edit"));
+    d.button("new", "New…", 282.0, 36.0, 166.0, false);
+    d.button("edit", "Edit…", 282.0, 66.0, 166.0, false);
+    d.button("delete", "Delete", 282.0, 96.0, 166.0, false);
+    d.button("ok", "Close", 282.0, 192.0, 166.0, true);
+    d.note("description", "", 12.0, 226.0, 436.0);
+    d.note("description2", "", 12.0, 244.0, 436.0);
+    d.note("status", "", 12.0, 268.0, 436.0);
+    refresh_list(&mut st, &mut d, view, Some(view.current_pap().style));
+    (d, st)
+}
+
+fn list_names(view: &DocView, ids: &[StyleId]) -> Vec<String> {
+    ids.iter()
+        .map(|&id| view.doc.styles.get(id).display_name())
+        .collect()
+}
+
+/// The style chosen in the list.
+pub fn list_selected(st: &ListState, d: &Dialog) -> Option<StyleId> {
+    d.list_selected("list")
+        .and_then(|row| st.ids.get(row).copied())
+}
+
+/// List the styles again, on style `keep` when it is there.
+pub fn refresh_list(st: &mut ListState, d: &mut Dialog, view: &DocView, keep: Option<StyleId>) {
+    let keep = keep.or_else(|| list_selected(st, d));
+    st.ids = if st.all {
         sorted(&view.doc, 0..view.doc.styles.styles.len() as StyleId)
     } else {
         document_styles(view)
     };
-    std::iter::once(None)
-        .chain(ids.into_iter().map(Some))
-        .collect()
+    // A style that was deleted from the list leaves the row it had chosen.
+    let row = keep
+        .and_then(|k| st.ids.iter().position(|&id| id == k))
+        .or_else(|| d.list_selected("list"))
+        .unwrap_or(0)
+        .min(st.ids.len().saturating_sub(1));
+    d.set_rows("list", list_names(view, &st.ids), row);
+    show_chosen(st, d, view);
 }
 
-pub fn style(view: &DocView) -> (Dialog, StyleState) {
-    let mut d = Dialog::new(&format!("Style: {}", view.title), 484.0, 414.0);
+/// The chosen style's description, and which buttons can work on it.
+fn show_chosen(st: &ListState, d: &mut Dialog, view: &DocView) {
+    let chosen = list_selected(st, d);
+    let (text, uses) = match chosen {
+        Some(id) => {
+            let s = view.doc.styles.get(id);
+            let uses = match view.doc.style_uses(id) {
+                0 => "Not used in this document.".to_string(),
+                1 => "Used by 1 paragraph.".to_string(),
+                n => format!("Used by {n} paragraphs."),
+            };
+            (describe(&view.doc, s.based_on, &s.pap, &s.own()), uses)
+        }
+        None => (String::new(), String::new()),
+    };
+    show_lines(d, &["description", "description2"], &text, false);
+    d.set_label("status", &uses);
+    d.enable("edit", chosen.is_some());
+    d.enable(
+        "delete",
+        chosen.is_some_and(|id| id != 0 && !view.doc.styles.get(id).builtin),
+    );
+}
+
+/// A control in the list changed: the row, or which styles it shows.
+pub fn list_changed(st: &mut ListState, d: &mut Dialog, view: &DocView, id: &str) {
+    if id == "docstyles" || id == "allstyles" {
+        st.all = id == "allstyles";
+        refresh_list(st, d, view, None);
+    } else {
+        show_chosen(st, d, view);
+    }
+}
+
+/// Delete style `id` from the list, or None when its paragraphs need a
+/// new style first: then the question to ask, and the styles it offers.
+pub fn delete_from_list(view: &mut DocView, id: StyleId) -> Option<(Dialog, Vec<StyleId>)> {
+    let uses = view.doc.style_uses(id);
+    if uses == 0 {
+        delete_style(view, id, 0);
+        return None;
+    }
+    let s = view.doc.styles.get(id);
+    let name = s.display_name();
+    let choices: Vec<StyleId> = sorted(&view.doc, 1..view.doc.styles.styles.len() as StyleId)
+        .into_iter()
+        .filter(|&k| k != id)
+        .collect();
+    let mut options = vec!["No Style (Normal)".to_string()];
+    options.extend(
+        choices
+            .iter()
+            .map(|&k| view.doc.styles.get(k).display_name()),
+    );
+    let mut d = Dialog::new("Delete Style", 380.0, 104.0);
+    let paragraphs = if uses == 1 {
+        "1 paragraph uses".to_string()
+    } else {
+        format!("{uses} paragraphs use")
+    };
+    d.text(&format!("{paragraphs} \u{201c}{name}\u{201d}."), 14.0, 12.0);
+    d.text("Change them to:", 14.0, 42.0);
+    d.popup_owned("replacement", options, 0, 120.0, 39.0, 160.0);
+    d.button("ok", "Delete", 296.0, 10.0, 70.0, true);
+    d.button("cancel", "Cancel", 296.0, 40.0, 70.0, false);
+    Some((d, choices))
+}
+
+/// Delete in that question: the style goes and its paragraphs take the
+/// style chosen, or Normal.
+pub fn delete_question_ok(id: StyleId, choices: &[StyleId], d: &Dialog, view: &mut DocView) {
+    let with = d
+        .selected("replacement")
+        .checked_sub(1)
+        .and_then(|k| choices.get(k).copied())
+        .unwrap_or(0);
+    delete_style(view, id, with);
+}
+
+// ----- the style editor -----
+
+/// The style editor on style `id`, or on a new style made from the
+/// selection's formatting when `id` is None.
+pub fn editor(view: &DocView, id: Option<StyleId>) -> (Dialog, StyleState) {
+    let title = match id {
+        Some(id) => format!(
+            "Paragraph Style: {}",
+            view.doc.styles.get(id).display_name()
+        ),
+        None => "New Paragraph Style".to_string(),
+    };
+    let mut d = Dialog::new(&title, 484.0, 368.0);
     d.close_box = true;
-    let style_entries = entries(view, false);
-    let style_names = entry_names(view, &style_entries);
-    d.popup_owned("list", style_names, 0, 14.0, 9.0, 320.0);
     d.button("ok", "OK", 350.0, 14.0, 120.0, true);
     d.button("cancel", "Cancel", 350.0, 40.0, 120.0, false);
     d.button("apply", "Apply", 350.0, 66.0, 120.0, false);
-    d.button("define", "Define", 350.0, 92.0, 120.0, false);
-    d.button("delete", "Delete", 350.0, 118.0, 120.0, false);
-    d.button("paragraph", "Paragraph…", 350.0, 144.0, 120.0, false);
-    d.button("character", "Character…", 350.0, 170.0, 120.0, false);
-    d.text("Show:", 15.0, 43.0);
-    d.radio("docstyles", "Document Styles", 60.0, 42.0, 1, true);
-    d.radio("allstyles", "All Styles", 192.0, 42.0, 1, false);
-    d.text("Style:", 15.0, 68.0);
-    d.field("name", "", 14.0, 84.0, 320.0);
-    d.button("usedefault", "Use As Default", 350.0, 196.0, 120.0, false);
+    d.button("paragraph", "Paragraph…", 350.0, 92.0, 120.0, false);
+    d.button("character", "Character…", 350.0, 118.0, 120.0, false);
+    d.text("Style:", 15.0, 12.0);
+    d.field("name", "", 14.0, 28.0, 320.0);
+    d.button("usedefault", "Use As Default", 350.0, 144.0, 120.0, false);
     d.disable("usedefault");
-    d.group("Paragraph Formatting", 14.0, 112.0, 320.0, 92.0);
+    d.group("Paragraph Formatting", 14.0, 56.0, 320.0, 92.0);
     for (id, y) in [
-        ("desc0", 128.0),
-        ("desc1", 146.0),
-        ("desc2", 164.0),
-        ("desc3", 182.0),
+        ("desc0", 72.0),
+        ("desc1", 90.0),
+        ("desc2", 108.0),
+        ("desc3", 126.0),
     ] {
         d.note(id, "", 21.0, y, 305.0);
     }
-    d.group("Manual Character Formatting", 14.0, 212.0, 320.0, 74.0);
-    for (id, y) in [("char0", 228.0), ("char1", 246.0), ("char2", 264.0)] {
+    d.group("Manual Character Formatting", 14.0, 156.0, 320.0, 74.0);
+    for (id, y) in [("char0", 172.0), ("char1", 190.0), ("char2", 208.0)] {
         d.note(id, "", 21.0, y, 305.0);
     }
-    d.text("Based On:", 15.0, 296.0);
-    d.text("Next Style:", 15.0, 322.0);
+    d.text("Based On:", 15.0, 240.0);
+    d.text("Next Style:", 15.0, 266.0);
     let choices = sorted(&view.doc, 0..view.doc.styles.styles.len() as StyleId);
     let names = choice_names(view, &choices);
-    d.popup_owned("basedon", names.clone(), 0, 116.0, 293.0, 218.0);
-    d.popup_owned("next", names, 0, 116.0, 319.0, 218.0);
-    d.text("Character Style:", 15.0, 348.0);
+    d.popup_owned("basedon", names.clone(), 0, 116.0, 237.0, 218.0);
+    d.popup_owned("next", names, 0, 116.0, 263.0, 218.0);
+    d.text("Character Style:", 15.0, 292.0);
     d.popup_owned(
         "character_style",
         character_choices(view),
         0,
         116.0,
-        345.0,
+        289.0,
         218.0,
     );
-    d.note("character_status", "", 15.0, 375.0, 454.0);
+    d.note("character_status", "", 15.0, 319.0, 454.0);
     d.note(
         "actions_help",
-        "Define saves. OK saves, applies to the selection and closes.",
+        "OK saves the style. Apply also gives it to the selected paragraphs.",
         15.0,
-        395.0,
+        339.0,
         454.0,
     );
     let mut st = StyleState {
-        all: false,
-        entries: style_entries,
+        entries: entries(view),
         selected: 0,
         pap: view.current_pap().clone(),
         chp: view.current_chp(),
@@ -124,12 +267,20 @@ pub fn style(view: &DocView) -> (Dialog, StyleState) {
         character: 0,
         choices,
     };
-    // Start on the current paragraph's style, as the original does.
-    let cur = view.current_pap().style;
-    if let Some(i) = st.entries.iter().position(|e| *e == Some(cur)) {
-        select(&mut st, &mut d, view, i);
-    }
+    let i = st.entries.iter().position(|e| *e == id).unwrap_or(0);
+    select(&mut st, &mut d, view, i);
     (d, st)
+}
+
+/// OK in the editor: save the style. False when there is nothing to save
+/// yet (a new style with no name), so the editor stays open.
+pub fn save(st: &mut StyleState, d: &mut Dialog, view: &mut DocView) -> bool {
+    define(st, d, view).is_some() || st.entries[st.selected].is_some()
+}
+
+/// The style the editor is on, once it has one.
+pub fn editing(st: &StyleState) -> Option<StyleId> {
+    st.entries.get(st.selected).copied().flatten()
 }
 
 /// The Character Style popup: No Style, the document's character styles,
@@ -149,23 +300,9 @@ pub fn character_saved(st: &mut StyleState, d: &mut Dialog, view: &DocView, id: 
     update_description(st, d, view);
 }
 
-/// Show style `id` (None for New Style) when the dialog opens from the Style
-/// Sheets palette. A style the Document Styles list leaves out (an
-/// automatic one not used yet) switches the list to All Styles.
-pub fn choose(st: &mut StyleState, d: &mut Dialog, view: &DocView, id: Option<StyleId>) {
-    if !st.entries.contains(&id) && id.is_some() {
-        d.set_on("allstyles", true);
-        changed(st, d, view, "allstyles");
-    }
-    if let Some(i) = st.entries.iter().position(|e| *e == id) {
-        select(st, d, view, i);
-    }
-}
-
 /// Show entry `i` in the fields.
 fn select(st: &mut StyleState, d: &mut Dialog, view: &DocView, i: usize) {
     st.selected = i.min(st.entries.len() - 1);
-    d.set_selected("list", st.selected);
     let at = |id: Option<StyleId>| {
         id.and_then(|id| st.choices.iter().position(|&c| c == id))
             .map_or(0, |k| k + 1)
@@ -178,7 +315,6 @@ fn select(st: &mut StyleState, d: &mut Dialog, view: &DocView, i: usize) {
             d.set_field("name", "");
             d.set_selected("basedon", at(Some(view.current_pap().style)));
             d.set_selected("next", 0);
-            d.enable("delete", false);
         }
         Some(id) => {
             let s = view.doc.styles.get(id);
@@ -188,7 +324,6 @@ fn select(st: &mut StyleState, d: &mut Dialog, view: &DocView, i: usize) {
             d.set_field("name", &s.display_name());
             d.set_selected("basedon", at(s.based_on));
             d.set_selected("next", if s.next == id { 0 } else { at(Some(s.next)) });
-            d.enable("delete", !s.builtin);
         }
     }
     d.set_selected("character_style", st.character as usize);
@@ -205,20 +340,6 @@ fn choice_names(view: &DocView, choices: &[StyleId]) -> Vec<String> {
                 .map(|&id| view.doc.styles.get(id).display_name()),
         )
         .collect()
-}
-
-fn entry_names(view: &DocView, entries: &[Option<StyleId>]) -> Vec<String> {
-    entries
-        .iter()
-        .map(|entry| match entry {
-            None => "New Style".to_string(),
-            Some(id) => view.doc.styles.get(*id).display_name(),
-        })
-        .collect()
-}
-
-fn update_entry_options(st: &StyleState, d: &mut Dialog, view: &DocView) {
-    d.set_options("list", entry_names(view, &st.entries), st.selected);
 }
 
 fn show_lines(d: &mut Dialog, ids: &[&str], text: &str, struck: bool) {
@@ -299,19 +420,6 @@ pub fn changed(st: &mut StyleState, d: &mut Dialog, view: &DocView, id: &str) {
     if id == "character_style" {
         st.character = d.selected("character_style") as u16;
         update_description(st, d, view);
-        return;
-    }
-    if id == "list" {
-        select(st, d, view, d.selected("list"));
-        return;
-    }
-    if id == "docstyles" || id == "allstyles" {
-        let keep = st.entries[st.selected];
-        st.all = id == "allstyles";
-        st.entries = entries(view, st.all);
-        let i = st.entries.iter().position(|e| *e == keep).unwrap_or(0);
-        update_entry_options(st, d, view);
-        select(st, d, view, i);
     }
 }
 
@@ -387,10 +495,14 @@ pub fn define(st: &mut StyleState, d: &mut Dialog, view: &mut DocView) -> Option
     let names = choice_names(view, &st.choices);
     d.set_options("basedon", names.clone(), 0);
     d.set_options("next", names, 0);
-    st.entries = entries(view, st.all);
+    st.entries = entries(view);
     let i = st.entries.iter().position(|e| *e == Some(id)).unwrap_or(0);
-    update_entry_options(st, d, view);
     select(st, d, view, i);
+    // A new style is now this one, under its own name.
+    d.title = format!(
+        "Paragraph Style: {}",
+        view.doc.styles.get(id).display_name()
+    );
     Some(id)
 }
 
@@ -450,34 +562,18 @@ pub fn duplicate(view: &mut DocView, id: StyleId) -> StyleId {
     new
 }
 
-/// Delete style `id` as one undoable step; its paragraphs return to
-/// Normal. Normal and the automatic styles stay. True when it went.
-pub fn delete_style(view: &mut DocView, id: StyleId) -> bool {
+/// Delete style `id` as one undoable step; its paragraphs take style
+/// `with` (0 for Normal). Normal and the automatic styles stay. True when
+/// it went.
+pub fn delete_style(view: &mut DocView, id: StyleId, with: StyleId) -> bool {
     if id == 0 || view.doc.styles.get(id).builtin {
         return false;
     }
     view.doc.begin("Delete Style", view.sel);
-    view.doc.delete_style(id);
+    view.doc.delete_style_replacing(id, with);
     view.doc.commit(view.sel);
     view.invalidate_layout();
     true
-}
-
-/// Delete the chosen style; its paragraphs return to Normal.
-pub fn delete(st: &mut StyleState, d: &mut Dialog, view: &mut DocView) {
-    let Some(id) = st.entries[st.selected] else {
-        return;
-    };
-    if !delete_style(view, id) {
-        return;
-    }
-    st.choices = sorted(&view.doc, 0..view.doc.styles.styles.len() as StyleId);
-    let names = choice_names(view, &st.choices);
-    d.set_options("basedon", names.clone(), 0);
-    d.set_options("next", names, 0);
-    st.entries = entries(view, st.all);
-    update_entry_options(st, d, view);
-    select(st, d, view, st.selected.min(st.entries.len() - 1));
 }
 
 /// The question the original asks when a paragraph's own style is chosen for it
@@ -539,7 +635,6 @@ pub fn reapply_ok(id: StyleId, d: &Dialog, view: &mut DocView) -> bool {
 /// What a style or the selection looks like, in the original's words: the base
 /// style's name, "+", then what differs ("Normal + Font: Helvetica,
 /// Bold, Indent: Left 0.5 in").
-#[cfg(test)]
 pub fn describe(doc: &Document, base: Option<StyleId>, pap: &ParaProps, chp: &CharProps) -> String {
     describe_component(doc, base, pap, chp, true, true)
 }
@@ -758,39 +853,42 @@ mod tests {
     }
 
     #[test]
-    fn opens_on_the_current_style() {
+    fn the_editor_opens_on_the_style_it_was_given() {
         let v = view();
-        let (d, st) = style(&v);
+        let (d, st) = editor(&v, Some(0));
         assert!(
             !d.items
                 .iter()
                 .any(|item| matches!(item.kind, crate::dialog::Kind::Custom))
         );
         assert_eq!(st.entries[0], None);
-        assert_eq!(st.entries[st.selected], Some(0));
+        assert_eq!(editing(&st), Some(0));
         assert_eq!(d.field_text("name"), "Normal");
-        assert_eq!(d.title, "Style: Untitled1");
+        assert_eq!(d.title, "Paragraph Style: Normal");
         assert!(
             d.items
                 .iter()
                 .find(|item| item.id == "desc0")
                 .is_some_and(|item| !item.label.is_empty())
         );
+        // It edits one style: no list of its own and no Delete.
+        assert!(!d.items.iter().any(|i| matches!(i.id, "list" | "delete")));
     }
 
     #[test]
     fn defines_and_applies_a_new_style_from_the_selection() {
         let mut v = view();
         v.format_chars("Bold", |c| c.bold = true);
-        let (mut d, mut st) = style(&v);
-        d.set_selected("list", 0);
-        changed(&mut st, &mut d, &v, "list");
-        assert_eq!(st.selected, 0);
+        let (mut d, mut st) = editor(&v, None);
+        assert_eq!(d.title, "New Paragraph Style");
+        // A new style needs a name before OK can save it.
+        assert!(!save(&mut st, &mut d, &mut v));
         d.set_field("name", "Loud");
         assert!(apply(&mut st, &mut d, &mut v));
         let id = v.doc.styles.find("Loud").unwrap();
         assert_eq!(v.current_pap().style, id);
-        assert_eq!(st.entries[st.selected], Some(id));
+        assert_eq!(editing(&st), Some(id));
+        assert_eq!(d.title, "Paragraph Style: Loud");
         // Undo takes the style away again.
         v.doc.undo();
         v.doc.undo();
@@ -798,15 +896,53 @@ mod tests {
     }
 
     #[test]
-    fn all_styles_lists_the_automatic_ones() {
+    fn the_list_shows_the_documents_styles_or_all_of_them() {
         let v = view();
-        let (mut d, mut st) = style(&v);
-        let few = st.entries.len();
+        let (mut d, mut st) = list(&v);
+        assert_eq!(d.title, "Paragraph Styles");
+        let few = st.ids.len();
+        assert_eq!(list_selected(&st, &d), Some(0), "on Normal");
+        // Normal cannot be deleted, but can be edited.
+        assert!(d.is_enabled("edit"));
+        assert!(!d.is_enabled("delete"));
         d.set_on("allstyles", true);
         d.set_on("docstyles", false);
-        changed(&mut st, &mut d, &v, "allstyles");
-        assert!(st.entries.len() > few + 20);
-        assert_eq!(st.entries[st.selected], Some(0), "still on Normal");
+        list_changed(&mut st, &mut d, &v, "allstyles");
+        assert!(st.ids.len() > few + 20);
+        assert_eq!(list_selected(&st, &d), Some(0), "still on Normal");
+    }
+
+    #[test]
+    fn deleting_a_style_in_use_asks_what_its_paragraphs_become() {
+        let mut v = view();
+        let pap = v.current_pap().clone();
+        let chp = v.current_chp();
+        let a = v.doc.add_style("Alpha", 0, None, pap.clone(), chp);
+        let b = v.doc.add_style("Beta", 0, None, pap, chp);
+        // Not in use: it goes at once.
+        assert!(delete_from_list(&mut v, b).is_none());
+        assert!(v.doc.styles.find("Beta").is_none());
+        let b = v
+            .doc
+            .add_style("Beta", 0, None, v.current_pap().clone(), chp);
+        v.set_style(a);
+        let (mut d, choices) = delete_from_list(&mut v, a).expect("asks");
+        assert!(v.doc.styles.find("Alpha").is_some(), "nothing goes yet");
+        assert_eq!(d.options("replacement")[0], "No Style (Normal)");
+        assert!(!choices.contains(&a) && !choices.contains(&0));
+        let k = choices.iter().position(|&c| c == b).unwrap();
+        d.set_selected("replacement", k + 1);
+        delete_question_ok(a, &choices, &d, &mut v);
+        let beta = v.doc.styles.find("Beta").unwrap();
+        assert_eq!(v.current_pap().style, beta);
+        assert!(v.doc.styles.find("Alpha").is_none());
+        // Undo brings it back, and No Style gives Normal.
+        v.doc.undo();
+        let a = v.doc.styles.find("Alpha").unwrap();
+        assert_eq!(v.current_pap().style, a);
+        let (d, choices) = delete_from_list(&mut v, a).expect("asks");
+        delete_question_ok(a, &choices, &d, &mut v);
+        assert_eq!(v.current_pap().style, 0);
     }
 
     #[test]

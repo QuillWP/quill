@@ -96,7 +96,6 @@ mod win_dialog;
 #[cfg(windows)]
 mod win_print;
 
-use quill_layout::Catalog;
 use winit::event_loop::EventLoop;
 
 fn main() {
@@ -128,7 +127,7 @@ fn main() {
     crash_log::install();
     // Finding the installed fonts can take a moment on a cold start, so do
     // it while the window system starts up.
-    let fonts = std::thread::spawn(Catalog::scan_system);
+    let fonts = app::start_font_load();
     let mut builder = EventLoop::<app::UserEvent>::with_user_event();
     // Quill puts up its own menu bar; skip winit's placeholder one.
     #[cfg(target_os = "macos")]
@@ -138,10 +137,23 @@ fn main() {
         &mut builder,
         win_dialog::message_hook,
     );
+    // Prefer X11 (XWayland on a Wayland desktop) when it is there. Under X11
+    // GTK hosts the window, so the window manager draws the title bar in the
+    // desktop's theme and the menu bar is GTK's. GNOME on Wayland leaves the
+    // title bar to the program, and winit's own is a plain gray one.
+    // QUILL_BACKEND=wayland keeps the native Wayland window.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty())
+        && std::env::var("QUILL_BACKEND").as_deref() != Ok("wayland")
+    {
+        winit::platform::x11::EventLoopBuilderExtX11::with_x11(&mut builder);
+    }
     let event_loop = match builder.build() {
         Ok(el) => el,
         Err(e) => {
             eprintln!("quill: cannot start the window system: {e}");
+            #[cfg(target_os = "linux")]
+            eprintln!("quill: on Wayland, QUILL_BACKEND=wayland skips X11");
             std::process::exit(1);
         }
     };

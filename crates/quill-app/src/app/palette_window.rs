@@ -15,6 +15,16 @@ pub(super) struct PaletteWindow {
     palette: Palette,
     /// The pointer, in interface units.
     cursor: (f32, f32),
+    /// The document window it last showed. Its chosen row and scroll
+    /// belong to that document, so they start over when another comes in
+    /// front.
+    shown: Option<WindowId>,
+    /// Since when no Quill window has had the keyboard, and whether the
+    /// palette is hidden for it.
+    #[cfg(target_os = "linux")]
+    inactive_since: Option<Instant>,
+    #[cfg(target_os = "linux")]
+    hidden: bool,
 }
 
 impl App {
@@ -78,6 +88,14 @@ impl App {
         #[cfg(target_os = "macos")]
         crate::mac_palette::style(&window);
         set_window_appearance(&window, crate::settings::with(|s| s.appearance));
+        #[cfg(target_os = "linux")]
+        {
+            window.make_palette();
+            // Opening it put the keyboard in it; give that back.
+            if let Some(i) = self.front_index() {
+                self.windows[i].1.window.focus_window();
+            }
+        }
         let mut palette = Palette::new(sp::Tab::All, false);
         palette.window = Some((w, h));
         self.palette_window = Some(PaletteWindow {
@@ -85,7 +103,41 @@ impl App {
             surface,
             palette,
             cursor: (0.0, 0.0),
+            shown: None,
+            #[cfg(target_os = "linux")]
+            inactive_since: None,
+            #[cfg(target_os = "linux")]
+            hidden: false,
         });
+    }
+
+    /// Hide the palette while another program is in front, and show it
+    /// again when a Quill window has the keyboard, as the Mac's palette does.
+    /// Moving between Quill's windows leaves none active for a moment, so
+    /// it waits a little before hiding. Returns when to look again.
+    #[cfg(target_os = "linux")]
+    pub(super) fn sync_palette_shown(&mut self) -> Option<Instant> {
+        let active = self.windows.iter().any(|(_, w)| w.window.is_active());
+        let pw = self.palette_window.as_mut()?;
+        if active || pw.window.is_active() {
+            pw.inactive_since = None;
+            if pw.hidden {
+                pw.hidden = false;
+                pw.window.set_visible(true);
+            }
+            return None;
+        }
+        if pw.hidden {
+            return None;
+        }
+        let now = Instant::now();
+        let due = *pw.inactive_since.get_or_insert(now) + Duration::from_millis(250);
+        if now < due {
+            return Some(due);
+        }
+        pw.hidden = true;
+        pw.window.set_visible(false);
+        None
     }
 
     /// The document window in front, which the palette works on.
@@ -120,6 +172,12 @@ impl App {
         let Some(pw) = &mut self.palette_window else {
             return;
         };
+        if pw.shown != Some(front_id) {
+            pw.shown = Some(front_id);
+            pw.palette.chosen = None;
+            pw.palette.hover = None;
+            pw.palette.scroll = 0.0;
+        }
         let scale = pw.window.scale_factor();
         let ui = ui_scale(scale as f32);
         let to_ui = |x: f64, y: f64| ((x / scale) as f32 / ui, (y / scale) as f32 / ui);

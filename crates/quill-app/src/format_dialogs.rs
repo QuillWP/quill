@@ -48,7 +48,15 @@ pub enum Which {
     Print,
     Document,
     Section,
+    /// The style editor, from Paragraph Styles or the Style Sheets palette.
     Style(crate::style_dialog::StyleState),
+    /// Format > Paragraph Styles: the list of styles.
+    ParagraphStyles(crate::style_dialog::ListState),
+    /// Deleting a style that is in use: what its paragraphs become.
+    DeleteStyle {
+        id: quill_core::props::StyleId,
+        choices: Vec<quill_core::props::StyleId>,
+    },
     CharacterStyles,
     /// Redefine or reapply a style chosen for a reformatted paragraph.
     Reapply(quill_core::props::StyleId),
@@ -59,6 +67,7 @@ pub enum Which {
         original: Box<crate::settings::Settings>,
         draft: Box<crate::settings::Settings>,
     },
+    FontSources(Box<crate::settings::Settings>),
     Find(crate::find_dialog::FindState),
     /// A format dialog opened from Find or Replace: for the Replace With
     /// side or not, and Character (0), Paragraph (1) or Style (2).
@@ -169,6 +178,7 @@ pub fn changed(which: &mut Which, d: &mut Dialog, view: &DocView, id: &str) {
     match which {
         Which::CharacterStyles if id == "list" => crate::character_style_dialog::changed(d, view),
         Which::Style(st) => crate::style_dialog::changed(st, d, view, id),
+        Which::ParagraphStyles(st) => crate::style_dialog::list_changed(st, d, view, id),
         Which::Character(_) => character_changed(d, id),
         Which::Border(st) if id == "applyto" => border_dialog::target_changed(st, d, view),
         Which::Border(st) => border_dialog::changed(st, d, id),
@@ -780,7 +790,13 @@ pub fn summary_info(view: &DocView) -> (Dialog, Which) {
 pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
     match which {
         Which::CharacterStyles => true,
-        Which::Style(st) => crate::style_dialog::apply(st, d, view),
+        // OK saves the style; Apply, handled by the window, also applies it.
+        Which::Style(st) => crate::style_dialog::save(st, d, view),
+        Which::ParagraphStyles(_) => true,
+        Which::DeleteStyle { id, choices } => {
+            crate::style_dialog::delete_question_ok(*id, choices, d, view);
+            true
+        }
         Which::Reapply(id) => crate::style_dialog::reapply_ok(*id, d, view),
         Which::ReplaceFonts(st) => crate::replace_fonts::apply(st, d, view),
         Which::Character(base) => {
@@ -865,6 +881,7 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
         | Which::PrintMergeAsk(..)
         | Which::Commands(_)
         | Which::Customize(_)
+        | Which::FontSources(_)
         | Which::MergeHelper(_)
         | Which::Hyphenation(_)
         | Which::Thesaurus(_)

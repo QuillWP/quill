@@ -69,6 +69,9 @@ struct Family {
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
     families: Vec<Family>,
+    /// The search of the extra font sources stopped at its folder or file
+    /// limit, so some of their fonts may be missing.
+    sources_cut_short: bool,
 }
 
 impl Catalog {
@@ -77,34 +80,48 @@ impl Catalog {
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
         let mut catalog = Catalog::default();
-        catalog.add_faces(&db);
+        catalog.add_faces(&db, &HashSet::new());
         catalog
     }
 
     /// This catalog plus the fonts found in `folders`, each searched down
-    /// `levels` folder levels below it. A family that is already here gains
-    /// the new faces; the rest join the list. Nothing is installed: drop the
-    /// folder and call this again to take the fonts away.
+    /// `levels` folder levels below it. Families already here (the system's)
+    /// come first, then each folder in the order given, so the oldest source
+    /// wins. A family keeps the faces of the first place that has it, and a
+    /// later copy of it is left out whole, so two versions of a font never
+    /// mix. Nothing is installed: drop the folder and call this again to
+    /// take the fonts away.
     pub fn with_folders(&self, folders: &[PathBuf], levels: u8) -> Catalog {
-        let mut files = Vec::new();
-        for folder in folders {
-            collect_font_files(folder, levels, &mut files);
-        }
-        if files.is_empty() {
-            return self.clone();
-        }
-        let mut db = fontdb::Database::new();
-        for file in &files {
-            // A broken or unreadable font file is skipped, not fatal.
-            let _ = db.load_font_file(file);
-        }
         let mut catalog = self.clone();
-        catalog.add_faces(&db);
+        // One search for every folder, so the limits cover them all.
+        let mut scan = FontScan::default();
+        for folder in folders {
+            let start = scan.files.len();
+            collect_font_files(folder, levels, &mut scan);
+            if scan.files.len() == start {
+                continue;
+            }
+            let mut db = fontdb::Database::new();
+            for file in &scan.files[start..] {
+                // A broken or unreadable font file is skipped, not fatal.
+                let _ = db.load_font_file(file);
+            }
+            let earlier = catalog.family_keys();
+            catalog.add_faces(&db, &earlier);
+        }
+        catalog.sources_cut_short = scan.cut_short;
         catalog
     }
 
+    /// Whether the last search of the extra font sources stopped at its
+    /// limit of folders or font files.
+    pub fn sources_cut_short(&self) -> bool {
+        self.sources_cut_short
+    }
+
     /// Fold the font files in `db` into the family list, keeping it sorted.
-    fn add_faces(&mut self, db: &fontdb::Database) {
+    /// Faces of the families in `taken` (lower case) are left out.
+    fn add_faces(&mut self, db: &fontdb::Database, taken: &HashSet<String>) {
         let mut index: HashMap<String, usize> = self
             .families
             .iter()
@@ -119,6 +136,9 @@ impl Catalog {
                 continue;
             };
             let key = name.to_lowercase();
+            if taken.contains(&key) {
+                continue;
+            }
             let fam = *index.entry(key).or_insert_with(|| {
                 self.families.push(Family {
                     name: name.clone(),
@@ -319,9 +339,12 @@ fn face_style(
     }
 }
 
-/// Most font files Quill will pick up from the extra folders in one go, so
-/// pointing a slot at a whole disk can't hang the scan.
-const MAX_FOLDER_FONT_FILES: usize = 20_000;
+/// Most font files Quill will pick up from the extra sources in one go, so
+/// pointing a source at a whole disk can't hang the scan.
+pub const MAX_SOURCE_FONT_FILES: usize = 20_000;
+/// Most folders Quill will look in across all the extra sources. A big
+/// font library with a folder per family fits; a whole disk does not.
+pub const MAX_SOURCE_FOLDERS: usize = 2_000;
 
 fn is_font_file(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
@@ -332,17 +355,57 @@ fn is_font_file(path: &Path) -> bool {
     })
 }
 
+/// A search of the extra font sources: the font files found, and how much
+/// of the folder and file allowance it has used.
+#[derive(Debug, Default)]
+pub struct FontScan {
+    pub files: Vec<PathBuf>,
+    folders: usize,
+    /// It stopped at a limit before looking everywhere.
+    pub cut_short: bool,
+}
+
+/// The only places inside a macOS application bundle that hold its fonts,
+/// with how many levels below the bundle each one is. The rest of a bundle
+/// (Frameworks, above all) can hold thousands of files and no fonts.
+const BUNDLE_FONT_FOLDERS: [(&str, u8); 2] =
+    [("Contents/Resources", 2), ("Contents/Library/Fonts", 3)];
+
+fn is_bundle(dir: &Path) -> bool {
+    dir.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("app"))
+}
+
 /// Font files in `dir` and in folders up to `levels` below it (0 means the
 /// folder itself only). Shortcuts to folders are not followed, so a loop can't
-/// trap the search; hidden files and folders are skipped.
-pub fn collect_font_files(dir: &Path, levels: u8, out: &mut Vec<PathBuf>) {
+/// trap the search; hidden files and folders are skipped. Inside an
+/// application bundle only its font folders are searched, at their own
+/// depth. The search stops at the folder and file limits.
+pub fn collect_font_files(dir: &Path, levels: u8, scan: &mut FontScan) {
+    if scan.cut_short {
+        return;
+    }
+    if scan.folders >= MAX_SOURCE_FOLDERS {
+        scan.cut_short = true;
+        return;
+    }
+    scan.folders += 1;
+    if is_bundle(dir) {
+        for (inner, depth) in BUNDLE_FONT_FOLDERS {
+            if let Some(rest) = levels.checked_sub(depth) {
+                collect_font_files(&dir.join(inner), rest, scan);
+            }
+        }
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
-        if out.len() >= MAX_FOLDER_FONT_FILES {
+        if scan.cut_short {
             return;
         }
         if entry.file_name().to_string_lossy().starts_with('.') {
@@ -354,12 +417,119 @@ pub fn collect_font_files(dir: &Path, levels: u8, out: &mut Vec<PathBuf>) {
         };
         if kind.is_dir() {
             if levels > 0 {
-                collect_font_files(&path, levels - 1, out);
+                collect_font_files(&path, levels - 1, scan);
             }
         } else if is_font_file(&path) && (kind.is_file() || path.is_file()) {
-            out.push(path);
+            if scan.files.len() >= MAX_SOURCE_FONT_FILES {
+                scan.cut_short = true;
+                return;
+            }
+            scan.files.push(path);
         }
     }
+}
+
+/// Why `path` cannot be a font source, or None when it can. A source may
+/// not be the top of a disk, the home folder or a folder holding it, a
+/// folder the system already loads fonts from (or one holding such a
+/// folder), or one of the big program and system folders. Those would take
+/// a long search for little, or load the system's fonts twice.
+pub fn source_refusal(path: &Path) -> Option<&'static str> {
+    let home = ["HOME", "USERPROFILE"]
+        .iter()
+        .find_map(std::env::var_os)
+        .map(PathBuf::from);
+    refusal(&real(path), home.map(|h| real(&h)).as_deref())
+}
+
+/// The path with links and `..` worked out, so the comparisons below see
+/// the same folder however it was named. A path that cannot be resolved
+/// is taken as it is.
+fn real(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn refusal(path: &Path, home: Option<&Path>) -> Option<&'static str> {
+    const DISK: &str = "It is the top of a disk.";
+    let parent = path.parent();
+    if parent.is_none() || path.as_os_str().is_empty() {
+        return Some(DISK);
+    }
+    // Where removable disks and other volumes appear.
+    let mounts = parent.is_some_and(|p| {
+        ["/Volumes", "/mnt", "/media"]
+            .iter()
+            .any(|m| p == Path::new(m))
+            || p.parent()
+                .is_some_and(|g| g == Path::new("/media") || g == Path::new("/run/media"))
+    });
+    if mounts {
+        return Some(DISK);
+    }
+    if let Some(home) = home
+        && home.starts_with(path)
+    {
+        return Some("It is your home folder, or holds it.");
+    }
+    let (fonts, broad) = system_folders(home);
+    if fonts
+        .iter()
+        .any(|f| path.starts_with(f) || f.starts_with(path))
+    {
+        return Some("The system already loads the fonts in it.");
+    }
+    if broad.iter().any(|b| b.starts_with(path)) {
+        return Some("It is too large a folder to search for fonts.");
+    }
+    None
+}
+
+/// The folders the system loads fonts from, and the big program and system
+/// folders that are too large to search.
+fn system_folders(home: Option<&Path>) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut fonts: Vec<PathBuf> = Vec::new();
+    let mut broad: Vec<PathBuf> = Vec::new();
+    let in_home = |rest: &str| home.map(|h| h.join(rest));
+    if cfg!(target_os = "macos") {
+        fonts.extend(
+            [
+                "/System/Library/Fonts",
+                "/Library/Fonts",
+                "/Network/Library/Fonts",
+            ]
+            .map(PathBuf::from),
+        );
+        fonts.extend(in_home("Library/Fonts"));
+        broad.extend(
+            ["/Applications", "/System", "/Library", "/Users", "/Volumes"].map(PathBuf::from),
+        );
+    } else if cfg!(windows) {
+        if let Some(windows) = std::env::var_os("WINDIR").or_else(|| std::env::var_os("SystemRoot"))
+        {
+            let windows = real(Path::new(&windows));
+            fonts.push(windows.join("Fonts"));
+            broad.push(windows);
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            fonts.push(real(Path::new(&local)).join("Microsoft\\Windows\\Fonts"));
+        }
+        for var in ["ProgramFiles", "ProgramFiles(x86)", "ProgramData"] {
+            if let Some(dir) = std::env::var_os(var) {
+                broad.push(real(Path::new(&dir)));
+            }
+        }
+    } else {
+        fonts.extend(["/usr/share/fonts", "/usr/local/share/fonts"].map(PathBuf::from));
+        fonts.extend(in_home(".fonts"));
+        fonts.extend(in_home(".local/share/fonts"));
+        broad.extend(
+            [
+                "/usr", "/opt", "/home", "/snap", "/var", "/mnt", "/media", "/run",
+            ]
+            .map(PathBuf::from),
+        );
+    }
+    (fonts, broad)
 }
 
 /// Host interface font role, independent of imported document font names.
@@ -1067,9 +1237,11 @@ mod tests {
     fn folder_search_stops_at_the_chosen_depth_and_takes_only_font_files() {
         let root = font_folder_tree("depth");
         for (levels, expected) in [(0u8, 1usize), (1, 2), (2, 3), (7, 4)] {
-            let mut found = Vec::new();
-            collect_font_files(&root, levels, &mut found);
+            let mut scan = FontScan::default();
+            collect_font_files(&root, levels, &mut scan);
+            let found = scan.files;
             assert_eq!(found.len(), expected, "levels {levels}");
+            assert!(!scan.cut_short);
             assert!(
                 found
                     .iter()
@@ -1077,6 +1249,43 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fonts_in_an_application_bundle_join_the_catalog() {
+        let base = Catalog::scan_system();
+        let Some(source) = base
+            .families
+            .iter()
+            .flat_map(|f| f.faces.iter())
+            .map(|f| f.path.clone())
+            .find(|p| is_font_file(p))
+        else {
+            return;
+        };
+        let root = font_folder_tree("app-bundle");
+        let bundle = root.join("Example.app");
+        let fonts = bundle.join("Contents/Resources/Fonts");
+        std::fs::create_dir_all(&fonts).unwrap();
+        let copy = fonts.join(source.file_name().unwrap());
+        std::fs::copy(&source, &copy).unwrap();
+
+        // An empty catalog stands in for the system, which already has
+        // this font and would keep its own copy.
+        let empty = Catalog::default();
+        let shallow = empty.with_folders(std::slice::from_ref(&bundle), 2);
+        let loaded = empty.with_folders(std::slice::from_ref(&bundle), 4);
+        let has_copy = |catalog: &Catalog| {
+            catalog
+                .families
+                .iter()
+                .flat_map(|family| &family.faces)
+                .any(|face| face.path == copy)
+        };
+        assert!(!has_copy(&shallow), "bundle fonts respect the search depth");
+        assert!(has_copy(&loaded), "bundle fonts load at the default depth");
+        assert!(!has_copy(&empty.with_folders(&[], 4)));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1095,15 +1304,150 @@ mod tests {
         let root = font_folder_tree("merge");
         let deep = root.join("a/b");
         std::fs::copy(&source, deep.join(&name)).unwrap();
-        let shallow = base.with_folders(std::slice::from_ref(&root), 1);
-        let deeper = base.with_folders(std::slice::from_ref(&root), 3);
+        let empty = Catalog::default();
+        let shallow = empty.with_folders(std::slice::from_ref(&root), 1);
+        let deeper = empty.with_folders(std::slice::from_ref(&root), 3);
         let count = |c: &Catalog| c.families.iter().map(|f| f.faces.len()).sum::<usize>();
-        assert_eq!(count(&shallow), count(&base), "too deep for one level");
-        assert!(
-            count(&deeper) > count(&base),
-            "the copied font joined its family"
-        );
-        assert_eq!(count(&base.with_folders(&[], 4)), count(&base));
+        assert_eq!(count(&shallow), 0, "too deep for one level");
+        assert!(count(&deeper) > 0, "the copied font joined the list");
+        assert_eq!(count(&empty.with_folders(&[], 4)), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_a_bundles_font_folders_are_searched() {
+        let root = font_folder_tree("bundle-parts");
+        let bundle = root.join("Big.app");
+        for (dir, file) in [
+            ("Contents/Resources/Fonts", "a.ttf"),
+            ("Contents/Library/Fonts", "b.otf"),
+            ("Contents/Frameworks/Thing.framework", "c.ttf"),
+            ("Contents/MacOS", "d.ttf"),
+        ] {
+            std::fs::create_dir_all(bundle.join(dir)).unwrap();
+            std::fs::write(bundle.join(dir).join(file), b"font").unwrap();
+        }
+        for source in [&bundle, &root] {
+            let mut scan = FontScan::default();
+            let levels = if source == &bundle { 4 } else { 5 };
+            collect_font_files(source, levels, &mut scan);
+            let names: Vec<_> = scan
+                .files
+                .iter()
+                .filter(|p| p.starts_with(&bundle))
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(names, ["a.ttf", "b.otf"], "from {}", source.display());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_folder_limit_stops_a_search_and_says_so() {
+        let root = font_folder_tree("many-folders");
+        let wide = root.join("wide");
+        for i in 0..MAX_SOURCE_FOLDERS + 5 {
+            std::fs::create_dir_all(wide.join(format!("f{i:05}"))).unwrap();
+        }
+        let mut scan = FontScan::default();
+        collect_font_files(&wide, 1, &mut scan);
+        assert!(scan.cut_short);
+        let mut small = FontScan::default();
+        collect_font_files(&root, 7, &mut small);
+        assert!(small.cut_short, "the wide folder is inside it too");
+        let _ = std::fs::remove_dir_all(&wide);
+        let mut small = FontScan::default();
+        collect_font_files(&root, 7, &mut small);
+        assert!(!small.cut_short);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sources_that_are_too_broad_are_refused() {
+        let home = if cfg!(windows) {
+            PathBuf::from("C:\\Users\\pat")
+        } else {
+            PathBuf::from("/home/pat")
+        };
+        let at = |p: &str| refusal(Path::new(p), Some(&home));
+        if cfg!(windows) {
+            assert!(at("C:\\").is_some());
+            assert!(at("C:\\Users").is_some());
+            assert!(at("C:\\Users\\pat").is_some());
+            assert!(at("C:\\Users\\pat\\Fonts").is_none());
+        } else {
+            for p in [
+                "/",
+                "/home",
+                "/home/pat",
+                "/Volumes/Disk",
+                "/media/pat/Disk",
+                "/mnt/disk",
+            ] {
+                assert!(at(p).is_some(), "{p}");
+            }
+            assert!(at("/home/pat/Fonts").is_none());
+            assert!(at("/home/pat/Fonts/Families/Serif").is_none());
+            assert!(at("/Volumes/Disk/Fonts").is_none());
+        }
+        if cfg!(target_os = "macos") {
+            for p in [
+                "/System/Library/Fonts",
+                "/Library",
+                "/Library/Fonts/Sub",
+                "/Applications",
+            ] {
+                assert!(at(p).is_some(), "{p}");
+            }
+            assert!(at("/home/pat/Library/Fonts").is_some());
+            assert!(at("/Applications/Word.app").is_none());
+        }
+        if cfg!(target_os = "linux") {
+            for p in ["/usr", "/usr/share", "/usr/share/fonts/truetype", "/opt"] {
+                assert!(at(p).is_some(), "{p}");
+            }
+            assert!(at("/home/pat/.local/share/fonts").is_some());
+            assert!(at("/opt/SomeApp/fonts").is_none());
+        }
+    }
+
+    #[test]
+    fn the_system_then_the_oldest_source_wins_a_family() {
+        let base = Catalog::scan_system();
+        let Some(source) = base
+            .families
+            .iter()
+            .flat_map(|f| f.faces.iter())
+            .map(|f| f.path.clone())
+            .find(|p| is_font_file(p))
+        else {
+            return;
+        };
+        let root = font_folder_tree("priority");
+        let (first, second) = (root.join("first"), root.join("second"));
+        for dir in [&first, &second] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::copy(&source, dir.join(source.file_name().unwrap())).unwrap();
+        }
+        let from = |c: &Catalog, dir: &Path| {
+            c.families
+                .iter()
+                .flat_map(|f| &f.faces)
+                .any(|face| face.path.starts_with(dir))
+        };
+        // The system has the font, so neither copy is used.
+        let both = [first.clone(), second.clone()];
+        let with_system = base.with_folders(&both, 1);
+        assert!(!from(&with_system, &first) && !from(&with_system, &second));
+        let count = |c: &Catalog| c.families.iter().map(|f| f.faces.len()).sum::<usize>();
+        assert_eq!(count(&with_system), count(&base));
+        // Without it, the source added first wins, whichever order the
+        // files would sort in.
+        let empty = Catalog::default();
+        let one = empty.with_folders(&both, 1);
+        assert!(from(&one, &first) && !from(&one, &second));
+        let other = empty.with_folders(&[second.clone(), first.clone()], 1);
+        assert!(from(&other, &second) && !from(&other, &first));
         let _ = std::fs::remove_dir_all(&root);
     }
 

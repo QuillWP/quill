@@ -437,8 +437,6 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.item("Ruler", Action::ToggleRuler)
                 .key("⌘R")
                 .checked(cx.show_ruler),
-            b.item("Style Sheets", Action::ToggleStylesPalette)
-                .checked(crate::settings::with(|s| s.show_styles_palette)),
             b.cmd("Print Merge Helper…", Cmd::PrintMergeHelper),
             sep(),
             b.cmd("Zoom In", Cmd::ZoomIn),
@@ -516,7 +514,8 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Picture…", Cmd::PictureProperties)
                 .enabled(v.selected_picture().is_some()),
             sep(),
-            b.cmd("Style…", Cmd::StyleDialog),
+            b.cmd("Paragraph Styles…", Cmd::StyleDialog),
+            b.cmd("Character Styles…", Cmd::CharacterStylesDialog),
             b.cmd("Revert To Style", Cmd::RevertToStyle),
             sep(),
             b.cmd("Change Case…", Cmd::ChangeCase).enabled(has_sel),
@@ -588,6 +587,10 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
     let mut window_items = vec![
         b.cmd("Show Clipboard", Cmd::ShowClipboard),
         b.cmd("New Window", Cmd::NewWindow),
+        // A palette is a window of its own (or docks into one), so it is
+        // shown and hidden here rather than in View.
+        b.item("Style Sheets", Action::ToggleStylesPalette)
+            .checked(crate::settings::with(|s| s.show_styles_palette)),
         sep(),
     ];
     for (i, (title, current)) in cx.windows.iter().enumerate() {
@@ -598,33 +601,7 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
         items: window_items,
     };
 
-    let mut character_items = vec![
-        b.cmd("Character Styles…", Cmd::CharacterStylesDialog),
-        sep(),
-        b.item("None", Action::CharacterStyle(0))
-            .checked(chp.character_style == 0),
-    ];
-    for (i, s) in v.doc.styles.characters.iter().enumerate() {
-        character_items.push(
-            b.item(s.name.clone(), Action::CharacterStyle((i + 1) as u16))
-                .checked(cx.view.current_chp().character_style as usize == i + 1),
-        );
-    }
-    let character_styles = Menu {
-        title: "Character Styles".into(),
-        items: character_items,
-    };
-    let mut menus = vec![
-        file,
-        edit,
-        view,
-        insert,
-        format,
-        font,
-        character_styles,
-        tools,
-        window,
-    ];
+    let mut menus = vec![file, edit, view, insert, format, font, tools, window];
     if mac {
         menus.insert(0, app);
     } else {
@@ -1490,5 +1467,47 @@ mod tests {
 
         let window = menus.iter().find(|menu| menu.title == "Window").unwrap();
         assert!(!window.items.iter().any(|item| item.label == "Help…"));
+    }
+
+    #[test]
+    fn styles_are_managed_from_format_and_the_palette_is_in_window() {
+        let view = DocView::new(quill_core::Document::new(), String::new());
+        let cx = MenuContext {
+            view: &view,
+            font_families: &[],
+            show_formatting_toolbar: true,
+            show_paragraph_toolbar: true,
+            show_ruler: true,
+            full_screen: false,
+            recent: &[],
+            windows: &[],
+        };
+        let (menus, actions) = build_menus(&cx);
+        let menu = |title: &str| menus.iter().find(|m| m.title == title).unwrap();
+        let action = |title: &str, label: &str| {
+            menu(title)
+                .items
+                .iter()
+                .find(|i| i.label == label)
+                .map(|i| actions[i.id as usize].clone())
+        };
+        assert!(!menus.iter().any(|m| m.title == "Character Styles"));
+        assert_eq!(
+            action("Format", "Paragraph Styles…"),
+            Some(Action::Cmd(Cmd::StyleDialog))
+        );
+        assert_eq!(
+            action("Format", "Character Styles…"),
+            Some(Action::Cmd(Cmd::CharacterStylesDialog))
+        );
+        assert_eq!(
+            action("Window", "Style Sheets"),
+            Some(Action::ToggleStylesPalette)
+        );
+        assert_eq!(action("View", "Style Sheets"), None);
+        assert_eq!(
+            default_menu(Cmd::CharacterStylesDialog).as_deref(),
+            Some("Format")
+        );
     }
 }

@@ -128,7 +128,15 @@ class PackageTests(unittest.TestCase):
                 names = {name.rsplit("/", 1)[-1] for name in bundle.getnames()}
             for name in ["quill.desktop", "install-linux.sh", "quill-mime.xml"]:
                 self.assertNotIn(name, names)
+            # Its program is quill-debug, so it is not taken for Quill.
+            self.assertIn("quill-debug", names)
+            self.assertNotIn("quill", names)
+            # The release package's program is still quill.
+            archive = package.portable_package(executable, self.output, "1.2.3", "linux", "aarch64")
+            with tarfile.open(archive) as bundle:
+                names = {name.rsplit("/", 1)[-1] for name in bundle.getnames()}
             self.assertIn("quill", names)
+            self.assertNotIn("quill-debug", names)
 
 
 if __name__ == "__main__":

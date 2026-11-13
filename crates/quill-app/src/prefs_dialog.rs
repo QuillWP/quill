@@ -90,11 +90,7 @@ pub fn preferences_with(
     families: &[quill_layout::FontFamilyInfo],
     s: &settings::Settings,
 ) -> Dialog {
-    let height = if panel == ADVANCED_PANEL {
-        480.0
-    } else {
-        376.0
-    };
+    let height = 376.0;
     let mut d = Dialog::new("Preferences", 442.0, height);
     d.close_box = true;
     d.modeless = true;
@@ -362,65 +358,26 @@ pub fn preferences_with(
             }
         }
         ADVANCED_PANEL => {
-            d.group("Extra Font Folders", 11.0, 36.0, 420.0, 272.0);
-            for slot in 0..settings::MAX_FONT_FOLDERS {
-                let y = 56.0 + 21.0 * slot as f32;
-                let folder = s.font_folders.get(slot);
-                let label = folder.map_or("(empty)".to_string(), |f| shorten(&f.path));
-                d.check(
-                    FOLDER_ON[slot],
-                    &label,
-                    18.0,
-                    y + 2.0,
-                    folder.is_some_and(|f| f.enabled),
-                );
-                d.button(FOLDER_CHOOSE[slot], "Choose…", 318.0, y, 70.0, false);
-                d.button(FOLDER_CLEAR[slot], "Clear", 390.0, y, 36.0, false);
-                d.enable(FOLDER_ON[slot], folder.is_some());
-                d.enable(FOLDER_CLEAR[slot], folder.is_some());
-            }
-            d.text("Folder levels to search (0-7):", 18.0, 282.0);
-            d.field(
-                "font_levels",
-                &s.font_folder_levels.to_string(),
-                200.0,
-                279.0,
-                40.0,
-            );
-            d.note(
-                "font_help",
-                "Fonts load only while a folder is checked. Documents that use them",
-                11.0,
-                314.0,
-                420.0,
-            );
-            d.note(
-                "font_help2",
-                "show in other fonts on a computer, or a time, when they are not loaded.",
-                11.0,
-                327.0,
-                420.0,
-            );
-            d.text("Save a recovery copy:", 11.0, 358.0);
+            d.text("Save a recovery copy:", 11.0, 55.0);
             let at = AUTOSAVE
                 .iter()
                 .position(|a| a.1 == s.autosave_secs)
                 .unwrap_or(1);
             let names: Vec<&str> = AUTOSAVE.iter().map(|a| a.0).collect();
-            d.popup("autosave", &names, at, 139.0, 355.0, 150.0);
+            d.popup("autosave", &names, at, 139.0, 52.0, 150.0);
             d.check(
                 "smart",
                 "\u{201C}Smart\u{201D} Quotes",
                 12.0,
-                412.0,
+                109.0,
                 s.smart_quotes,
             );
-            d.text("Documents in Open Recent (1-50):", 11.0, 386.0);
+            d.text("Documents in Open Recent (1-50):", 11.0, 83.0);
             d.field(
                 "recent_count",
                 &s.recent_count.to_string(),
                 200.0,
-                383.0,
+                80.0,
                 48.0,
             );
         }
@@ -491,6 +448,41 @@ pub fn preferences_with(
                 16.0,
                 176.0,
             );
+            d.button(
+                "font_sources",
+                "Additional Font Sources…",
+                12.0,
+                218.0,
+                225.0,
+                false,
+            );
+            // Fonts for Markdown: the plain text of Source view, and the
+            // formatted document made from a Markdown file.
+            d.group("Markdown", 11.0, 252.0, 420.0, 74.0);
+            let rows = [
+                (
+                    "Source:",
+                    "md_source_font",
+                    "md_source_size",
+                    &s.markdown_source_font,
+                    s.markdown_source_size,
+                ),
+                (
+                    "Display:",
+                    "md_display_font",
+                    "md_display_size",
+                    &s.markdown_display_font,
+                    s.markdown_display_size,
+                ),
+            ];
+            for (row, (label, font_id, size_id, name, size)) in rows.into_iter().enumerate() {
+                let y = 272.0 + row as f32 * 28.0;
+                let (list, at) = plain_families(families, name);
+                d.text(label, 16.0, y + 3.0);
+                d.font_popup(font_id, &list, at, 70.0, y, 180.0);
+                d.text("Size:", 262.0, y + 3.0);
+                d.field(size_id, &crate::bars::format_size(size), 296.0, y, 46.0);
+            }
             d.focus("size");
         }
     }
@@ -498,6 +490,143 @@ pub fn preferences_with(
     d.button("save", "Save", 223.0, height - 35.0, 70.0, false);
     d.button("ok", "Save and Close", 301.0, height - 35.0, 130.0, true);
     d
+}
+
+thread_local! {
+    static SOURCES_CUT_SHORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Record whether the last search of the font sources stopped at its
+/// limit, for the sources dialog to say so.
+pub fn set_sources_cut_short(cut: bool) {
+    SOURCES_CUT_SHORT.set(cut);
+}
+
+/// A separate working copy: Done returns these sources to the Preferences
+/// draft; Cancel leaves it alone. Empty rows never reach saved settings.
+pub fn font_sources(s: &settings::Settings) -> Dialog {
+    let rows = s.font_folders.len().max(1);
+    let bottom = 42.0 + rows as f32 * 29.0;
+    let cut = SOURCES_CUT_SHORT.get();
+    let extra = if cut { 34.0 } else { 0.0 };
+    let mut d = Dialog::new("Additional Font Sources", 510.0, bottom + 145.0 + extra);
+    d.close_box = true;
+    d.text("Additional font sources", 12.0, 14.0);
+    for slot in 0..rows {
+        let y = 36.0 + slot as f32 * 29.0;
+        let folder = s
+            .font_folders
+            .get(slot)
+            .filter(|f| !f.path.as_os_str().is_empty());
+        let label = folder.map_or("(empty)".to_string(), |f| shorten(&f.path));
+        d.check(
+            FOLDER_ON[slot],
+            &label,
+            12.0,
+            y + 4.0,
+            folder.is_some_and(|f| f.enabled),
+        );
+        d.enable(FOLDER_ON[slot], folder.is_some());
+        d.button(FOLDER_CHOOSE[slot], "Choose…", 340.0, y, 76.0, false);
+        d.button(FOLDER_CLEAR[slot], "Delete", 424.0, y, 74.0, false);
+    }
+    d.button("source_add", "+ Add Source", 12.0, bottom, 130.0, false);
+    d.enable("source_add", can_add_source(s));
+    d.text("Folder levels to search (0-7):", 12.0, bottom + 38.0);
+    d.field(
+        "font_levels",
+        &s.font_folder_levels.to_string(),
+        205.0,
+        bottom + 35.0,
+        40.0,
+    );
+    d.note(
+        "source_help",
+        "These fonts are available only in Quill while their source is checked.",
+        12.0,
+        bottom + 65.0,
+        486.0,
+    );
+    d.note(
+        "source_help2",
+        "Moving or removing a source can change how documents look.",
+        12.0,
+        bottom + 82.0,
+        486.0,
+    );
+    if cut {
+        d.note(
+            "source_cut",
+            &format!(
+                "The last search stopped after {} folders or {} font files,",
+                quill_layout::fonts::MAX_SOURCE_FOLDERS,
+                quill_layout::fonts::MAX_SOURCE_FONT_FILES
+            ),
+            12.0,
+            bottom + 99.0,
+            486.0,
+        );
+        d.note(
+            "source_cut2",
+            "so some fonts may be missing. Choose smaller folders or fewer levels.",
+            12.0,
+            bottom + 116.0,
+            486.0,
+        );
+    }
+    d.button(
+        "cancel",
+        "Cancel",
+        326.0,
+        bottom + 110.0 + extra,
+        80.0,
+        false,
+    );
+    d.button("ok", "Done", 418.0, bottom + 110.0 + extra, 80.0, true);
+    d
+}
+
+pub fn font_sources_changed(d: &Dialog, s: &mut settings::Settings) {
+    for (slot, folder) in s.font_folders.iter_mut().enumerate() {
+        folder.enabled = d.is_on(FOLDER_ON[slot]);
+    }
+    if let Ok(levels) = d.field_text("font_levels").trim().parse::<u8>()
+        && levels <= settings::MAX_FONT_LEVELS
+    {
+        s.font_folder_levels = levels;
+    }
+}
+
+pub fn font_sources_button(id: &str, s: &mut settings::Settings) {
+    if id == "source_add" {
+        if can_add_source(s) {
+            s.font_folders.push(settings::FontFolder {
+                path: Default::default(),
+                enabled: true,
+            });
+        }
+    } else {
+        folder_button(id, s);
+    }
+    ensure_source_row(s);
+}
+
+/// Whether + Add Source may add a row: there is room, and no row is still
+/// waiting for a folder, so empty rows cannot pile up.
+fn can_add_source(s: &settings::Settings) -> bool {
+    s.font_folders.len() < settings::MAX_FONT_FOLDERS
+        && s.font_folders
+            .iter()
+            .all(|f| !f.path.as_os_str().is_empty())
+}
+
+pub fn ensure_source_row(s: &mut settings::Settings) {
+    if s.font_folders.is_empty() {
+        s.font_folders.push(settings::FontFolder {
+            path: Default::default(),
+            enabled: true,
+        });
+    }
 }
 
 /// A folder path for a checkbox label: the home folder as ~, and the middle
@@ -560,11 +689,18 @@ pub fn folder_button(id: &str, s: &mut settings::Settings) {
     if let Some(slot) = FOLDER_CLEAR.iter().position(|b| *b == id) {
         clear_folder_in(s, slot);
     } else if let Some(slot) = FOLDER_CHOOSE.iter().position(|b| *b == id) {
-        let mut dialog = rfd::FileDialog::new().set_title("Choose a Font Folder");
-        if let Some(old) = s.font_folders.get(slot).map(|f| f.path.clone()) {
-            dialog = dialog.set_directory(old);
-        }
-        if let Some(path) = dialog.pick_folder() {
+        let directory = s.font_folders.get(slot).map(|f| f.path.as_path());
+        if let Some(path) = pick_font_folder(directory) {
+            if let Some(why) = quill_layout::fonts::source_refusal(&path) {
+                crate::app::warn(
+                    "Quill cannot search this folder for fonts.",
+                    &format!(
+                        "{why} Choose a folder that holds fonts, such as a Fonts folder or \
+                         an application."
+                    ),
+                );
+                return;
+            }
             set_folder_in(s, slot, path);
             crate::app::warn(
                 "These fonts are not installed.",
@@ -573,6 +709,21 @@ pub fn folder_button(id: &str, s: &mut settings::Settings) {
                  without these fonts or when the folder is switched off.",
             );
         }
+    }
+}
+
+fn pick_font_folder(directory: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        crate::mac_dialog::pick_font_folder(directory)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut dialog = rfd::FileDialog::new().set_title("Choose a Font Folder");
+        if let Some(directory) = directory {
+            dialog = dialog.set_directory(directory);
+        }
+        dialog.pick_folder()
     }
 }
 
@@ -599,6 +750,40 @@ fn faces(family: Option<&quill_layout::FontFamilyInfo>) -> Vec<(bool, bool)> {
                 || family.is_some_and(|fam| fam.variants.iter().any(|v| (v.bold, v.italic) == f))
         })
         .collect()
+}
+
+/// The installed families as plain rows, with `name` listed first when it
+/// is not installed so saving does not change it, and the row for `name`.
+fn plain_families(
+    families: &[quill_layout::FontFamilyInfo],
+    name: &str,
+) -> (Vec<quill_layout::FontFamilyInfo>, usize) {
+    let plain = |f: &quill_layout::FontFamilyInfo| quill_layout::FontFamilyInfo {
+        variants: vec![quill_layout::FontVariant {
+            bold: false,
+            italic: false,
+        }],
+        ..f.clone()
+    };
+    let mut list: Vec<quill_layout::FontFamilyInfo> = families.iter().map(plain).collect();
+    if !list.iter().any(|f| f.name.eq_ignore_ascii_case(name)) {
+        list.insert(
+            0,
+            quill_layout::FontFamilyInfo {
+                name: name.to_string(),
+                draws_name: false,
+                variants: vec![quill_layout::FontVariant {
+                    bold: false,
+                    italic: false,
+                }],
+            },
+        );
+    }
+    let at = list
+        .iter()
+        .position(|f| f.name.eq_ignore_ascii_case(name))
+        .unwrap_or(0);
+    (list, at)
 }
 
 /// After the Default Font's family changes: a face the new family does not
@@ -708,14 +893,6 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
                 .collect();
         }
         ADVANCED_PANEL => {
-            for (slot, folder) in s.font_folders.iter_mut().enumerate() {
-                folder.enabled = on(FOLDER_ON[slot]);
-            }
-            if let Ok(levels) = d.field_text("font_levels").trim().parse::<u8>()
-                && levels <= settings::MAX_FONT_LEVELS
-            {
-                s.font_folder_levels = levels;
-            }
             s.smart_quotes = on("smart");
             if id == "autosave"
                 && let Some(&(_, secs)) = AUTOSAVE.get(d.selected("autosave"))
@@ -745,6 +922,34 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
                 }
                 if let Some(z) = size.filter(|z| (1.0..=1638.0).contains(z)) {
                     s.size = (z * 2.0).round() as u16;
+                }
+                for (font_id, size_id, font, size) in [
+                    (
+                        "md_source_font",
+                        "md_source_size",
+                        &mut s.markdown_source_font,
+                        &mut s.markdown_source_size,
+                    ),
+                    (
+                        "md_display_font",
+                        "md_display_size",
+                        &mut s.markdown_display_font,
+                        &mut s.markdown_display_size,
+                    ),
+                ] {
+                    let chosen = d.selected_text(font_id);
+                    if !chosen.is_empty() {
+                        *font = chosen;
+                    }
+                    // The shown size is rounded, so only a size the person
+                    // changed is read back.
+                    let typed = d.field_text(size_id);
+                    if let Ok(z) = typed.trim().parse::<f32>()
+                        && (1.0..=1638.0).contains(&z)
+                        && crate::bars::format_size(*size) != typed.trim()
+                    {
+                        *size = (z * 2.0).round() as u16;
+                    }
                 }
                 // A field left as it was, or not a number, keeps its value.
                 let pct = |id: &str, old: u16, range: std::ops::RangeInclusive<u16>| {
@@ -846,6 +1051,10 @@ pub fn save(original: &mut settings::Settings, draft: &settings::Settings) {
             font_bold,
             font_italic,
             size,
+            markdown_source_font,
+            markdown_source_size,
+            markdown_display_font,
+            markdown_display_size,
             document_zoom,
             custom_dictionary,
         );
@@ -871,6 +1080,23 @@ pub fn changed(panel: usize, d: &mut Dialog, id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_source_row_waiting_for_a_folder_blocks_adding_another() {
+        let mut s = settings::Settings::default();
+        ensure_source_row(&mut s);
+        assert!(!can_add_source(&s), "the first row is still empty");
+        font_sources_button("source_add", &mut s);
+        assert_eq!(s.font_folders.len(), 1);
+        assert!(!font_sources(&s).is_enabled("source_add"));
+        s.font_folders[0].path = "/Fonts/One".into();
+        assert!(can_add_source(&s));
+        assert!(font_sources(&s).is_enabled("source_add"));
+        font_sources_button("source_add", &mut s);
+        assert_eq!(s.font_folders.len(), 2);
+        font_sources_button("source_add", &mut s);
+        assert_eq!(s.font_folders.len(), 2, "no second empty row");
+    }
 
     fn family(name: &str) -> quill_layout::FontFamilyInfo {
         quill_layout::FontFamilyInfo {
@@ -924,6 +1150,36 @@ mod tests {
             ("Georgia", true, false)
         );
         assert_eq!(s.document.scripts.raise, 40);
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
+    fn saving_keeps_the_markdown_fonts() {
+        settings::update(|s| *s = settings::Settings::default());
+        let families = [family("Arial"), family("Georgia")];
+        let mut original = settings::get();
+        let mut draft = original.clone();
+        let mut d = preferences_with(DEFAULT_FONT_PANEL, &families, &draft);
+        // The saved fonts are not installed here, so each is listed first.
+        d.set_selected("md_source_font", 2);
+        d.set_selected("md_display_font", 1);
+        d.set_field("md_source_size", "13");
+        d.set_field("md_display_size", "15");
+        changed_in(DEFAULT_FONT_PANEL, &mut d, "save", &mut draft);
+        save(&mut original, &draft);
+        let s = settings::get();
+        assert_eq!(
+            (
+                s.markdown_source_font.as_str(),
+                s.markdown_source_size,
+                s.markdown_display_font.as_str(),
+                s.markdown_display_size
+            ),
+            ("Georgia", 26, "Arial", 30)
+        );
+        // And they reach the file and come back.
+        let back = settings::Settings::from_text(&s.to_text());
+        assert_eq!(back.markdown_display_size, 30);
         settings::update(|s| *s = settings::Settings::default());
     }
 
@@ -1212,15 +1468,15 @@ mod tests {
     }
 
     #[test]
-    fn font_folders_toggle_clear_and_fit_the_advanced_panel() {
+    fn font_sources_toggle_delete_and_fit_the_dialog() {
         settings::update(|s| *s = settings::Settings::default());
         set_folder(0, "/Fonts/Google".into());
         set_folder(1, "/Fonts/Trial".into());
-        let mut d = preferences(ADVANCED_PANEL, &[]);
+        let mut d = font_sources(&settings::get());
         assert!(d.is_on("fon0") && d.is_on("fon1"));
-        assert!(!d.is_enabled("fon2") && !d.is_enabled("fclear2"));
+        assert!(!d.items.iter().any(|item| item.id == "fon2"));
         d.set_on("fon1", false);
-        changed(ADVANCED_PANEL, &mut d, "fon1");
+        settings::update(|s| font_sources_changed(&d, s));
         let folders = settings::get().font_folders;
         assert!(folders[0].enabled && !folders[1].enabled);
         // The off folder stays in its slot and survives a save and reload.
@@ -1245,11 +1501,12 @@ mod tests {
         assert_eq!(settings::get().font_folder_levels, 4);
         assert_eq!(settings::get().autosave_secs, 30);
         let mut d = preferences(ADVANCED_PANEL, &[]);
-        d.set_field("font_levels", "7");
-        changed(ADVANCED_PANEL, &mut d, "font_levels");
+        let mut sources = font_sources(&settings::get());
+        sources.set_field("font_levels", "7");
+        settings::update(|s| font_sources_changed(&sources, s));
         assert_eq!(settings::get().font_folder_levels, 7);
-        d.set_field("font_levels", "8");
-        changed(ADVANCED_PANEL, &mut d, "font_levels");
+        sources.set_field("font_levels", "8");
+        settings::update(|s| font_sources_changed(&sources, s));
         assert_eq!(settings::get().font_folder_levels, 7);
         d.set_selected("autosave", 4);
         changed(ADVANCED_PANEL, &mut d, "autosave");
@@ -1264,6 +1521,50 @@ mod tests {
             7
         );
         settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
+    fn source_rows_start_small_add_delete_and_stop_at_the_limit() {
+        let mut draft = settings::Settings::default();
+        ensure_source_row(&mut draft);
+        let d = font_sources(&draft);
+        assert!(d.items.iter().any(|i| i.id == "fchoose0"));
+        assert!(!d.items.iter().any(|i| i.id == "fchoose1"));
+        assert!(!d.is_enabled("fon0"));
+        font_sources_button("source_add", &mut draft);
+        set_folder_in(&mut draft, 1, "/Fonts/Second".into());
+        font_sources_button("fclear0", &mut draft);
+        assert_eq!(
+            draft.font_folders[0].path,
+            std::path::Path::new("/Fonts/Second")
+        );
+        font_sources_button("fclear0", &mut draft);
+        assert_eq!(draft.font_folders.len(), 1);
+        assert!(draft.font_folders[0].path.as_os_str().is_empty());
+        for i in 0..20 {
+            // Each new row gets its folder before the next can be added.
+            let last = draft.font_folders.len() - 1;
+            if draft.font_folders[last].path.as_os_str().is_empty() {
+                set_folder_in(&mut draft, last, format!("/Fonts/{i}").into());
+            }
+            font_sources_button("source_add", &mut draft);
+        }
+        assert_eq!(draft.font_folders.len(), settings::MAX_FONT_FOLDERS);
+        let d = font_sources(&draft);
+        assert!(!d.is_enabled("source_add"));
+        for item in &d.items {
+            assert!(item.rect.right() <= d.width, "{} is too wide", item.id);
+            assert!(item.rect.bottom() <= d.height, "{} is too low", item.id);
+        }
+        let fonts = preferences_with(DEFAULT_FONT_PANEL, &[], &draft);
+        assert!(fonts.items.iter().any(|i| i.id == "font_sources"));
+        let advanced = preferences_with(ADVANCED_PANEL, &[], &draft);
+        assert!(
+            !advanced
+                .items
+                .iter()
+                .any(|i| i.id == "fon0" || i.id == "font_levels")
+        );
     }
 
     #[test]

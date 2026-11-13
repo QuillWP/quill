@@ -2421,6 +2421,48 @@ impl Document {
         });
     }
 
+    /// Every style and all the text take font `to` and size `size`. Call it
+    /// with a step open.
+    pub fn set_font_everywhere(&mut self, to: u16, size: u16) {
+        self.change_everywhere(0, |c| {
+            c.font = to;
+            c.size = size;
+        });
+    }
+
+    /// Text and styles in a font that `keep` does not name take font `to`,
+    /// and the size of what changes is multiplied by `num / den`. Call it
+    /// with a step open.
+    pub fn replace_font_scaled(
+        &mut self,
+        keep: impl Fn(&str) -> bool,
+        to: u16,
+        num: u32,
+        den: u32,
+    ) {
+        let change: Vec<bool> = self.fonts.iter().map(|name| !keep(name)).collect();
+        self.change_everywhere(0, |c| {
+            if change.get(usize::from(c.font)).copied().unwrap_or(false) {
+                c.font = to;
+                c.size = (u32::from(c.size) * num / den.max(1)).clamp(2, 3276) as u16;
+            }
+        });
+    }
+
+    /// Take the newest undo step out of the history without undoing it,
+    /// for a change that belongs to the view rather than the document.
+    /// The document then counts as modified only if it was before.
+    pub fn forget_last_step(&mut self, was_modified: bool) {
+        self.commit_open();
+        self.history.undo.pop();
+        self.history.can_coalesce = false;
+        if was_modified {
+            self.touch();
+        } else {
+            self.mark_saved();
+        }
+    }
+
     /// Text and styles in color `from` take color `to`, as Replace Fonts
     /// does for fonts: call it with a step open.
     pub fn replace_color(&mut self, from: crate::props::Rgb, to: crate::props::Rgb) {
@@ -2668,20 +2710,55 @@ impl Document {
         }
     }
 
+    /// How many paragraphs have style `id`, in every story and in the notes
+    /// set aside for deleted references. A note, comment, header or footer
+    /// story that is only its one empty paragraph is not counted: it is
+    /// there whether or not the document has any.
+    pub fn style_uses(&self, id: StyleId) -> usize {
+        let count = |paras: &[Paragraph]| paras.iter().filter(|p| p.pap.style == id).count();
+        let stories: usize = self
+            .every_story()
+            .into_iter()
+            .map(|(k, story)| {
+                let paras = match story {
+                    StoryId::Main | StoryId::Notes | StoryId::Annotations => {
+                        &self.story(story).paras
+                    }
+                    _ => &self.header_story(k, story).paras,
+                };
+                let unused = story != StoryId::Main
+                    && matches!(paras.as_slice(), [only] if only.text.is_empty());
+                if unused { 0 } else { count(paras) }
+            })
+            .sum();
+        stories + self.note_bank.values().map(|p| count(p)).sum::<usize>()
+    }
+
     /// Delete a style the user defined. Its paragraphs go back to Normal,
     /// in every story: the numbers of the styles after it move down by one,
     /// so a paragraph left alone anywhere would take another style.
     pub fn delete_style(&mut self, id: StyleId) {
+        self.delete_style_replacing(id, 0);
+    }
+
+    /// Delete a style the user defined, giving its paragraphs style `with`
+    /// instead (Normal when `with` is the style itself or not a style).
+    pub fn delete_style_replacing(&mut self, id: StyleId, with: StyleId) {
         if id == 0 || self.styles.get(id).builtin || id as usize >= self.styles.styles.len() {
             return;
         }
+        let with = if with == id || with as usize >= self.styles.styles.len() {
+            0
+        } else {
+            with
+        };
         let stories = self.every_story();
         for &(k, story) in &stories {
             self.in_header_section(k, |d| {
                 // apply_style one paragraph at a time keeps hand formatting.
                 for i in 0..d.story(story).paras.len() {
                     if d.story(story).paras[i].pap.style == id {
-                        d.apply_style(story, i, i, 0);
+                        d.apply_style(story, i, i, with);
                     }
                 }
             });
@@ -2723,7 +2800,7 @@ impl Document {
         // a story.
         let move_down = |p: &mut Paragraph| {
             if p.pap.style == id {
-                p.pap.style = 0;
+                p.pap.style = fix(with);
             } else {
                 p.pap.style = fix(p.pap.style);
             }
@@ -3544,6 +3621,39 @@ mod tests {
         assert_eq!(d.styles.find("Alpha"), Some(a));
         assert_eq!(d.main.paras[0].pap.style, a);
         assert_eq!(d.main.paras[2].pap.style, b);
+    }
+
+    #[test]
+    fn deleting_a_style_can_give_its_paragraphs_another_style() {
+        let mut d = doc_with(&["A", "B", "C"]);
+        let pap = d.main.paras[0].pap.clone();
+        let mut chp = d.main.paras[0].chp_at(0);
+        d.begin("Style", Selection::default());
+        let a = d.add_style("Alpha", 0, None, pap.clone(), chp);
+        chp.italic = true;
+        let b = d.add_style("Beta", 0, None, pap, chp);
+        d.apply_style(MAIN, 0, 1, a);
+        d.commit(Selection::default());
+        assert_eq!(d.style_uses(a), 2);
+        assert_eq!(d.style_uses(b), 0);
+        // The empty note and comment stories are not counted as Normal.
+        assert_eq!(d.style_uses(0), 1);
+        d.begin("Delete Style", Selection::default());
+        d.delete_style_replacing(a, b);
+        d.commit(Selection::default());
+        // Beta moved down a number, and both paragraphs follow it there.
+        let beta = d.styles.find("Beta").unwrap();
+        assert_eq!(beta, b - 1);
+        assert_eq!(d.main.paras[0].pap.style, beta);
+        assert_eq!(d.main.paras[1].pap.style, beta);
+        assert!(
+            d.main.paras[0].chp_at(0).italic,
+            "Beta's formatting applied"
+        );
+        assert_eq!(d.style_uses(beta), 2);
+        d.undo();
+        assert_eq!(d.main.paras[0].pap.style, a);
+        assert_eq!(d.style_uses(a), 2);
     }
 
     #[test]
