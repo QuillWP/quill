@@ -144,7 +144,6 @@ pub struct Port {
 pub enum DialogId {
     InsertTable,
     PasteSpecial,
-    Commands,
     PrintMerge,
     MergeHelper,
     Spelling,

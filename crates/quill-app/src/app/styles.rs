@@ -105,6 +105,14 @@ impl WinState {
                         self.view.clear_styles();
                         return Some(Effect::None);
                     }
+                    Entry::ClearParagraph => {
+                        self.view.clear_formatting();
+                        return Some(Effect::None);
+                    }
+                    Entry::ClearCharacter => {
+                        self.view.clear_character_formatting();
+                        return Some(Effect::None);
+                    }
                     Entry::Paragraph(id) => Action::Style(id),
                     Entry::Character(id) => Action::CharacterStyle(id),
                 };
@@ -174,7 +182,7 @@ impl WinState {
             Button::Edit => match target {
                 Entry::Character(id) => self.palette_character_editor(Some(id), env),
                 Entry::Paragraph(id) => self.palette_style_dialog(Some(id), env),
-                Entry::NoParagraph => {}
+                Entry::NoParagraph | Entry::ClearParagraph | Entry::ClearCharacter => {}
             },
             Button::Copy => self.palette_copy(target),
             Button::Delete => self.palette_delete(target),
@@ -199,7 +207,7 @@ impl WinState {
     fn palette_copy(&mut self, target: Entry) {
         let view = &mut self.view;
         let made = match target {
-            Entry::NoParagraph => None,
+            Entry::NoParagraph | Entry::ClearParagraph | Entry::ClearCharacter => None,
             Entry::Character(id) => {
                 crate::character_style_dialog::duplicate(view, id).map(Entry::Character)
             }
@@ -214,7 +222,7 @@ impl WinState {
 
     fn palette_delete(&mut self, target: Entry) {
         match target {
-            Entry::NoParagraph => {}
+            Entry::NoParagraph | Entry::ClearParagraph | Entry::ClearCharacter => {}
             Entry::Character(id) => {
                 crate::character_style_dialog::delete(&mut self.view, id);
             }
@@ -284,7 +292,10 @@ mod tests {
         assert_eq!(crate::settings::with(|s| s.styles_palette_tab), 2);
         let b = st.palette_bounds().unwrap();
         let rows = sp::entries(&st.view.doc, st.palette.tab);
-        assert!(rows.iter().all(|e| matches!(e, Entry::Character(_))));
+        assert!(
+            rows.iter()
+                .all(|e| matches!(e, Entry::Character(_) | Entry::ClearCharacter))
+        );
         assert!(b.w > 0.0);
     }
 
@@ -296,14 +307,15 @@ mod tests {
             anchor: quill_core::Position::new(0, 0),
             focus: quill_core::Position::new(0, 4),
         });
-        // Row 0 is No Style, row 1 is Strong.
-        click(&mut st, Hit::Row(1));
+        // Row 0 is No Style, row 1 is Clear Formatting, row 2 is Strong.
+        click(&mut st, Hit::Row(2));
         assert_eq!(st.view.doc.main.paras[0].chp_at(2).character_style, 1);
         click(&mut st, Hit::Row(0));
         assert_eq!(st.view.doc.main.paras[0].chp_at(2).character_style, 0);
         click(&mut st, Hit::Tab(Tab::Paragraph));
-        // Row 0 is No Style and row 1 Normal; row 2 is the first other style.
-        click(&mut st, Hit::Row(2));
+        // Rows 0 to 2 are No Style, Clear Formatting and Normal; row 3 is the
+        // first other style.
+        click(&mut st, Hit::Row(3));
         assert_eq!(
             st.view.current_pap().style,
             sp::entries(&st.view.doc, Tab::Paragraph)
@@ -345,7 +357,7 @@ mod tests {
     fn copy_and_delete_work_on_the_chosen_character_style() {
         let mut st = state();
         click(&mut st, Hit::Tab(Tab::Character));
-        click(&mut st, Hit::Row(1));
+        click(&mut st, Hit::Row(2));
         click(&mut st, Hit::Button(Button::Copy));
         let names: Vec<String> = st
             .view
@@ -425,7 +437,7 @@ mod tests {
             Some((Which::CharacterStyleEdit(None), _))
         ));
         st.dialogs.clear();
-        click(&mut st, Hit::Row(1));
+        click(&mut st, Hit::Row(2));
         click(&mut st, Hit::Button(Button::Edit));
         assert!(matches!(
             st.dialogs.last(),

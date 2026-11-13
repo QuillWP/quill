@@ -345,6 +345,7 @@ impl Dialog {
     }
 
     /// An item's rectangle on screen.
+    #[cfg(test)]
     pub fn item_rect(&self, id: &str) -> Option<Rect> {
         self.item(id).map(|i| self.at(i.rect))
     }

@@ -47,11 +47,6 @@ impl ListBox {
         }
     }
 
-    pub fn scroll_by(&mut self, rows: i32, r: Rect) {
-        let max = self.len.saturating_sub(Self::visible(r));
-        self.scroll = (self.scroll as i32 + rows).clamp(0, max as i32) as usize;
-    }
-
     /// A click at `(x, y)` relative to the list's top left.
     pub fn click(&mut self, x: f32, y: f32, r: Rect) -> Click {
         let rows = Self::visible(r);

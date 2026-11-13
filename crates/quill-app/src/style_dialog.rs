@@ -70,7 +70,9 @@ pub struct ListState {
 
 /// Format > Paragraph Styles: the list, on the current paragraph's style.
 pub fn list(view: &DocView) -> (Dialog, ListState) {
-    let mut d = Dialog::new("Paragraph Styles", 460.0, 300.0);
+    // The same layout as the Character Styles list, with the two radio
+    // buttons above the list.
+    let mut d = Dialog::new("Paragraph Styles", 460.0, 312.0);
     d.radio("docstyles", "This Document", 12.0, 12.0, 1, true);
     d.radio("allstyles", "All Styles", 140.0, 12.0, 1, false);
     let mut st = ListState {
@@ -79,13 +81,18 @@ pub fn list(view: &DocView) -> (Dialog, ListState) {
     };
     let rows = list_names(view, &st.ids);
     d.list("list", rows, 0, 12.0, 36.0, 256.0, 176.0, Some("edit"));
-    d.button("new", "New…", 282.0, 36.0, 166.0, false);
-    d.button("edit", "Edit…", 282.0, 66.0, 166.0, false);
-    d.button("delete", "Delete", 282.0, 96.0, 166.0, false);
-    d.button("ok", "Close", 282.0, 192.0, 166.0, true);
-    d.note("description", "", 12.0, 226.0, 436.0);
-    d.note("description2", "", 12.0, 244.0, 436.0);
-    d.note("status", "", 12.0, 268.0, 436.0);
+    d.button("new", "+", 12.0, 218.0, 30.0, false);
+    d.button("delete", "\u{2212}", 46.0, 218.0, 30.0, false);
+    d.button("edit", "Edit\u{2026}", 84.0, 218.0, 84.0, false);
+    d.button("duplicate", "Duplicate", 174.0, 218.0, 94.0, false);
+    d.button("apply", "Apply", 282.0, 36.0, 166.0, false);
+    d.button("remove", "Remove Style", 282.0, 66.0, 166.0, false);
+    d.button("update", "Update to Selection", 282.0, 96.0, 166.0, false);
+    d.button("clear", "Clear Formatting", 282.0, 136.0, 166.0, false);
+    d.button("ok", "Close", 282.0, 218.0, 166.0, true);
+    d.note("description", "", 12.0, 252.0, 436.0);
+    d.note("description2", "", 12.0, 268.0, 436.0);
+    d.note("status", "", 12.0, 288.0, 436.0);
     refresh_list(&mut st, &mut d, view, Some(view.current_pap().style));
     (d, st)
 }
@@ -137,7 +144,9 @@ fn show_chosen(st: &ListState, d: &mut Dialog, view: &DocView) {
     };
     show_lines(d, &["description", "description2"], &text, false);
     d.set_label("status", &uses);
-    d.enable("edit", chosen.is_some());
+    for id in ["edit", "duplicate", "apply", "remove", "update"] {
+        d.enable(id, chosen.is_some());
+    }
     d.enable(
         "delete",
         chosen.is_some_and(|id| id != 0 && !view.doc.styles.get(id).builtin),
@@ -152,6 +161,64 @@ pub fn list_changed(st: &mut ListState, d: &mut Dialog, view: &DocView, id: &str
     } else {
         show_chosen(st, d, view);
     }
+}
+
+/// The list's own buttons: Apply, Remove Style, Update to Selection and
+/// Duplicate. The ones that open other windows (+, Edit, Import, Close)
+/// are handled by the window.
+pub fn list_button(st: &mut ListState, d: &mut Dialog, view: &mut DocView, action: &str) {
+    if action == "clear" {
+        let keep = list_selected(st, d);
+        view.clear_formatting();
+        refresh_list(st, d, view, keep);
+        d.set_label("status", "Formatting cleared. Changes can be undone.");
+        return;
+    }
+    let Some(id) = list_selected(st, d) else {
+        return;
+    };
+    let saved = "Style saved in this document. Changes can be undone.";
+    let (keep, message) = match action {
+        "apply" => {
+            view.set_style(id);
+            (id, "Applied to the selected paragraphs.")
+        }
+        "remove" => {
+            view.set_style(0);
+            (id, "The selected paragraphs are back to Normal.")
+        }
+        "update" => {
+            if !update(view, id) {
+                d.set_label("status", "No changes: the selection already matches.");
+                return;
+            }
+            view.set_style(id);
+            (id, saved)
+        }
+        "duplicate" => (duplicate(view, id), saved),
+        _ => return,
+    };
+    refresh_list(st, d, view, Some(keep));
+    d.set_label("status", message);
+}
+
+/// Redefine style `id` from the selection's paragraph and character
+/// formatting, as one undoable step. False when the style already looks
+/// like the selection.
+pub fn update(view: &mut DocView, id: StyleId) -> bool {
+    let mut pap = view.current_pap().clone();
+    let chp = view.current_chp();
+    let s = view.doc.styles.get(id);
+    pap.style = id;
+    pap.in_table = s.pap.in_table;
+    if pap == s.pap && chp == s.chp {
+        return false;
+    }
+    view.doc.begin("Define Style", view.sel);
+    view.doc.redefine_style(id, pap, chp);
+    view.doc.commit(view.sel);
+    view.invalidate_layout();
+    true
 }
 
 /// Delete style `id` from the list, or None when its paragraphs need a
@@ -850,6 +917,159 @@ mod tests {
         let mut v = DocView::new(Document::new(), "Untitled1".into());
         v.type_text("Hello");
         v
+    }
+
+    /// A document with a "Loud" style (bold, based on Normal) and a "Quiet"
+    /// style that is based on Loud and followed by Loud.
+    fn styled() -> Document {
+        let mut doc = Document::new();
+        let loud = doc.add_style(
+            "Loud",
+            0,
+            None,
+            doc.styles.get(0).pap.clone(),
+            CharProps {
+                bold: true,
+                ..doc.styles.get(0).chp
+            },
+        );
+        doc.add_style(
+            "Quiet",
+            loud,
+            Some(loud),
+            doc.styles.get(0).pap.clone(),
+            doc.styles.get(0).chp,
+        );
+        doc
+    }
+
+    #[test]
+    fn clear_formatting_goes_back_to_plain_normal_and_undoes_in_one_step() {
+        let mut v = DocView::new(styled(), "Untitled1".into());
+        v.type_text("Hello");
+        let loud = v.doc.styles.find("Loud").unwrap();
+        v.set_style(loud);
+        v.set_selection(quill_core::Selection {
+            anchor: quill_core::Position::new(0, 0),
+            focus: quill_core::Position::new(0, 5),
+        });
+        v.format_chars("Italic", |c| c.italic = true);
+        v.doc.begin("t", v.sel);
+        v.doc
+            .format_paras(quill_core::StoryId::Main, 0, 0, |p| p.left = 720);
+        v.doc.commit(v.sel);
+        assert!(v.current_chp().bold && v.current_chp().italic);
+        v.clear_formatting();
+        assert_eq!(v.current_pap().style, 0);
+        assert_eq!(v.current_pap().left, 0);
+        let c = v.doc.main.paras[0].chp_of_char(0);
+        assert!(!c.bold && !c.italic);
+        assert_eq!(c.character_style, 0);
+        assert_eq!(v.doc.main.paras[0].text, "Hello");
+        v.doc.undo();
+        assert_eq!(v.doc.main.paras[0].pap.style, loud);
+        assert_eq!(v.doc.main.paras[0].pap.left, 720);
+        assert!(v.doc.main.paras[0].chp_of_char(0).italic);
+    }
+
+    #[test]
+    fn the_lists_clear_formatting_buttons_work_on_paragraphs_and_on_text() {
+        let mut v = DocView::new(styled(), "Untitled1".into());
+        v.type_text("Hello World");
+        let loud = v.doc.styles.find("Loud").unwrap();
+        v.set_style(loud);
+        v.doc.begin("t", v.sel);
+        v.doc
+            .format_paras(quill_core::StoryId::Main, 0, 0, |p| p.left = 720);
+        v.doc.commit(v.sel);
+        let select = |v: &mut DocView, end: usize| {
+            v.set_selection(quill_core::Selection {
+                anchor: quill_core::Position::new(0, 0),
+                focus: quill_core::Position::new(0, end),
+            })
+        };
+        select(&mut v, 11);
+        v.format_chars("Italic", |c| c.italic = true);
+        select(&mut v, 5);
+        // Character Styles: only the selected text loses what was set by
+        // hand. It goes back to the paragraph's style, which is bold here.
+        let mut c = crate::character_style_dialog::dialog(&v);
+        crate::character_style_dialog::button(&mut c, &mut v, "clear");
+        assert!(!v.doc.main.paras[0].chp_of_char(0).italic);
+        assert!(v.doc.main.paras[0].chp_of_char(0).bold);
+        assert!(
+            v.doc.main.paras[0].chp_of_char(8).italic,
+            "other text is left"
+        );
+        assert_eq!(v.doc.main.paras[0].pap.style, loud);
+        assert_eq!(v.doc.main.paras[0].pap.left, 720);
+        // Paragraph Styles: the whole paragraph goes back to plain Normal.
+        let (mut d, mut st) = list(&v);
+        list_button(&mut st, &mut d, &mut v, "clear");
+        assert_eq!(v.current_pap().style, 0);
+        assert_eq!(v.current_pap().left, 0);
+        assert!(!v.doc.main.paras[0].chp_of_char(8).bold);
+        assert!(!v.doc.main.paras[0].chp_of_char(8).italic);
+    }
+
+    #[test]
+    fn the_list_has_the_same_buttons_as_character_styles() {
+        let v = view();
+        let (d, _) = list(&v);
+        let c = crate::character_style_dialog::dialog(&v);
+        for id in [
+            "list",
+            "new",
+            "delete",
+            "edit",
+            "duplicate",
+            "apply",
+            "remove",
+            "update",
+            "clear",
+            "ok",
+        ] {
+            let a = d.items.iter().find(|i| i.id == id).expect(id);
+            let b = c.items.iter().find(|i| i.id == id).expect(id);
+            assert_eq!(a.label, b.label, "{id}");
+            assert_eq!(a.rect.x, b.rect.x, "{id}");
+            assert_eq!(a.rect.w, b.rect.w, "{id}");
+        }
+    }
+
+    #[test]
+    fn update_to_selection_redefines_only_when_the_selection_differs() {
+        let mut v = view();
+        let id = v.doc.add_style(
+            "Loud",
+            0,
+            None,
+            v.current_pap().clone(),
+            v.doc.styles.get(0).chp,
+        );
+        // The selection already looks like it: nothing to do.
+        assert!(!update(&mut v, id));
+        v.format_chars("Bold", |c| c.bold = true);
+        assert!(update(&mut v, id));
+        assert!(v.doc.styles.get(id).chp.bold);
+        v.doc.undo();
+        assert!(!v.doc.styles.get(id).chp.bold);
+    }
+
+    #[test]
+    fn list_buttons_duplicate_apply_and_remove() {
+        let mut v = DocView::new(styled(), "Untitled1".into());
+        v.type_text("Hello");
+        let (mut d, mut st) = list(&v);
+        let loud = v.doc.styles.find("Loud").unwrap();
+        refresh_list(&mut st, &mut d, &v, Some(loud));
+        list_button(&mut st, &mut d, &mut v, "apply");
+        assert_eq!(v.current_pap().style, loud);
+        list_button(&mut st, &mut d, &mut v, "remove");
+        assert_eq!(v.current_pap().style, 0);
+        list_button(&mut st, &mut d, &mut v, "duplicate");
+        let copy = v.doc.styles.find("Loud copy").expect("the copy");
+        assert_eq!(list_selected(&st, &d), Some(copy));
     }
 
     #[test]

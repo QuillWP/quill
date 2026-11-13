@@ -1,7 +1,7 @@
 //! Commands and the original's default key bindings.
 //!
-//! Names match the original's own command names (Tools > Commands), so the menus,
-//! the keymap and later the Commands dialog all talk about the same things.
+//! Names match the original's own command names, so the menus and the keymap
+//! talk about the same things.
 
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
@@ -14,7 +14,7 @@ macro_rules! commands {
             $($(#[$doc])* $name,)*
         }
 
-        /// Every command, for scripting and the Commands dialog.
+        /// Every command, for scripting and the toolbar customizer.
         pub const ALL: &[Cmd] = &[$(Cmd::$name,)*];
     };
 }
@@ -176,6 +176,7 @@ commands! {
     SpaceBefore12,
     NormalParagraph,
     RevertToStyle,
+    ClearFormatting,
     FirstLineIndent,
     HangingIndent,
     Nest,
@@ -221,7 +222,6 @@ commands! {
     ResolveAnnotation,
     DeleteAnnotation,
     ViewAnnotations,
-    CommandsDialog,
     PrintMerge,
     PrintMergeHelper,
     Spelling,
@@ -303,6 +303,7 @@ impl Cmd {
                 | SpaceBefore12
                 | NormalParagraph
                 | RevertToStyle
+                | ClearFormatting
                 | FirstLineIndent
                 | HangingIndent
                 | Nest
@@ -463,6 +464,7 @@ impl Cmd {
             SpaceBefore12 => "Space Before ¶: 12 points",
             NormalParagraph => "Normal Paragraph",
             RevertToStyle => "Revert To Style",
+            ClearFormatting => "Clear Formatting",
             FirstLineIndent => "First Line Indent",
             HangingIndent => "Hanging Indent",
             Nest => "Nest Paragraph",
@@ -499,7 +501,6 @@ impl Cmd {
             ReplyToAnnotation => "Reply to Annotation",
             ResolveAnnotation => "Resolve Annotation",
             DeleteAnnotation => "Delete Annotation",
-            CommandsDialog => "Commands…",
             PrintMerge => "Print Merge…",
             PrintMergeHelper => "Print Merge Helper…",
             ViewAnnotations => "Annotations…",
@@ -578,54 +579,75 @@ pub enum K {
     Named(NamedKey),
 }
 
-/// A key press written as the original writes keys: modifiers then the key, as
-/// "⌘⇧K" or "⌥F5".
-pub fn key_spec(key: &Key, physical_char: Option<char>, mods: Mods) -> Option<String> {
-    use NamedKey as N;
-    let name = match key {
-        Key::Character(s) => {
-            let c = physical_char.or_else(|| s.chars().next())?;
-            c.to_uppercase().collect()
+/// What a command does, in a sentence.
+pub fn describe(cmd: Cmd) -> String {
+    use Cmd::*;
+    let fixed = match cmd {
+        New => "Opens a new, untitled document.",
+        Open => "Opens an existing document.",
+        Close => "Closes the active window.",
+        Save => "Saves the active document.",
+        SaveAs => "Saves the active document under a new name or in another format.",
+        Print => "Prints the active document.",
+        Quit => "Quits Quill.",
+        Undo => "Reverses the last action.",
+        Cut => "Removes the selection and puts it on the Clipboard.",
+        Copy => "Copies the selection to the Clipboard.",
+        Paste => "Inserts the Clipboard contents at the insertion point.",
+        PasteText => "Pastes plain text using the insertion point's formatting.",
+        PasteSpecial => "Pastes the Clipboard as formatted text, plain text or a picture.",
+        Bold => "Makes the selection bold (toggle).",
+        Italic => "Makes the selection italic (toggle).",
+        Underline => "Underlines the selection (toggle).",
+        PageBreak => "Inserts a page break at the insertion point.",
+        SectionBreak => "Inserts a section break at the insertion point.",
+        Spelling => "Checks the spelling of the document or selection.",
+        TrackChanges => {
+            "Marks insertions, deletions and format changes as tracked changes (toggle)."
         }
-        Key::Named(n) => match n {
-            N::Enter => "↩".into(),
-            N::Tab => "⇥".into(),
-            N::Space => "Space".into(),
-            N::Backspace => "⌫".into(),
-            N::Delete => "⌦".into(),
-            N::ArrowLeft => "←".into(),
-            N::ArrowRight => "→".into(),
-            N::ArrowUp => "↑".into(),
-            N::ArrowDown => "↓".into(),
-            N::Home => "Home".into(),
-            N::End => "End".into(),
-            N::PageUp => "Page Up".into(),
-            N::PageDown => "Page Down".into(),
-            N::Shift | N::Control | N::Alt | N::Super | N::Meta => return None,
-            other => {
-                let d = format!("{other:?}");
-                if d.starts_with('F') && d[1..].chars().all(|c| c.is_ascii_digit()) {
-                    d
-                } else {
-                    return None;
-                }
-            }
-        },
-        _ => return None,
+        ReviewChanges => "Steps through the tracked changes to accept or reject each one.",
+        ReplyToAnnotation => "Adds a reply to the annotation at the insertion point.",
+        ResolveAnnotation => {
+            "Marks the annotation at the insertion point resolved, or open again (toggle)."
+        }
+        DeleteAnnotation => "Deletes the annotation at the insertion point and its replies.",
+        InsertRowAbove => "Inserts a row above the selected rows, across the whole table.",
+        InsertRowBelow => "Inserts a row below the selected rows, across the whole table.",
+        InsertColumnLeft => "Inserts a column left of the selected cells, in every row.",
+        InsertColumnRight => "Inserts a column right of the selected cells, in every row.",
+        InsertCellBefore => "Inserts a cell before the selected cells, in those rows only.",
+        InsertCellAfter => "Inserts a cell after the selected cells, in those rows only.",
+        DeleteRows => "Deletes the rows holding the selected cells.",
+        DeleteColumns => "Deletes the columns holding the selected cells.",
+        DeleteCells => "Deletes the selected cells, moving the rest of each row left.",
+        MergeCells => "Merges the selected cells into one, across and down.",
+        SplitCell => "Splits each selected cell in two.",
+        ReplaceFonts => {
+            "Chooses installed fonts for the fonts this document uses that are missing."
+        }
+        ConvertToTable => {
+            "Turns the selected tab or comma separated lines into a table, one line to a row."
+        }
+        LookUp => {
+            "Shows the system's definitions and thesaurus for the word at the insertion point."
+        }
+        ShowChanges => "Shows tracked changes marked up, or the text with them accepted (toggle).",
+        MarkdownSource => {
+            "Shows the document as Markdown text to read and edit. Switching back without editing the text gives the document back exactly."
+        }
+        MarkdownWysiwyg => {
+            "Shows the document formatted, as it will look; the Markdown text is read back into it."
+        }
+        _ => "",
     };
-    let mut out = String::new();
-    for (on, m) in [
-        (mods.cmd, "⌘"),
-        (mods.shift, "⇧"),
-        (mods.opt, "⌥"),
-        (mods.ctrl, "⌃"),
-    ] {
-        if on {
-            out.push_str(m);
-        }
+    if !fixed.is_empty() {
+        return fixed.to_string();
     }
-    out.push_str(&name);
-    Some(out)
+    let name = cmd.name();
+    match name.strip_suffix('…') {
+        Some(d) => format!("Opens the {d} dialog box."),
+        None => format!("Carries out {name}."),
+    }
 }
 
 /// A command by its name in code ("PrintMerge"), as settings keep it.
@@ -637,60 +659,9 @@ pub fn code_name(cmd: Cmd) -> String {
     format!("{cmd:?}")
 }
 
-/// Find the command bound to a key press: keys added in Tools > Commands
-/// first, then the original's own unless taken away there.
-pub fn lookup(key: &Key, physical_char: Option<char>, mods: Mods) -> Option<Cmd> {
-    let spec = key_spec(key, physical_char, mods);
-    if let Some(spec) = &spec {
-        let added = crate::settings::with(|s| {
-            s.keys_add
-                .iter()
-                .find(|(k, _)| k == spec)
-                .and_then(|(_, c)| by_name(c))
-        });
-        if added.is_some() {
-            return added;
-        }
-    }
-    let found = default_lookup(key, physical_char, mods)?;
-    let removed = spec.is_some_and(|spec| {
-        crate::settings::with(|s| {
-            s.keys_remove
-                .iter()
-                .any(|(k, c)| *k == spec && *c == code_name(found))
-        })
-    });
-    (!removed).then_some(found)
-}
-
-/// The keys a command has now: Word's own (unless taken away) and those
-/// added in Tools > Commands.
-pub fn keys_for(cmd: Cmd) -> Vec<String> {
-    let name = code_name(cmd);
-    crate::settings::with(|s| {
-        let mut out = Vec::new();
-        let default = shortcut_label(cmd);
-        if !default.is_empty()
-            && !s
-                .keys_remove
-                .iter()
-                .any(|(k, c)| k == default && *c == name)
-        {
-            out.push(default.to_string());
-        }
-        out.extend(
-            s.keys_add
-                .iter()
-                .filter(|(_, c)| *c == name)
-                .map(|(k, _)| k.clone()),
-        );
-        out
-    })
-}
-
 /// Find the command bound to a key press. Shift is part of the binding for
 /// non-movement commands; for movement it means "extend".
-fn default_lookup(key: &Key, physical_char: Option<char>, mods: Mods) -> Option<Cmd> {
+pub fn lookup(key: &Key, physical_char: Option<char>, mods: Mods) -> Option<Cmd> {
     use Cmd::*;
     use NamedKey as N;
     let k = match key {
@@ -770,7 +741,6 @@ fn default_lookup(key: &Key, physical_char: Option<char>, mods: Mods) -> Option<
         (K::Ch('e'), true, false, false) => InsertFootnote,
         (K::Ch('e'), true, true, false) => TrackChanges,
         (K::Ch('l'), true, false, false) => Spelling,
-        (K::Ch('c'), true, true, true) => CommandsDialog,
         (K::Ch('s'), true, true, true) => ViewFootnotes,
         (K::Ch('a'), true, false, true) => FindAgain,
         (K::Ch('z'), true, false, true) => GoBack,
@@ -876,9 +846,9 @@ fn pc_key(spec: &str) -> String {
 /// Tooltip text for a toolbar or ruler control: its name and, if
 /// the command has one, its first shortcut, as "Bold (Ctrl+B)".
 pub fn tip(name: &str, cmd: Option<Cmd>) -> String {
-    let key = cmd.and_then(|c| keys_for(c).into_iter().next());
+    let key = cmd.map(shortcut_label).filter(|k| !k.is_empty());
     match key {
-        Some(k) => format!("{name} ({})", display_key(&k)),
+        Some(k) => format!("{name} ({})", display_key(k)),
         None => name.to_string(),
     }
 }

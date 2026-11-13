@@ -107,7 +107,6 @@ pub enum Which {
         quill_core::merge::AskRequest,
     ),
     MergeHelper(Vec<String>),
-    Commands(crate::commands_dialog::CommandsState),
     Customize(crate::customize::CustomizeState),
     Hyphenation(crate::lang_dialogs::HyphState),
     Thesaurus(crate::lang_dialogs::ThesState),
@@ -148,13 +147,10 @@ pub fn use_as_default(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> 
 }
 
 /// Draw a dialog's custom items.
-pub fn draw_custom(which: &Which, id: &str, r: Rect, c: &mut Canvas, label: &mut Label) {
+pub fn draw_custom(which: &Which, id: &str, r: Rect, c: &mut Canvas, _label: &mut Label) {
     if id == "alert_icon" {
         draw_note_icon(r, c);
         return;
-    }
-    if let Which::Commands(st) = which {
-        crate::commands_dialog::draw(st, id, r, c, label);
     }
     if let Which::Palette(st) = which {
         crate::palette::draw(st, id, r, c);
@@ -879,7 +875,6 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
         | Which::Spelling(_)
         | Which::PrintMerge
         | Which::PrintMergeAsk(..)
-        | Which::Commands(_)
         | Which::Customize(_)
         | Which::FontSources(_)
         | Which::MergeHelper(_)

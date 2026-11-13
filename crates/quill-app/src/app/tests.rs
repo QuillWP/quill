@@ -2206,3 +2206,41 @@ fn horizontal_scrollbar_click_drag_and_release_pan_the_document() {
     state.mouse_up(bar.right() - BAR - 8.0, bar.y + 8.0, &mut clip);
     assert!(state.horizontal_press.is_none());
 }
+
+#[test]
+fn a_styles_character_dialog_picks_colors_from_the_palette() {
+    let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+    let (d, st) = crate::style_dialog::editor(&state.view, Some(state.view.current_pap().style));
+    state.dialogs.push((Which::Style(st), d));
+    let mut clip = Clipboard::new();
+    state.dialog_outcome(Outcome::Button("character"), &mut clip);
+    assert!(matches!(
+        state.dialogs.last().unwrap().0,
+        Which::StyleCharacter(_)
+    ));
+    state.dialog_outcome(Outcome::Button("color"), &mut clip);
+    assert!(
+        state.dialogs.last().unwrap().1.popout.is_some(),
+        "the palette opens beside the color box"
+    );
+}
+
+#[test]
+fn apply_in_paragraph_styles_gives_the_style_to_the_paragraph() {
+    let mut doc = Document::new();
+    let id = doc.add_style(
+        "Loud",
+        0,
+        None,
+        doc.styles.get(0).pap.clone(),
+        doc.styles.get(0).chp,
+    );
+    let mut state = WinState::new(DocView::new(doc, "Doc".into()));
+    let (mut d, st) = crate::style_dialog::list(&state.view);
+    let mut st = st;
+    crate::style_dialog::refresh_list(&mut st, &mut d, &state.view, Some(id));
+    state.dialogs.push((Which::ParagraphStyles(st), d));
+    let mut clip = Clipboard::new();
+    state.dialog_outcome(Outcome::Apply, &mut clip);
+    assert_eq!(state.view.current_pap().style, id);
+}

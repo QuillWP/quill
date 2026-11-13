@@ -22,6 +22,10 @@ pub enum Action {
     /// Text color, from the formatting toolbar's Color pop-up.
     Color(quill_core::props::Rgb),
     Style(u16),
+    /// The style pop-up's No Style: back to Normal, with no character styles.
+    NoStyle,
+    /// The style pop-up's Clear Formatting: the paragraphs go back to plain Normal.
+    ClearFormatting,
     CharacterStyle(u16),
     /// Open a header or footer in the pane.
     Pane(quill_core::StoryId),
@@ -192,12 +196,10 @@ fn font_item(
     item
 }
 
-/// The menu bar's menus and the action for each item id, with Tools >
-/// Commands' changes.
+/// The menu bar's menus and the action for each item id.
 pub fn build(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
     let (mut menus, actions) = build_menus(cx);
-    let mut b = Builder { actions };
-    customize(&mut menus, &mut b);
+    let b = Builder { actions };
     if cx.view.in_markdown_source() {
         for menu in &mut menus {
             disable_formatting(&mut menu.items, &b.actions);
@@ -231,6 +233,8 @@ impl Action {
             | Action::Size(_)
             | Action::Color(_)
             | Action::Style(_)
+            | Action::NoStyle
+            | Action::ClearFormatting
             | Action::CharacterStyle(_)
             | Action::CellAlign(_) => true,
             _ => false,
@@ -434,6 +438,8 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
                 .checked(cx.show_formatting_toolbar),
             b.item("Paragraph Toolbar", Action::ToggleParagraphToolbar)
                 .checked(cx.show_paragraph_toolbar),
+            b.item("Stylesheets Palette", Action::ToggleStylesPalette)
+                .checked(crate::settings::with(|s| s.show_styles_palette)),
             b.item("Highlight Missing Fonts", Action::ToggleMissingFonts)
                 .checked(crate::settings::with(|s| s.highlight_missing_fonts)),
             b.item("Ruler", Action::ToggleRuler)
@@ -519,6 +525,7 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Paragraph Styles…", Cmd::StyleDialog),
             b.cmd("Character Styles…", Cmd::CharacterStylesDialog),
             b.cmd("Revert To Style", Cmd::RevertToStyle),
+            b.cmd("Clear Formatting", Cmd::ClearFormatting),
             sep(),
             b.cmd("Change Case…", Cmd::ChangeCase).enabled(has_sel),
             b.cmd("Plain Text", Cmd::PlainText).checked(plain),
@@ -582,17 +589,12 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Sort", Cmd::Sort).enabled(has_sel),
             b.cmd("Calculate", Cmd::Calculate).enabled(has_sel),
             sep(),
-            b.cmd("Commands…", Cmd::CommandsDialog).key("⌘⇧⌥C"),
         ],
     };
 
     let mut window_items = vec![
         b.cmd("Show Clipboard", Cmd::ShowClipboard),
         b.cmd("New Window", Cmd::NewWindow),
-        // A palette is a window of its own (or docks into one), so it is
-        // shown and hidden here rather than in View.
-        b.item("Style Sheets", Action::ToggleStylesPalette)
-            .checked(crate::settings::with(|s| s.show_styles_palette)),
         sep(),
     ];
     for (i, (title, current)) in cx.windows.iter().enumerate() {
@@ -788,81 +790,6 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
     (menu, b.actions)
 }
 
-/// Tools > Commands' changes: items taken out of menus, and commands added
-/// at the end of a menu.
-fn customize(menus: &mut [Menu], b: &mut Builder) {
-    use crate::commands::{by_name, code_name};
-    let (add, remove) = crate::settings::with(|s| (s.menu_add.clone(), s.menu_remove.clone()));
-    if add.is_empty() && remove.is_empty() {
-        return;
-    }
-    for m in menus.iter_mut() {
-        let title = m.title.clone();
-        m.items.retain(|it| match b.actions.get(it.id as usize) {
-            Some(Action::Cmd(c)) if !it.separator => !remove
-                .iter()
-                .any(|(t, n)| *t == title && *n == code_name(*c)),
-            _ => true,
-        });
-        let extra: Vec<Cmd> = add
-            .iter()
-            .filter(|(t, _)| *t == title)
-            .filter_map(|(_, n)| by_name(n))
-            .collect();
-        if !extra.is_empty() {
-            m.items.push(Item::separator());
-            for c in extra {
-                let item = b.cmd(c.name(), c);
-                m.items.push(item);
-            }
-        }
-    }
-}
-
-/// The menu titles Tools > Commands can add to.
-pub const MENU_TITLES: [&str; 8] = [
-    "File", "Edit", "View", "Insert", "Format", "Font", "Tools", "Window",
-];
-
-/// Which menu holds a command in the original's own arrangement, before any
-/// changes in Tools > Commands.
-pub fn default_menu(cmd: Cmd) -> Option<String> {
-    thread_local! {
-        static MAP: std::cell::RefCell<Option<Vec<(Cmd, String)>>> =
-            const { std::cell::RefCell::new(None) };
-    }
-    MAP.with(|m| {
-        let mut m = m.borrow_mut();
-        let map = m.get_or_insert_with(|| {
-            let view = DocView::new(quill_core::Document::new(), String::new());
-            let cx = MenuContext {
-                view: &view,
-                font_families: &[],
-                show_formatting_toolbar: true,
-                show_paragraph_toolbar: true,
-                show_ruler: true,
-                full_screen: false,
-                recent: &[],
-                windows: &[],
-            };
-            let (menus, actions) = build_menus(&cx);
-            let mut out = Vec::new();
-            for menu in &menus {
-                for it in &menu.items {
-                    if let Some(Action::Cmd(c)) = actions.get(it.id as usize)
-                        && !it.separator
-                        && MENU_TITLES.contains(&menu.title.as_str())
-                    {
-                        out.push((*c, menu.title.clone()));
-                    }
-                }
-            }
-            out
-        });
-        map.iter().find(|(c, _)| *c == cmd).map(|(_, t)| t.clone())
-    })
-}
-
 /// The formatting toolbar's font popup: every font, current one checked.
 pub fn font_popup(cx: &MenuContext) -> (Menu, Vec<Action>) {
     let mut b = Builder {
@@ -994,16 +921,19 @@ pub fn style_popup(cx: &MenuContext) -> (Menu, Vec<Action>) {
             .filter(|(_, s)| !s.builtin || s.name.starts_with("heading "))
             .map(|(i, _)| i as u16),
     );
-    used.push(0);
-    used.sort();
+    // No Style first, Normal next, then the rest by name.
+    used.retain(|&id| id != 0);
+    used.sort_by_key(|&id| doc.styles.get(id).display_name().to_lowercase());
     used.dedup();
-    let items = used
-        .iter()
-        .map(|&id| {
-            b.item(doc.styles.get(id).display_name(), Action::Style(id))
-                .checked(id == current)
-        })
-        .collect();
+    used.insert(0, 0);
+    let mut items = vec![
+        b.item("No Style", Action::NoStyle),
+        b.item("Clear Formatting", Action::ClearFormatting),
+    ];
+    items.extend(used.iter().map(|&id| {
+        b.item(doc.styles.get(id).display_name(), Action::Style(id))
+            .checked(id == current)
+    }));
     (
         Menu {
             title: String::new(),
@@ -1134,6 +1064,51 @@ mod tests {
                 .iter()
                 .filter(|i| !i.separator)
                 .all(|i| !i.checkable)
+        );
+    }
+
+    #[test]
+    fn the_style_popup_lists_no_style_then_normal_then_styles_by_name() {
+        let mut doc = quill_core::Document::new();
+        for name in ["Zebra", "Apple", "Mango"] {
+            doc.add_style(
+                name,
+                0,
+                None,
+                doc.styles.get(0).pap.clone(),
+                doc.styles.get(0).chp,
+            );
+        }
+        let view = DocView::new(doc, String::new());
+        let cx = MenuContext {
+            view: &view,
+            font_families: &[],
+            show_formatting_toolbar: true,
+            show_paragraph_toolbar: true,
+            show_ruler: true,
+            full_screen: false,
+            recent: &[],
+            windows: &[],
+        };
+        let (menu, _) = style_popup(&cx);
+        let labels: Vec<&str> = menu.items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(
+            &labels[..6],
+            [
+                "No Style",
+                "Clear Formatting",
+                "Normal",
+                "Apple",
+                "Heading 1",
+                "Heading 2"
+            ]
+        );
+        let at = |n: &str| labels.iter().position(|l| *l == n).unwrap();
+        assert!(at("Mango") < at("Zebra"));
+        assert!(
+            labels[3..]
+                .windows(2)
+                .all(|w| w[0].to_lowercase() <= w[1].to_lowercase())
         );
     }
 
@@ -1503,13 +1478,9 @@ mod tests {
             Some(Action::Cmd(Cmd::CharacterStylesDialog))
         );
         assert_eq!(
-            action("Window", "Style Sheets"),
+            action("View", "Stylesheets Palette"),
             Some(Action::ToggleStylesPalette)
         );
-        assert_eq!(action("View", "Style Sheets"), None);
-        assert_eq!(
-            default_menu(Cmd::CharacterStylesDialog).as_deref(),
-            Some("Format")
-        );
+        assert_eq!(action("Window", "Stylesheets Palette"), None);
     }
 }

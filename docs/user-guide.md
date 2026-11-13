@@ -274,14 +274,29 @@ the table keeps its borders, and Format > Border changes them. Gridlines are a s
 guide for cells with no border, as in tables from other programs, and have their own
 `table_gridline_color` and `table_gridline_dotted`.
 
-**Format > Paragraph Styles...** (Command-T) lists paragraph styles: **This Document**
+**Format > Paragraph Styles...** (Command-T) lists paragraph styles, laid out like
+**Format > Character Styles**: **This Document**
 shows Normal, the styles the document uses and the styles it defines; **All Styles** adds
 the automatic ones. Under the list are the chosen style's description and how many
-paragraphs use it. **New...** opens the style editor on a new style made from the
+paragraphs use it. **+** opens the style editor on a new style made from the
 selection's formatting, and **Edit...** (or a double-click) opens it on the chosen style.
-**Delete** removes a style the document defines (Normal and the automatic styles stay). When
+**-** removes a style the document defines (Normal and the automatic styles stay). When
 paragraphs use it, Quill asks what they become: **No Style (Normal)** or another style
-chosen from the menu. Deleting can be undone.
+chosen from the menu. Deleting can be undone. **Duplicate** makes a copy named "... copy".
+**Apply** gives the style to the selected paragraphs and **Remove Style** puts them back
+to Normal. **Update to Selection** redefines the chosen style from the selection's
+paragraph and character formatting. Each of these can be undone.
+
+**Format > Clear Formatting** puts the selected paragraphs (or the paragraph at the
+caret) back to Normal with nothing set by hand: paragraph formatting, character formatting
+and character styles are all removed, and the text, pictures and a table cell's place stay.
+It is one step to undo. It has no key. The same
+command is the second choice in the formatting toolbar's style list (under **No Style**), a row
+in the Style Sheets palette, and a button in the Paragraph Styles list. **No Style** differs:
+it keeps what was set by hand. The **Clear Formatting** button in the Character Styles list, and
+the matching palette row on the Character tab, clear only the selected text (its character
+styles and hand formatting) and leave the paragraph alone; with just a caret, the next text
+typed is plain.
 
 In the style editor, **Paragraph...** edits the style's indents, spacing and pagination,
 and **Character...** its manual font, size, color and character formatting. Each of those
@@ -292,7 +307,7 @@ editor open. None of these writes the document file: use **Save**. Cancel discar
 not yet saved. Page margins are document settings in **Format > Document Setup...**.
 **Use As Default** remains unavailable.
 
-**Window > Style Sheets** shows the Style Sheets palette: one list of the document's
+**View > Stylesheets Palette** shows the Style Sheets palette: one list of the document's
 paragraph styles (marked with a paragraph sign) and character styles (marked with an A),
 with **All**, **Paragraph** and **Character** tabs (shortened to Para and Char in a narrow
 palette) that choose what the list shows. Clicking a style applies it to the selected

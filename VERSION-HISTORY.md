@@ -7,52 +7,32 @@ Add an entry for every new tag as part of the release process.
 
 Versions 0.1.0 to 0.14.0 were all tagged on 2026-11-05.
 
-## 0.18.0 - 2026-11-11
+## 0.19.0 - 2026-11-12
 
-A security and robustness pass: hard limits on hostile files, faster readers,
-writers that stop at the size limits, large files split up, and questions
-before risky saves.
+Paragraph Styles matches Character Styles, Clear Formatting arrives, and Tools
+> Commands is taken out.
 
-- Invalid headers nested inside native stories are dropped. Go To page
-  arithmetic saturates, and dialog values, Renumber starts and roman numerals
-  stay within the document limits.
-- Picture metadata, format numbers and .docx list number text are bounded,
-  with checked arithmetic.
-- The .odt reader charges every paragraph to the read budget, so a small file
-  of millions of empty paragraphs, or a text:s element that makes a billion
-  spaces, is refused with the usual too-large message in about 0.2 s. Unique
-  pictures are counted as .docx and .odt readers decode them.
-- The .qwp, .docx and .odt writers and the Markdown table writer stop building
-  a document once it passes the size limits. Oversized Markdown stays in
-  Source view.
-- Unclosed Markdown links and angle brackets no longer rescan the paragraph:
-  seven 80,000-opener files that took up to 8.8 s each now open in about 0.1
-  s. HTML raw-text endings are scanned without copying.
-- DOCX table style XML is shared across cells, repeated XML and header parts
-  are cached, and converted .docx and .odt pictures are reused.
-- Saving over a file that changed on disk asks Replace File or Cancel.
-- Save As says so when it changes an unknown extension to .qwp, and lets you
-  cancel.
-- Replacing all settings from a file asks first, defaulting to not replacing.
-  Print Merge asks before reading files outside the document's own.
-- Recovery files are marked while they are opened, license text is written
-  inside a private folder, Windows links open through ShellExecuteW, and the
-  active modal print panel is identified.
-- Command-Shift-Z is Redo, and Edit > Redo names the change. Repeat
-  (Command-Y) only repeats. Plain Text has no default key.
-- On the Mac the window's close button shows a dot while the document has
-  unsaved changes.
-- Tests move out of app.rs, docview.rs, the formats lib.rs and the core
-  document.rs into files of their own. Message boxes, tooltips, font loading,
-  menu tracking, printing, effects, and key, text and mouse handling move out
-  of app.rs into their own modules, and the atomic write code into atomic.rs.
-- Unused code is deleted, six-digit colors are read in one place, and the HTML
-  reader looks entity names up in a small table of the 252 HTML 4 references
-  instead of a 133 KB function. The format bodies are no longer generic.
-  Packaged binaries no longer carry the builder's folder names, and the About
-  picture is not copied into the Mac app's Resources twice.
-- KNOWN-ISSUES, CONTRIBUTING and SECURITY are added, and stale documentation
-  is fixed.
+- Paragraph Styles uses the Character Styles layout: +, -, Edit and Duplicate
+  under the list, Apply, Remove Style and Update to Selection on the right,
+  and the This Document or All Styles choice kept. Update to Selection
+  redefines the style from the selection.
+- Apply works (it did nothing at first), the question before replacing all
+  settings from a file is back, and the formatting toolbar's style list is No
+  Style, Clear Formatting, Normal, then every other style by name.
+  Character... in a style editor uses the same color palette as Format >
+  Character.
+- Format > Clear Formatting (below Revert To Style) puts the selected
+  paragraphs back to Normal with no manual paragraph or character formatting
+  and no character styles, as one undo step. Text, pictures and a table cell's
+  place are kept.
+- It is also a row in the toolbar's style list and in the Style Sheets
+  palette, and a button in both style lists. In Character Styles it clears
+  only the selected text, or makes the next text typed plain when there is
+  just a caret.
+- Style import is deferred until after version 1.0. The Import buttons and
+  everything behind them are removed from both style lists.
+- Tools > Commands is removed. A key changed there was saved and listed but
+  did nothing, because the key handling never read the changes.
 
 ## 0.15.0 - 2026-11-08
 

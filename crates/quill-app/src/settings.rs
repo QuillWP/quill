@@ -314,11 +314,6 @@ pub struct Settings {
     pub markdown_source_size: u16,
     pub markdown_display_font: String,
     pub markdown_display_size: u16,
-    // Commands: (menu or key, command name) added to or taken from the original's.
-    pub menu_add: Vec<(String, String)>,
-    pub menu_remove: Vec<(String, String)>,
-    pub keys_add: Vec<(String, String)>,
-    pub keys_remove: Vec<(String, String)>,
 }
 
 /// A color written as six hex digits, "#DDDDDD" or "DDDDDD", as 0xRRGGBB.
@@ -366,21 +361,6 @@ fn unescape_path(v: &str) -> PathBuf {
     )
 }
 
-/// Pairs as "a|b;c|d".
-fn pairs_text(v: &[(String, String)]) -> String {
-    v.iter()
-        .map(|(a, b)| format!("{a}|{b}"))
-        .collect::<Vec<_>>()
-        .join(";")
-}
-
-fn pairs_parse(v: &str) -> Vec<(String, String)> {
-    v.split(';')
-        .filter_map(|p| p.split_once('|'))
-        .map(|(a, b)| (a.to_string(), b.to_string()))
-        .collect()
-}
-
 impl Default for Settings {
     /// The original's own defaults.
     fn default() -> Self {
@@ -415,10 +395,6 @@ impl Default for Settings {
             markdown_source_size: 20,
             markdown_display_font: "New York".into(),
             markdown_display_size: 24,
-            menu_add: Vec::new(),
-            menu_remove: Vec::new(),
-            keys_add: Vec::new(),
-            keys_remove: Vec::new(),
             smart_quotes: true,
             auto_links: true,
             auto_lists: true,
@@ -741,16 +717,6 @@ impl Settings {
 
         section(
             &mut out,
-            "Commands",
-            Some("Menu and key changes from Tools > Commands"),
-        );
-        put(&mut out, "menu_add", pairs_text(&self.menu_add));
-        put(&mut out, "menu_remove", pairs_text(&self.menu_remove));
-        put(&mut out, "keys_add", pairs_text(&self.keys_add));
-        put(&mut out, "keys_remove", pairs_text(&self.keys_remove));
-
-        section(
-            &mut out,
             "Document Defaults",
             Some("Saved by Use As Default; lengths in twips, 1440 to the inch"),
         );
@@ -965,10 +931,6 @@ impl Settings {
                         s.named_colors.push((color, name.to_string()));
                     }
                 }
-                "menu_add" => s.menu_add = pairs_parse(v),
-                "menu_remove" => s.menu_remove = pairs_parse(v),
-                "keys_add" => s.keys_add = pairs_parse(v),
-                "keys_remove" => s.keys_remove = pairs_parse(v),
                 "initials" => s.initials = v.into(),
                 "unit" => {
                     s.unit = Unit::ALL
@@ -1478,13 +1440,7 @@ mod tests {
                 assert_eq!(lines[i - 1], "", "no blank line before {line}");
             }
         }
-        for title in [
-            "View",
-            "Interface",
-            "Toolbar",
-            "Commands",
-            "Document Defaults",
-        ] {
+        for title in ["View", "Interface", "Toolbar", "Document Defaults"] {
             assert!(
                 text.contains(&format!("\n\n# {title}\n")),
                 "{title} missing"

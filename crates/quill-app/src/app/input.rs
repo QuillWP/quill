@@ -62,23 +62,6 @@ impl App {
             w.window.request_redraw();
             return;
         }
-        // Tools > Commands' Keys > Add…: this key press is the new key.
-        if let Some((Which::Commands(st), d)) = w.st.dialogs.last_mut()
-            && st.capturing
-        {
-            let code = match event.physical_key {
-                PhysicalKey::Code(c) => Some(c),
-                PhysicalKey::Unidentified(_) => None,
-            };
-            let mods = Mods::from_winit(w.mods);
-            if let Some(spec) =
-                command_map::key_spec(&event.logical_key, code.and_then(keycode_char), mods)
-            {
-                crate::commands_dialog::captured(st, d, spec);
-                w.window.request_redraw();
-                return;
-            }
-        }
         if w.st.dialog_has_keys() {
             let mods = Mods::from_winit(w.mods);
             let key = match &event.logical_key {

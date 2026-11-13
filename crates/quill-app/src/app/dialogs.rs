@@ -252,10 +252,6 @@ impl WinState {
             // Opened above.
             DialogId::Spelling | DialogId::Hyphenation | DialogId::Thesaurus => return,
             DialogId::PrintMerge => (crate::merge_dialogs::print_merge(), Which::PrintMerge),
-            DialogId::Commands => {
-                let (d, st) = crate::commands_dialog::dialog(None);
-                (d, Which::Commands(st))
-            }
             DialogId::MergeHelper => match crate::merge_dialogs::helper(&self.view) {
                 Ok((d, fields)) => (d, Which::MergeHelper(fields)),
                 Err(m) => {
@@ -408,7 +404,9 @@ impl WinState {
     fn delete_color(&mut self, old: quill_core::props::Rgb, new: quill_core::props::Rgb) {
         self.view.replace_color(old, new);
         crate::palette::drop_edits_of(old);
-        let Some((Which::Character(base), d)) = self.dialogs.last_mut() else {
+        let Some((Which::Character(base) | Which::StyleCharacter(base), d)) =
+            self.dialogs.last_mut()
+        else {
             return;
         };
         if base.color == old {
@@ -558,6 +556,15 @@ impl WinState {
         let Some((which, d)) = self.dialogs.last_mut() else {
             return false;
         };
+        // The color box and its palette work as they do in Format > Character.
+        if matches!(which, Which::StyleCharacter(_))
+            && matches!(
+                o,
+                Outcome::Button("color" | "edit" | "delete_color") | Outcome::Swatch { .. }
+            )
+        {
+            return false;
+        }
         match which {
             Which::StyleCharacter(base) => match o {
                 Outcome::Ok => {
@@ -573,6 +580,7 @@ impl WinState {
                         return true;
                     };
                     self.dialogs.pop();
+                    self.color_pop = None;
                     crate::palette::drop_edits();
                     if let Some((Which::Style(st), parent)) = self.dialogs.last_mut() {
                         st.chp = chp;
@@ -599,6 +607,7 @@ impl WinState {
                 }
                 Outcome::Cancel => {
                     crate::palette::drop_edits();
+                    self.color_pop = None;
                     self.dialogs.pop();
                 }
                 _ => {}
@@ -960,47 +969,6 @@ impl WinState {
                 };
                 if close {
                     self.dialogs.pop();
-                }
-            }
-            Which::Commands(st) => {
-                use crate::commands_dialog::{self as cd, Action};
-                let action = match o {
-                    Outcome::Cancel => Action::Close,
-                    Outcome::Clicked(id, x, y, _) => {
-                        cd::clicked(st, d, id, *x, *y);
-                        Action::None
-                    }
-                    Outcome::Changed(id) => {
-                        cd::changed(st, d, id);
-                        Action::None
-                    }
-                    Outcome::Button(id) => cd::button(st, d, id),
-                    _ => Action::None,
-                };
-                match action {
-                    Action::None => {}
-                    Action::Close => {
-                        self.dialogs.pop();
-                    }
-                    Action::DoIt(cmd) => {
-                        self.dialogs.pop();
-                        self.pending_cmd = Some(cmd);
-                    }
-                    Action::OpenSettings => self.pending_settings = Some(true),
-                    Action::SaveSettings => self.pending_settings = Some(false),
-                    Action::List => {
-                        self.pending_window = Some((cd::list_document(), "Commands".into()));
-                    }
-                    Action::Reset => {
-                        cd::reset();
-                        if let Some((Which::Commands(st), d)) = self.dialogs.last_mut() {
-                            cd::refresh(st, d, None);
-                        }
-                        self.alert(
-                            "The menus, keys and toolbar are back to their defaults.",
-                            format_dialogs::Alert::Info,
-                        );
-                    }
                 }
             }
             Which::PrintMerge => match o {
@@ -1378,6 +1346,11 @@ impl WinState {
                     crate::style_dialog::apply(st, d, &mut self.view);
                 }
             }
+            Outcome::Apply if matches!(which, Which::ParagraphStyles(_)) => {
+                if let Which::ParagraphStyles(st) = which {
+                    crate::style_dialog::list_button(st, d, &mut self.view, "apply");
+                }
+            }
             Outcome::Apply if matches!(which, Which::CharacterStyles) => {
                 crate::character_style_dialog::button(d, &mut self.view, "apply");
             }
@@ -1397,7 +1370,9 @@ impl WinState {
                 // The editor's Apply may have saved a style before Cancel.
                 self.refresh_style_list(None);
             }
-            Outcome::Button("color") if matches!(which, Which::Character(_)) => {
+            Outcome::Button("color")
+                if matches!(which, Which::Character(_) | Which::StyleCharacter(_)) =>
+            {
                 self.toggle_color_popout("color");
             }
             Outcome::Button(id)
@@ -1414,16 +1389,24 @@ impl WinState {
                 self.color_pop = None;
             }
             Outcome::Swatch { id, double }
-                if matches!(which, Which::Character(_) | Which::Preferences { .. }) =>
+                if matches!(
+                    which,
+                    Which::Character(_) | Which::StyleCharacter(_) | Which::Preferences { .. }
+                ) =>
             {
                 self.color_popout_box(id, double);
             }
             Outcome::Button("edit")
-                if matches!(which, Which::Character(_) | Which::Preferences { .. }) =>
+                if matches!(
+                    which,
+                    Which::Character(_) | Which::StyleCharacter(_) | Which::Preferences { .. }
+                ) =>
             {
                 self.color_popout_edit();
             }
-            Outcome::Button("delete_color") if matches!(which, Which::Character(_)) => {
+            Outcome::Button("delete_color")
+                if matches!(which, Which::Character(_) | Which::StyleCharacter(_)) =>
+            {
                 self.color_popout_delete();
             }
             Outcome::Changed("color")
@@ -1512,39 +1495,14 @@ impl WinState {
                     );
                     self.dialogs.push((Which::CharacterStyleEdit(edit), editor));
                 }
-                Which::CharacterStyles if id == "import" => {
-                    let Some(path) = rfd::FileDialog::new()
-                        .set_title("Import Character Styles")
-                        .add_filter("Documents", quill_formats::READABLE)
-                        .pick_file()
-                    else {
-                        return;
-                    };
-                    let status = match quill_formats::load(&path) {
-                        Ok(source) => {
-                            let (added, skipped) =
-                                crate::character_style_dialog::import(d, &mut self.view, &source);
-                            match (added, skipped) {
-                                (0, 0) => "That document has no character styles.".to_string(),
-                                (added, 0) => format!("Imported {added} character styles."),
-                                (added, skipped) => format!(
-                                    "Imported {added}; left out {skipped} whose names this document already uses."
-                                ),
-                            }
-                        }
-                        Err(why) => format!("Quill could not open that document: {why}"),
-                    };
-                    if let Some((Which::CharacterStyles, d)) = self.dialogs.last_mut() {
-                        d.set_label("status", &status);
-                    }
-                }
                 Which::CharacterStyles => {
                     crate::character_style_dialog::button(d, &mut self.view, id)
                 }
                 Which::Style(st) if id == "character" => {
                     let pending = crate::style_dialog::character_view(st);
-                    let (mut editor, _) =
-                        format_dialogs::character_for_find(&pending, &self.font_families);
+                    // The same Character dialog as Format > Character, so its
+                    // color uses the palette.
+                    let (mut editor, _) = format_dialogs::character(&pending, &self.font_families);
                     editor.title = format!("Character: {}", d.field_text("name"));
                     editor.items.retain(|item| item.id != "apply");
                     let base = st.chp;
@@ -1566,6 +1524,11 @@ impl WinState {
                     }
                     let style = if id == "edit" { style } else { None };
                     self.open_style_editor(style);
+                }
+                Which::ParagraphStyles(st)
+                    if matches!(id, "apply" | "remove" | "update" | "duplicate" | "clear") =>
+                {
+                    crate::style_dialog::list_button(st, d, &mut self.view, id);
                 }
                 Which::ParagraphStyles(st) if id == "delete" => {
                     if let Some(style) = crate::style_dialog::list_selected(st, d) {

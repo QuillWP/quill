@@ -90,17 +90,9 @@ impl App {
         let Some(native) = w.dialog.as_ref() else {
             return;
         };
-        let Some((which, dialog)) = w.st.dialogs.last_mut() else {
+        let Some((_, dialog)) = w.st.dialogs.last_mut() else {
             return;
         };
-        if matches!(id, "list" | "keys")
-            && let Some((row, _, _)) = choice
-            && let Which::Commands(state) = which
-        {
-            crate::commands_dialog::select_native(state, dialog, id, row);
-            w.window.request_redraw();
-            return;
-        }
         // A row chosen in a list, or a double-click on one.
         if let Some((row, double, _)) = choice
             && let Some(item) = dialog.items.iter().find(|item| item.id == id)
@@ -146,38 +138,6 @@ impl App {
                     w.window.request_redraw();
                 }
             }
-        }
-    }
-
-    pub(super) fn native_shortcut(&mut self, panel: usize, spec: String) {
-        let Some((_, w)) = self.windows.iter_mut().find(|(_, w)| {
-            w.dialog
-                .as_ref()
-                .is_some_and(|dialog| dialog.panel_id() == panel)
-        }) else {
-            return;
-        };
-        if let Some((Which::Commands(state), dialog)) = w.st.dialogs.last_mut()
-            && state.capturing
-        {
-            crate::commands_dialog::captured(state, dialog, spec);
-            w.window.request_redraw();
-        }
-    }
-
-    pub(super) fn native_shortcut_cancel(&mut self, panel: usize) {
-        let Some((_, w)) = self.windows.iter_mut().find(|(_, w)| {
-            w.dialog
-                .as_ref()
-                .is_some_and(|dialog| dialog.panel_id() == panel)
-        }) else {
-            return;
-        };
-        if let Some((Which::Commands(state), dialog)) = w.st.dialogs.last_mut()
-            && state.capturing
-        {
-            crate::commands_dialog::cancel_capture(state, dialog);
-            w.window.request_redraw();
         }
     }
 }

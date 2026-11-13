@@ -509,7 +509,6 @@ impl DocView {
             ReplaceFonts => return Effect::ReplaceFonts,
             RemoveHyperlink => self.remove_links(),
             Spelling => return Effect::Dialog(DialogId::Spelling),
-            CommandsDialog => return Effect::Dialog(DialogId::Commands),
             PrintMerge => return Effect::Dialog(DialogId::PrintMerge),
             PrintMergeHelper => {
                 return if quill_core::merge::data_instruction(&self.doc).is_some() {
@@ -1205,6 +1204,10 @@ impl DocView {
                 let sel = self.sel;
                 self.finish_edit(sel);
             }
+            ClearFormatting => {
+                self.clear_formatting();
+                return true;
+            }
             RevertToStyle => {
                 let (s, e) = self.sel.range();
                 if s == e {
@@ -1213,24 +1216,7 @@ impl DocView {
                     return true;
                 }
                 self.doc.begin(F, self.sel);
-                for para in s.para..=e.para {
-                    let style = self.doc.styles.get(self.doc.main.paras[para].pap.style).chp;
-                    let ps = if para == s.para {
-                        s
-                    } else {
-                        Position::new(para, 0)
-                    };
-                    let pe = if para == e.para {
-                        e
-                    } else {
-                        Position::new(para, self.doc.main.paras[para].len())
-                    };
-                    self.doc.format_chars(MAIN, ps, pe, |c| {
-                        let object = c.object;
-                        *c = style;
-                        c.object = object;
-                    });
-                }
+                self.revert_chars_to_style(s, e);
                 let sel = self.sel;
                 self.finish_edit(sel);
             }
@@ -1303,6 +1289,62 @@ impl DocView {
         let end = Position::new(last, self.doc.main.paras[last].len());
         self.doc
             .apply_character_style(MAIN, Position::new(first, 0), end, 0);
+        self.typing_chp = None;
+        let sel = self.sel;
+        self.finish_edit(sel);
+    }
+
+    /// Drop hand formatting from the text between `s` and `e`, so it looks
+    /// like the style of each paragraph it is in. Inside the caller's step.
+    fn revert_chars_to_style(&mut self, s: Position, e: Position) {
+        for para in s.para..=e.para {
+            let style = self.doc.styles.get(self.doc.main.paras[para].pap.style).chp;
+            let ps = if para == s.para {
+                s
+            } else {
+                Position::new(para, 0)
+            };
+            let pe = if para == e.para {
+                e
+            } else {
+                Position::new(para, self.doc.main.paras[para].len())
+            };
+            self.doc.format_chars(MAIN, ps, pe, |c| {
+                let object = c.object;
+                *c = style;
+                c.object = object;
+            });
+        }
+    }
+
+    /// Clear Formatting in the Character Styles list: the selected text
+    /// loses its character styles and hand formatting, and its paragraphs
+    /// stay as they are. With only a caret, the next text typed is plain.
+    pub fn clear_character_formatting(&mut self) {
+        let (s, e) = self.sel.range();
+        if s == e {
+            let style = self.doc.main.paras[s.para].pap.style;
+            self.typing_chp = Some(self.doc.styles.get(style).chp);
+            return;
+        }
+        self.doc.begin("Clear Formatting", self.sel);
+        self.doc.apply_character_style(MAIN, s, e, 0);
+        self.revert_chars_to_style(s, e);
+        let sel = self.sel;
+        self.finish_edit(sel);
+    }
+
+    /// Clear Formatting: the selected paragraphs go back to Normal with
+    /// nothing set by hand and no character styles, as one undoable step.
+    /// Where they sit (in a table, say) and what they hold stays.
+    pub fn clear_formatting(&mut self) {
+        let (first, last) = self.selected_paras();
+        self.doc.begin("Clear Formatting", self.sel);
+        let end = Position::new(last, self.doc.main.paras[last].len());
+        self.doc
+            .apply_character_style(MAIN, Position::new(first, 0), end, 0);
+        self.doc.apply_style(MAIN, first, last, 0);
+        self.doc.revert_to_style(MAIN, first, last);
         self.typing_chp = None;
         let sel = self.sel;
         self.finish_edit(sel);

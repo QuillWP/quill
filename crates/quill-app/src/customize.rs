@@ -102,9 +102,7 @@ fn refresh(st: &CustomizeState, d: &mut Dialog) {
         "change",
         chosen.is_some() && (pic != st.picture || cmd != chosen),
     );
-    let description = chosen
-        .map(crate::commands_dialog::describe)
-        .unwrap_or_default();
+    let description = chosen.map(crate::commands::describe).unwrap_or_default();
     let mut lines = vec![String::new()];
     for word in description.split_whitespace() {
         let should_wrap = lines

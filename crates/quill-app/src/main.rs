@@ -16,7 +16,6 @@ mod chrome;
 mod clock;
 mod color_glyph;
 mod commands;
-mod commands_dialog;
 mod contents_dialogs;
 mod crash_log;
 mod customize;

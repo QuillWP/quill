@@ -67,8 +67,12 @@ pub enum Entry {
     /// The paragraph styles' "No Style": the selection goes back to Normal
     /// and loses its character styles, so styles can be applied afresh.
     NoParagraph,
+    /// Clear Formatting for paragraphs: plain Normal, nothing set by hand.
+    ClearParagraph,
     Paragraph(StyleId),
     Character(u16),
+    /// Clear Formatting for text: no character styles, nothing set by hand.
+    ClearCharacter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,6 +144,7 @@ pub fn entries(doc: &Document, tab: Tab) -> Vec<Entry> {
         let mut ids: Vec<StyleId> = (1..doc.styles.styles.len() as StyleId).collect();
         ids.sort_by_key(|&id| doc.styles.get(id).display_name().to_lowercase());
         rows.push(Entry::NoParagraph);
+        rows.push(Entry::ClearParagraph);
         rows.push(Entry::Paragraph(0));
         rows.extend(ids.into_iter().map(Entry::Paragraph));
     }
@@ -151,6 +156,7 @@ pub fn entries(doc: &Document, tab: Tab) -> Vec<Entry> {
                 .map_or(String::new(), |s| s.name.to_lowercase())
         });
         rows.push(Entry::Character(0));
+        rows.push(Entry::ClearCharacter);
         rows.extend(ids.into_iter().map(Entry::Character));
     }
     rows
@@ -160,6 +166,7 @@ pub fn entries(doc: &Document, tab: Tab) -> Vec<Entry> {
 pub fn name(doc: &Document, e: Entry) -> String {
     match e {
         Entry::NoParagraph => "No Style".to_string(),
+        Entry::ClearParagraph | Entry::ClearCharacter => "Clear Formatting".to_string(),
         Entry::Paragraph(id) => doc.styles.get(id).display_name(),
         Entry::Character(0) => "No Style".to_string(),
         Entry::Character(id) => doc
@@ -174,7 +181,10 @@ pub fn name(doc: &Document, e: Entry) -> String {
 pub fn can_edit(e: Option<Entry>) -> bool {
     !matches!(
         e,
-        None | Some(Entry::Character(0)) | Some(Entry::NoParagraph)
+        None | Some(Entry::Character(0))
+            | Some(Entry::NoParagraph)
+            | Some(Entry::ClearParagraph)
+            | Some(Entry::ClearCharacter)
     )
 }
 
@@ -184,7 +194,7 @@ pub fn can_delete(doc: &Document, e: Option<Entry>) -> bool {
     match e {
         Some(Entry::Paragraph(id)) => id != 0 && !doc.styles.get(id).builtin,
         Some(Entry::Character(id)) => id != 0,
-        Some(Entry::NoParagraph) | None => false,
+        Some(Entry::NoParagraph | Entry::ClearParagraph | Entry::ClearCharacter) | None => false,
     }
 }
 
@@ -329,7 +339,7 @@ pub struct Current {
 
 pub fn is_current(e: Entry, cur: Current) -> bool {
     match e {
-        Entry::NoParagraph => false,
+        Entry::NoParagraph | Entry::ClearParagraph | Entry::ClearCharacter => false,
         Entry::Paragraph(id) => id == cur.paragraph,
         Entry::Character(id) => id == cur.character,
     }
@@ -476,7 +486,8 @@ pub fn draw(c: &mut Canvas, label: &mut Label, p: &Palette, b: Rect, doc: &Docum
             c.fill(r, 0xEDEDED);
         }
         let (mark, none) = match e {
-            Entry::NoParagraph => ("¶", true),
+            Entry::NoParagraph | Entry::ClearParagraph => ("¶", true),
+            Entry::ClearCharacter => ("A", true),
             Entry::Paragraph(_) => ("¶", false),
             Entry::Character(id) => ("A", *id == 0),
         };
@@ -556,20 +567,25 @@ mod tests {
         let all = entries(&doc, Tab::All);
         let paragraph = entries(&doc, Tab::Paragraph);
         let character = entries(&doc, Tab::Character);
+        assert!(paragraph.iter().all(|e| matches!(
+            e,
+            Entry::Paragraph(_) | Entry::NoParagraph | Entry::ClearParagraph
+        )));
         assert!(
-            paragraph
+            character
                 .iter()
-                .all(|e| matches!(e, Entry::Paragraph(_) | Entry::NoParagraph))
+                .all(|e| matches!(e, Entry::Character(_) | Entry::ClearCharacter))
         );
-        assert!(character.iter().all(|e| matches!(e, Entry::Character(_))));
         assert_eq!(all.len(), paragraph.len() + character.len());
         // All is the paragraph styles followed by the character styles.
         assert_eq!(all[..paragraph.len()], paragraph[..]);
         assert_eq!(all[paragraph.len()..], character[..]);
         // Normal and No Style lead their groups.
         assert_eq!(paragraph[0], Entry::NoParagraph);
-        assert_eq!(paragraph[1], Entry::Paragraph(0));
+        assert_eq!(paragraph[1], Entry::ClearParagraph);
+        assert_eq!(paragraph[2], Entry::Paragraph(0));
         assert_eq!(character[0], Entry::Character(0));
+        assert_eq!(character[1], Entry::ClearCharacter);
     }
 
     #[test]
@@ -579,7 +595,7 @@ mod tests {
             .into_iter()
             .map(|e| name(&doc, e))
             .collect();
-        assert_eq!(names, ["No Style", "Accent", "Strong"]);
+        assert_eq!(names, ["No Style", "Clear Formatting", "Accent", "Strong"]);
     }
 
     #[test]

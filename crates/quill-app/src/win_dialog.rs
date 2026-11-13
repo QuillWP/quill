@@ -19,9 +19,6 @@ struct State {
     proxy: EventLoopProxy<UserEvent>,
     ids: Vec<&'static str>,
     syncing: bool,
-    lists: Vec<bool>,
-    rows: Vec<Vec<String>>,
-    capturing: bool,
     default_button: Option<usize>,
 }
 fn wide(s: &str) -> Vec<u16> {
@@ -36,27 +33,6 @@ pub fn message_hook(msg: *const core::ffi::c_void) -> bool {
             let message = &*msg.cast::<MSG>();
             if message.hwnd != panel && !IsChild(panel, message.hwnd).as_bool() {
                 return false;
-            }
-            let ptr = GetWindowLongPtrW(panel, GWLP_USERDATA) as *const State;
-            if !ptr.is_null()
-                && (*ptr).capturing
-                && matches!(message.message, WM_KEYDOWN | WM_SYSKEYDOWN)
-            {
-                let vk = message.wParam.0 as u32;
-                if vk == 27 {
-                    let _ = (*ptr).proxy.send_event(UserEvent::WindowsShortcut {
-                        panel: panel.0 as usize,
-                        spec: None,
-                    });
-                    return true;
-                }
-                if let Some(spec) = shortcut_spec(vk) {
-                    let _ = (*ptr).proxy.send_event(UserEvent::WindowsShortcut {
-                        panel: panel.0 as usize,
-                        spec: Some(spec),
-                    });
-                    return true;
-                }
             }
             IsDialogMessageW(panel, msg.cast()).as_bool()
         })
@@ -111,8 +87,7 @@ pub fn supported(dialog: &Dialog) -> bool {
         matches!(
             item.kind,
             Kind::Swatch { .. } | Kind::Slider { .. } | Kind::List { .. }
-        ) || (matches!(item.kind, Kind::Custom)
-            && !matches!(item.id, "alert_icon" | "list" | "keys" | "description"))
+        ) || (matches!(item.kind, Kind::Custom) && item.id != "alert_icon")
     })
 }
 
@@ -176,13 +151,6 @@ impl NativeDialog {
                 proxy,
                 ids: d.items.iter().map(|i| i.id).collect(),
                 syncing: true,
-                lists: d
-                    .items
-                    .iter()
-                    .map(|i| matches!(i.kind, Kind::Custom) && matches!(i.id, "list" | "keys"))
-                    .collect(),
-                rows: vec![Vec::new(); d.items.len()],
-                capturing: false,
                 default_button: d
                     .items
                     .iter()
@@ -266,10 +234,6 @@ impl NativeDialog {
                     Kind::Field { .. } => (w!("EDIT"), ES_AUTOHSCROLL | WS_BORDER.0 as i32),
                     Kind::Popup { .. } => (w!("COMBOBOX"), CBS_DROPDOWNLIST | WS_VSCROLL.0 as i32),
                     Kind::Group => (w!("BUTTON"), BS_GROUPBOX),
-                    Kind::Custom if matches!(item.id, "list" | "keys") => (
-                        w!("LISTBOX"),
-                        LBS_NOTIFY | WS_VSCROLL.0 as i32 | WS_BORDER.0 as i32,
-                    ),
                     _ => (w!("STATIC"), 0),
                 };
                 let interactive = matches!(
@@ -375,37 +339,10 @@ impl NativeDialog {
     }
     pub fn sync_from_model(&mut self, d: &Dialog) {
         self.state.syncing = true;
-        self.state.capturing = d.item_label("name") == "Press the new key…";
         unsafe {
             for (item, hwnd) in d.items.iter().zip(&self.controls) {
                 let _ = EnableWindow(*hwnd, item.enabled);
                 match &item.kind {
-                    Kind::Custom if matches!(item.id, "list" | "keys") => {
-                        let rows = crate::commands_dialog::native_rows(d, item.id);
-                        if self.state.rows[self.controls.iter().position(|h| h == hwnd).unwrap()]
-                            != rows
-                        {
-                            SendMessageW(*hwnd, LB_RESETCONTENT, None, None);
-                            for row in &rows {
-                                let text = wide(row);
-                                SendMessageW(
-                                    *hwnd,
-                                    LB_ADDSTRING,
-                                    None,
-                                    Some(LPARAM(text.as_ptr() as isize)),
-                                );
-                            }
-                            let index = self.controls.iter().position(|h| h == hwnd).unwrap();
-                            self.state.rows[index] = rows;
-                        }
-                        if let Some(row) = crate::commands_dialog::native_selection(d, item.id) {
-                            SendMessageW(*hwnd, LB_SETCURSEL, Some(WPARAM(row)), None);
-                        }
-                    }
-                    Kind::Custom if item.id == "description" => {
-                        let text = wide(&crate::commands_dialog::native_description(d));
-                        let _ = SetWindowTextW(*hwnd, PCWSTR(text.as_ptr()));
-                    }
                     Kind::Custom if item.id == "alert_icon" => {
                         let text = wide("ⓘ");
                         let _ = SetWindowTextW(*hwnd, PCWSTR(text.as_ptr()));
@@ -438,18 +375,6 @@ impl NativeDialog {
             }
         }
         self.state.syncing = false;
-    }
-    pub fn selected_row(&self, id: &str) -> Option<usize> {
-        let i = self
-            .state
-            .ids
-            .iter()
-            .position(|candidate| *candidate == id)?;
-        if !self.state.lists[i] {
-            return None;
-        }
-        let row = unsafe { SendMessageW(self.controls[i], LB_GETCURSEL, None, None).0 };
-        (row >= 0).then_some(row as usize)
     }
     pub fn apply_to_model(&self, d: &mut Dialog, id: &'static str) {
         unsafe {
@@ -551,42 +476,4 @@ pub fn menu_font() -> &'static str {
         }
         "Segoe UI".into()
     })
-}
-
-fn shortcut_spec(vk: u32) -> Option<String> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetKeyState, MAPVK_VK_TO_CHAR, MapVirtualKeyW,
-    };
-    let name = match vk {
-        8 => "⌫".into(),
-        9 => "⇥".into(),
-        13 => "↩".into(),
-        32 => "Space".into(),
-        33 => "Page Up".into(),
-        34 => "Page Down".into(),
-        35 => "End".into(),
-        36 => "Home".into(),
-        37 => "←".into(),
-        38 => "↑".into(),
-        39 => "→".into(),
-        40 => "↓".into(),
-        46 => "⌦".into(),
-        112..=135 => format!("F{}", vk - 111),
-        16..=18 | 91 | 92 => return None,
-        _ => {
-            let ch = char::from_u32(unsafe { MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR) } & 0x7fff_ffff)?;
-            if ch.is_control() {
-                return None;
-            }
-            ch.to_uppercase().collect()
-        }
-    };
-    let mut spec = String::new();
-    for (vk, marker) in [(17, "⌘"), (16, "⇧"), (18, "⌥")] {
-        if unsafe { GetKeyState(vk) } < 0 {
-            spec.push_str(marker);
-        }
-    }
-    spec.push_str(&name);
-    Some(spec)
 }

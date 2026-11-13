@@ -40,7 +40,7 @@ pub fn dialog(view: &DocView) -> Dialog {
     d.button("apply", "Apply", 282.0, 12.0, 166.0, false);
     d.button("remove", "Remove Style", 282.0, 42.0, 166.0, false);
     d.button("update", "Update to Selection", 282.0, 72.0, 166.0, false);
-    d.button("import", "Import…", 282.0, 112.0, 166.0, false);
+    d.button("clear", "Clear Formatting", 282.0, 112.0, 166.0, false);
     d.button("ok", "Close", 282.0, 218.0, 166.0, true);
     d.note("description", "", 12.0, 252.0, 436.0);
     d.note("status", "", 12.0, 272.0, 436.0);
@@ -358,34 +358,6 @@ pub fn delete(view: &mut DocView, id: u16) -> bool {
     true
 }
 
-/// Bring in the character styles of `source` that this document lacks by
-/// name, leaving its own alone. Returns how many came in and how many were
-/// left out.
-pub fn import(list: &mut Dialog, view: &mut DocView, source: &Document) -> (usize, usize) {
-    let (mut added, mut skipped) = (0, 0);
-    view.doc.begin("Import Character Styles", view.sel);
-    for style in &source.styles.characters {
-        if view.doc.styles.find_character(&style.name).is_some() {
-            skipped += 1;
-            continue;
-        }
-        let mut format = style.format;
-        if format.mask & 1 != 0 {
-            format.props.font = view.doc.font_id(source.font_name(format.props.font));
-        }
-        if view.doc.add_character_style(&style.name, format).is_some() {
-            added += 1;
-        }
-    }
-    view.doc.commit(view.sel);
-    if added > 0 {
-        view.finish_character_style_edit(None);
-    }
-    let first = selected_style(list).max(1);
-    refresh(list, view, first);
-    (added, skipped)
-}
-
 /// Redefine character style `id` from the selection, as one undoable step.
 /// The selection's own formatting joins what the style already set.
 fn update(view: &mut DocView, id: u16) -> Option<u16> {
@@ -412,6 +384,14 @@ pub fn button(d: &mut Dialog, view: &mut DocView, action: &str) {
             d.set_label(
                 "status",
                 "Applied to the selection or to the next text you type.",
+            );
+            return;
+        }
+        "clear" => {
+            view.clear_character_formatting();
+            d.set_label(
+                "status",
+                "Formatting cleared from the selection or the next text you type.",
             );
             return;
         }
@@ -590,43 +570,5 @@ mod tests {
         );
         button(&mut d, &mut view, "remove");
         assert_eq!(view.doc.main.paras[0].chp_of_char(0).character_style, 0);
-    }
-
-    #[test]
-    fn import_brings_in_only_styles_this_document_lacks() {
-        let mut source = Document::new();
-        let font = source.font_id("Imported Serif");
-        source
-            .add_character_style(
-                "Quote",
-                CharacterFormat::new(
-                    CharProps {
-                        font,
-                        ..Default::default()
-                    },
-                    1,
-                ),
-            )
-            .unwrap();
-        source
-            .add_character_style("Emphasis", bold_format())
-            .unwrap();
-        let mut view = DocView::new(Document::new(), "Test".into());
-        view.doc
-            .add_character_style("Emphasis", CharacterFormat::default())
-            .unwrap();
-        view.doc.forget_history();
-        let mut d = dialog(&view);
-        assert_eq!(import(&mut d, &mut view, &source), (1, 1));
-        let quote = view.doc.styles.find_character("Quote").unwrap();
-        let format = view.doc.styles.character(quote).unwrap().format;
-        assert_eq!(view.doc.font_name(format.props.font), "Imported Serif");
-        assert_eq!(
-            view.doc.styles.character(1).unwrap().format,
-            CharacterFormat::default(),
-            "this document's own Emphasis is left alone"
-        );
-        view.doc.undo();
-        assert_eq!(view.doc.styles.characters.len(), 1);
     }
 }

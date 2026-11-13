@@ -204,10 +204,6 @@ pub struct WinState {
     pub pending_window: Option<(quill_core::Document, String)>,
     /// How many merged documents this window has made, to name them.
     form_letters: u32,
-    /// A command for the app to carry out (Do It in Tools > Commands).
-    pub pending_cmd: Option<Cmd>,
-    /// Open (true) or save (false) a settings file.
-    pub pending_settings: Option<bool>,
     /// The front dialog took the last mouse press, so moves and the
     /// release go to it.
     dialog_mouse: bool,
@@ -388,8 +384,6 @@ impl WinState {
             print_doc: None,
             pending_window: None,
             form_letters: 0,
-            pending_cmd: None,
-            pending_settings: None,
         }
     }
 
@@ -539,15 +533,12 @@ impl WinState {
             }
             return;
         }
-        if let Some((which, d)) = self.dialogs.last_mut()
+        if let Some((_, d)) = self.dialogs.last_mut()
             && (d.contains(cx, cy) || d.popup_open())
         {
             let rows = wheel_rows(&mut self.wheel_rest, dy);
             if d.wheel(cx, cy, rows) {
                 return;
-            }
-            if let Which::Commands(st) = which {
-                crate::commands_dialog::scroll(st, d, cx, cy, rows);
             }
             return;
         }
@@ -644,6 +635,8 @@ impl WinState {
                     self.view.set_style(id);
                 }
             }
+            Action::NoStyle => self.view.clear_styles(),
+            Action::ClearFormatting => self.view.clear_formatting(),
             Action::Pane(story) => self.open_pane(story),
             Action::ToggleFormattingToolbar => {
                 self.show_formatting_toolbar = !self.show_formatting_toolbar
@@ -1486,8 +1479,6 @@ pub enum UserEvent {
         value: f64,
     },
     #[cfg(windows)]
-    WindowsShortcut { panel: usize, spec: Option<String> },
-    #[cfg(windows)]
     WindowsDialog { panel: usize, id: &'static str },
     /// A control in a native AppKit dialog changed or was pressed.
     #[cfg(target_os = "macos")]
@@ -1496,12 +1487,6 @@ pub enum UserEvent {
         id: &'static str,
         choice: Option<(usize, bool, bool)>,
     },
-    /// A key captured by Tools > Commands' native Add shortcut mode.
-    #[cfg(target_os = "macos")]
-    NativeShortcut { panel: usize, spec: String },
-    /// Escape canceled Tools > Commands' native Add shortcut mode.
-    #[cfg(target_os = "macos")]
-    NativeShortcutCancel { panel: usize },
 }
 
 pub struct App {
@@ -1695,6 +1680,15 @@ impl App {
     fn next_recovery(&self) -> Instant {
         let secs = crate::settings::with(|s| s.autosave_secs);
         self.last_recovery + Duration::from_secs(if secs == 0 { 30 } else { secs.into() })
+    }
+
+    /// The window whose native dialog has panel number `panel`.
+    #[cfg(any(target_os = "macos", windows))]
+    fn dialog_window(&self, panel: usize) -> Option<WindowId> {
+        self.windows
+            .iter()
+            .find(|(_, w)| w.dialog.as_ref().is_some_and(|d| d.panel_id() == panel))
+            .map(|(id, _)| *id)
     }
 
     fn index(&self, id: WindowId) -> Option<usize> {
@@ -2660,42 +2654,22 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
             #[cfg(windows)]
-            UserEvent::WindowsShortcut { panel, spec } => {
+            UserEvent::WindowsDialog { panel, id } => {
+                let window = self.dialog_window(panel);
                 if let Some((_, w)) = self
                     .windows
                     .iter_mut()
                     .find(|(_, w)| w.dialog.as_ref().is_some_and(|d| d.panel_id() == panel))
-                    && let Some((Which::Commands(state), dialog)) = w.st.dialogs.last_mut()
+                    && let (Some(native), Some((_, dialog))) = (&w.dialog, w.st.dialogs.last_mut())
                 {
-                    if let Some(spec) = spec {
-                        crate::commands_dialog::captured(state, dialog, spec);
-                    } else {
-                        crate::commands_dialog::cancel_capture(state, dialog);
-                    }
+                    native.apply_to_model(dialog, id);
+                    let outcome = crate::win_dialog::NativeDialog::outcome(dialog, id);
+                    let clip = self.clipboard.get_or_insert_with(Clipboard::new);
+                    w.st.dialog_outcome(outcome, clip);
                     w.window.request_redraw();
                 }
-            }
-            #[cfg(windows)]
-            UserEvent::WindowsDialog { panel, id } => {
-                if let Some((_, w)) = self
-                    .windows
-                    .iter_mut()
-                    .find(|(_, w)| w.dialog.as_ref().is_some_and(|d| d.panel_id() == panel))
-                    && let (Some(native), Some((which, dialog))) =
-                        (&w.dialog, w.st.dialogs.last_mut())
-                {
-                    if matches!(id, "list" | "keys")
-                        && let Some(row) = native.selected_row(id)
-                        && let Which::Commands(state) = which
-                    {
-                        crate::commands_dialog::select_native(state, dialog, id, row);
-                    } else {
-                        native.apply_to_model(dialog, id);
-                        let outcome = crate::win_dialog::NativeDialog::outcome(dialog, id);
-                        let clip = self.clipboard.get_or_insert_with(Clipboard::new);
-                        w.st.dialog_outcome(outcome, clip);
-                    }
-                    w.window.request_redraw();
+                if let Some(window) = window {
+                    self.handle_effect(el, window, Effect::None);
                 }
             }
             #[cfg(target_os = "macos")]
@@ -2705,11 +2679,16 @@ impl ApplicationHandler<UserEvent> for App {
                 value,
             } => self.native_scroll(scroller, part, value),
             #[cfg(target_os = "macos")]
-            UserEvent::NativeDialog { panel, id, choice } => self.native_dialog(panel, id, choice),
-            #[cfg(target_os = "macos")]
-            UserEvent::NativeShortcut { panel, spec } => self.native_shortcut(panel, spec),
-            #[cfg(target_os = "macos")]
-            UserEvent::NativeShortcutCancel { panel } => self.native_shortcut_cancel(panel),
+            UserEvent::NativeDialog { panel, id, choice } => {
+                // A button may leave work for the app (open or save a
+                // settings file, list commands, run one), so carry it out
+                // as a click on a drawn dialog would.
+                let window = self.dialog_window(panel);
+                self.native_dialog(panel, id, choice);
+                if let Some(window) = window {
+                    self.handle_effect(el, window, Effect::None);
+                }
+            }
         }
         self.sync_menus();
     }

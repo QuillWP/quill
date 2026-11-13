@@ -17,45 +17,6 @@ impl App {
         {
             self.new_window(el, doc, Some(title));
         }
-        // Tools > Commands: a settings file to open or save, or Do It.
-        if let Some(i) = self.index(id)
-            && let Some(open) = self.windows[i].1.st.pending_settings.take()
-        {
-            let dialog = rfd::FileDialog::new().set_title(if open {
-                "Open Settings File"
-            } else {
-                "Save Settings As"
-            });
-            if open {
-                if let Some(p) = dialog.pick_file() {
-                    match crate::settings::read_text(&p) {
-                        Ok(text) => crate::settings::update(|s| {
-                            *s = crate::settings::Settings::from_text(&text)
-                        }),
-                        Err(e) => alert(
-                            "Quill could not open the settings file.",
-                            &format!("Could not read \u{201c}{}\u{201d}: {e}", p.display()),
-                        ),
-                    }
-                }
-            } else if let Some(p) = dialog.set_file_name("Quill Settings").save_file()
-                && let Err(e) = crate::settings::write_user_file(
-                    &p,
-                    crate::settings::get().to_text().as_bytes(),
-                )
-            {
-                alert("Quill could not save the settings file.", &e);
-            }
-            self.windows[i].1.window.request_redraw();
-        }
-        if let Some(i) = self.index(id)
-            && let Some(cmd) = self.windows[i].1.st.pending_cmd.take()
-        {
-            let clip = self.clipboard.get_or_insert_with(Clipboard::new);
-            let effect = self.windows[i].1.st.view.exec(cmd, false, clip);
-            self.windows[i].1.window.request_redraw();
-            self.handle_effect(el, id, effect);
-        }
     }
 
     pub(super) fn effect(&mut self, el: &ActiveEventLoop, id: WindowId, effect: Effect) {

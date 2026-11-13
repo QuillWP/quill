@@ -84,7 +84,6 @@ pub fn pick_font_folder(directory: Option<&std::path::Path>) -> Option<std::path
 static PROXY: OnceLock<Mutex<EventLoopProxy<UserEvent>>> = OnceLock::new();
 static ACTIONS: OnceLock<Mutex<Vec<ActionTarget>>> = OnceLock::new();
 static TABLES: OnceLock<Mutex<Vec<TableData>>> = OnceLock::new();
-static CAPTURING: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
 
 #[derive(Debug)]
 struct TableData {
@@ -107,10 +106,6 @@ fn actions() -> &'static Mutex<Vec<ActionTarget>> {
 
 fn tables() -> &'static Mutex<Vec<TableData>> {
     TABLES.get_or_init(|| Mutex::new(Vec::new()))
-}
-
-fn capturing() -> &'static Mutex<Vec<usize>> {
-    CAPTURING.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -361,141 +356,6 @@ extern "C" fn table_value(
     unsafe { msg_send![class!(NSString), stringWithUTF8String: value.as_ptr()] }
 }
 
-fn command_panel_is_capturing(panel: *mut AnyObject) -> bool {
-    capturing()
-        .lock()
-        .is_ok_and(|panels| panels.contains(&(panel as usize)))
-}
-
-fn native_key_spec(event: *mut AnyObject) -> Option<String> {
-    if event.is_null() {
-        return None;
-    }
-    let chars: *mut AnyObject = unsafe { msg_send![event, charactersIgnoringModifiers] };
-    let chars = unsafe { rust_string(chars) };
-    let first = chars.chars().next()?;
-    let key = match first {
-        '\r' | '\n' => "↩".to_string(),
-        '\t' => "⇥".to_string(),
-        ' ' => "Space".to_string(),
-        '\u{7f}' => "⌫".to_string(),
-        '\u{f728}' => "⌦".to_string(),
-        '\u{f700}' => "↑".to_string(),
-        '\u{f701}' => "↓".to_string(),
-        '\u{f702}' => "←".to_string(),
-        '\u{f703}' => "→".to_string(),
-        '\u{f729}' => "Home".to_string(),
-        '\u{f72b}' => "End".to_string(),
-        '\u{f72c}' => "Page Up".to_string(),
-        '\u{f72d}' => "Page Down".to_string(),
-        c if ('\u{f704}'..='\u{f71b}').contains(&c) => {
-            format!("F{}", c as u32 - 0xf704 + 1)
-        }
-        c if !c.is_control() => c.to_uppercase().collect(),
-        _ => return None,
-    };
-    let flags: usize = unsafe { msg_send![event, modifierFlags] };
-    let mut spec = String::new();
-    for (mask, symbol) in [
-        (1usize << 20, "⌘"),
-        (1usize << 17, "⇧"),
-        (1usize << 19, "⌥"),
-        (1usize << 18, "⌃"),
-    ] {
-        if flags & mask != 0 {
-            spec.push_str(symbol);
-        }
-    }
-    spec.push_str(&key);
-    Some(spec)
-}
-
-fn capture_shortcut(panel: *mut AnyObject, event: *mut AnyObject) -> bool {
-    if !command_panel_is_capturing(panel) {
-        return false;
-    }
-    let chars: *mut AnyObject = unsafe { msg_send![event, charactersIgnoringModifiers] };
-    if unsafe { rust_string(chars) }.starts_with('\u{1b}') {
-        if let Some(proxy) = PROXY.get().and_then(|proxy| proxy.lock().ok()) {
-            let _ = proxy.send_event(UserEvent::NativeShortcutCancel {
-                panel: panel as usize,
-            });
-        }
-        return true;
-    }
-    let Some(spec) = native_key_spec(event) else {
-        return false;
-    };
-    if let Some(proxy) = PROXY.get().and_then(|proxy| proxy.lock().ok()) {
-        let _ = proxy.send_event(UserEvent::NativeShortcut {
-            panel: panel as usize,
-            spec,
-        });
-    }
-    true
-}
-
-extern "C" fn command_key_down(this: *mut AnyObject, _cmd: Sel, event: *mut AnyObject) {
-    if !capture_shortcut(this, event) {
-        unsafe {
-            let _: () = msg_send![super(this, class!(NSPanel)), keyDown: event];
-        }
-    }
-}
-
-extern "C" fn command_key_equivalent(
-    this: *mut AnyObject,
-    _cmd: Sel,
-    event: *mut AnyObject,
-) -> bool {
-    if capture_shortcut(this, event) {
-        true
-    } else {
-        unsafe { msg_send![super(this, class!(NSPanel)), performKeyEquivalent: event] }
-    }
-}
-
-fn commands_panel_class() -> &'static AnyClass {
-    if let Some(class) = AnyClass::get("QuillCommandsPanel") {
-        return class;
-    }
-    let superclass = class!(NSPanel);
-    let name = c"QuillCommandsPanel";
-    let raw = unsafe {
-        objc2::ffi::objc_allocateClassPair(
-            superclass as *const AnyClass as *const _,
-            name.as_ptr(),
-            0,
-        )
-    };
-    assert!(!raw.is_null(), "could not create Commands panel class");
-    unsafe {
-        let key_down: extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) = command_key_down;
-        objc2::ffi::class_addMethod(
-            raw,
-            sel!(keyDown:).as_ptr(),
-            Some(std::mem::transmute::<
-                extern "C" fn(*mut AnyObject, Sel, *mut AnyObject),
-                unsafe extern "C" fn(),
-            >(key_down)),
-            c"v@:@".as_ptr(),
-        );
-        let equivalent: extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> bool =
-            command_key_equivalent;
-        objc2::ffi::class_addMethod(
-            raw,
-            sel!(performKeyEquivalent:).as_ptr(),
-            Some(std::mem::transmute::<
-                extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> bool,
-                unsafe extern "C" fn(),
-            >(equivalent)),
-            c"B@:@".as_ptr(),
-        );
-        objc2::ffi::objc_registerClassPair(raw);
-    }
-    AnyClass::get("QuillCommandsPanel").expect("Commands panel class was registered")
-}
-
 extern "C" fn should_close(_this: *mut AnyObject, _cmd: Sel, panel: *mut AnyObject) -> bool {
     let key = panel as usize;
     if let Some(proxy) = PROXY.get().and_then(|p| p.lock().ok()) {
@@ -609,13 +469,7 @@ pub fn install(proxy: EventLoopProxy<UserEvent>) {
 /// Native conversion is deliberately conservative. A custom canvas item may
 /// be interactive or a live preview, so it remains in the old renderer.
 pub fn supported(dialog: &Dialog) -> bool {
-    is_alert(dialog) || is_commands(dialog) || !dialog.needs_canvas()
-}
-
-fn is_commands(dialog: &Dialog) -> bool {
-    dialog.title == "Commands"
-        && dialog.items.iter().any(|item| item.id == "list")
-        && dialog.items.iter().any(|item| item.id == "keys")
+    is_alert(dialog) || !dialog.needs_canvas()
 }
 
 fn is_alert(dialog: &Dialog) -> bool {
@@ -650,7 +504,6 @@ enum ControlKind {
     Static,
     Group,
     Table,
-    Description,
     /// A color button; the color its picture was last drawn in.
     Swatch,
 }
@@ -866,11 +719,7 @@ impl NativeDialog {
         let height = dialog.height as f64 * SCALE;
         let rect = NSRect::new(NSPoint::ZERO, NSSize::new(width, height));
         let style: usize = 1 | 2; // titled + closable
-        let panel_class = if is_commands(dialog) {
-            commands_panel_class()
-        } else {
-            dialog_panel_class()
-        };
+        let panel_class = dialog_panel_class();
         let raw: *mut AnyObject = unsafe { msg_send![panel_class, alloc] };
         let raw: *mut AnyObject = unsafe {
             msg_send![raw, initWithContentRect: rect styleMask: style backing: 2usize defer: false]
@@ -1127,8 +976,7 @@ impl NativeDialog {
                     | ControlKind::Static
                     | ControlKind::Group
                     | ControlKind::Table
-                    | ControlKind::Swatch
-                    | ControlKind::Description => {}
+                    | ControlKind::Swatch => {}
                 }
             }
         }
@@ -1158,7 +1006,7 @@ impl NativeDialog {
         for (control, item) in self.controls.iter().zip(&dialog.items) {
             let ptr = Retained::as_ptr(&control.object) as *mut AnyObject;
             unsafe {
-                if !matches!(control.kind, ControlKind::Group | ControlKind::Description) {
+                if !matches!(control.kind, ControlKind::Group) {
                     let _: () = msg_send![ptr, setEnabled: item.enabled];
                 }
                 match &item.kind {
@@ -1218,41 +1066,6 @@ impl NativeDialog {
                         let value = NSString::from_str(&item.label);
                         let _: () = msg_send![ptr, setTitle: &*value];
                     }
-                    Kind::Custom if matches!(control.kind, ControlKind::Table) => {
-                        let rows = crate::commands_dialog::native_rows(dialog, control.id);
-                        let has_rows =
-                            !rows.is_empty() && rows[0] != crate::commands_dialog::NO_SHORTCUT;
-                        let changed = tables().lock().is_ok_and(|mut tables| {
-                            let Some(data) =
-                                tables.iter_mut().find(|data| data.table == ptr as usize)
-                            else {
-                                return false;
-                            };
-                            if data.rows == rows {
-                                return false;
-                            }
-                            data.rows = rows;
-                            true
-                        });
-                        if changed {
-                            let _: () = msg_send![ptr, reloadData];
-                            if control.id == "keys" && !has_rows {
-                                let none: *mut AnyObject = std::ptr::null_mut();
-                                let _: () = msg_send![ptr, deselectAll: none];
-                            }
-                        }
-                        let desired = crate::commands_dialog::native_selection(dialog, control.id)
-                            .or_else(|| (control.id == "keys" && changed && has_rows).then_some(0));
-                        if let Some(row) = desired {
-                            let selected: isize = msg_send![ptr, selectedRow];
-                            if selected != row as isize {
-                                let set: *mut AnyObject =
-                                    msg_send![class!(NSIndexSet), indexSetWithIndex: row];
-                                let _: () = msg_send![ptr, selectRowIndexes: set byExtendingSelection: false];
-                                let _: () = msg_send![ptr, scrollRowToVisible: row as isize];
-                            }
-                        }
-                    }
                     Kind::List { rows, state, .. }
                         if matches!(control.kind, ControlKind::Table) =>
                     {
@@ -1282,25 +1095,11 @@ impl NativeDialog {
                             }
                         }
                     }
-                    Kind::Custom if matches!(control.kind, ControlKind::Description) => {
-                        let value =
-                            NSString::from_str(&crate::commands_dialog::native_description(dialog));
-                        let _: () = msg_send![ptr, setStringValue: &*value];
-                    }
                     _ => {}
                 }
             }
         }
         self.sync_popover(dialog);
-        if is_commands(dialog) {
-            let panel = self.panel_id();
-            if let Ok(mut panels) = capturing().lock() {
-                panels.retain(|candidate| *candidate != panel);
-                if dialog.item_label("name") == "Press the new key…" {
-                    panels.push(panel);
-                }
-            }
-        }
     }
 
     /// Open, change or close the panel popped out beside a control to match
@@ -1408,7 +1207,6 @@ impl Control {
             | (ControlKind::Field, Kind::Field { .. })
             | (ControlKind::Static, Kind::Text | Kind::Note)
             | (ControlKind::Group, Kind::Group) => true,
-            (ControlKind::Table | ControlKind::Description, Kind::Custom) => true,
             (ControlKind::Table, Kind::List { .. }) => true,
             (ControlKind::Swatch, Kind::Swatch { button: true, .. }) => true,
             (ControlKind::Radio(a), Kind::Radio { group: b, .. }) => a == b,
@@ -1442,9 +1240,6 @@ impl Drop for NativeDialog {
                     .iter()
                     .any(|control| Retained::as_ptr(&control.object) as usize == data.table)
             });
-        }
-        if let Ok(mut panels) = capturing().lock() {
-            panels.retain(|candidate| *candidate != panel as usize);
         }
         unsafe {
             let _: () = msg_send![panel, setDelegate: std::ptr::null::<AnyObject>()];
@@ -1567,7 +1362,7 @@ unsafe fn make_control(
     ControlKind,
 )> {
     if matches!(item.kind, Kind::Custom) {
-        return unsafe { make_commands_control(item, frame, panel, delegate, content) };
+        return None;
     }
     if let Kind::List { double, .. } = &item.kind {
         return unsafe {
@@ -1826,50 +1621,6 @@ unsafe fn popover_view(
     Some((view, controls))
 }
 
-unsafe fn make_commands_control(
-    item: &crate::dialog::Item,
-    frame: NSRect,
-    panel: *mut AnyObject,
-    delegate: *mut AnyObject,
-    content: *mut AnyObject,
-) -> Option<(
-    Retained<AnyObject>,
-    Option<Retained<AnyObject>>,
-    ControlKind,
-)> {
-    if item.id == "description" {
-        let raw: *mut AnyObject = unsafe { msg_send![class!(NSTextField), alloc] };
-        let raw: *mut AnyObject = unsafe { msg_send![raw, initWithFrame: frame] };
-        let field = unsafe { Retained::from_raw(raw) }?;
-        let ptr = Retained::as_ptr(&field) as *mut AnyObject;
-        unsafe {
-            let _: () = msg_send![ptr, setEditable: false];
-            let _: () = msg_send![ptr, setSelectable: true];
-            let _: () = msg_send![ptr, setBezeled: true];
-            let _: () = msg_send![ptr, setDrawsBackground: true];
-            let cell: *mut AnyObject = msg_send![ptr, cell];
-            let _: () = msg_send![cell, setWraps: true];
-            let _: () = msg_send![cell, setScrollable: false];
-            let _: () = msg_send![content, addSubview: ptr];
-        }
-        return Some((field, None, ControlKind::Description));
-    }
-    if !matches!(item.id, "list" | "keys") {
-        return None;
-    }
-    unsafe {
-        make_table(
-            item.id,
-            frame,
-            panel,
-            delegate,
-            content,
-            item.id == "keys",
-            false,
-        )
-    }
-}
-
 /// A one-column table in a scroll view. `double` makes a double-click on a
 /// row send the action again, with the click count to tell it apart.
 unsafe fn make_table(
@@ -2101,10 +1852,6 @@ mod tests {
         assert!(supported(&alert));
         assert!(is_alert(&alert));
         assert_eq!(alert_message(&alert), "Something happened.");
-
-        let (commands, _) = crate::commands_dialog::dialog(None);
-        assert!(supported(&commands));
-        assert!(is_commands(&commands));
     }
 
     #[test]

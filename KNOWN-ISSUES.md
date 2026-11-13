@@ -33,10 +33,10 @@ what is missing or different today, so you do not have to find it yourself.
 ## Different from other Mac apps
 
 Quill follows its model word processor from 1992, so some keys differ (Command-Shift-Z
-is Redo, and Plain Text has no key until you give it one in Tools > Commands):
+is Redo, and Plain Text has no key):
 Command-Left and Right move by word, Command-G is Go To, Command-Backspace
 inserts a glossary entry and Command-M opens the Paragraph dialog.
-Tools > Commands lets you rebind keys.
+Keys cannot be rebound yet.
 
 ## Reporting a problem
 
