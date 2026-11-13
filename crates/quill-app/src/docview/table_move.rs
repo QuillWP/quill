@@ -16,6 +16,8 @@ pub struct TableDrag {
     /// Where the pointer is now, and whether it has moved off the handle.
     pub to: (f32, f32),
     pub moved: bool,
+    /// The table was already selected when the handle was pressed.
+    pub was_selected: bool,
 }
 
 impl DocView {
@@ -82,6 +84,7 @@ impl DocView {
         let Some((first, last)) = self.table_handle_at(wx, wy) else {
             return false;
         };
+        let before = self.sel;
         self.select_table();
         self.drag = None;
         self.table_drag = Some(TableDrag {
@@ -89,6 +92,7 @@ impl DocView {
             last,
             to: (wx, wy),
             moved: false,
+            was_selected: before == self.sel,
         });
         true
     }
@@ -108,6 +112,10 @@ impl DocView {
         let Some(d) = self.table_drag.take() else {
             return false;
         };
+        // A click on the handle of a selected table opens Border for it.
+        if !d.moved && d.was_selected {
+            self.border_for_table = true;
+        }
         let Some(to) = d.moved.then(|| self.table_drop(&d)).flatten() else {
             return true;
         };

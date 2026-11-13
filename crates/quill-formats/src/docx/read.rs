@@ -3422,12 +3422,19 @@ fn read_shading(e: &Element, report: &mut ImportReport) -> (u16, Option<Rgb>) {
         if foreground.is_none() && e.attr("themeColor").is_some() {
             report.note(notes::SHADING_COLORS);
         }
-        return (1000, foreground);
+        // A solid pattern in a color is that color as the background.
+        return foreground.map_or((1000, None), |c| (0, Some(c)));
     }
-    // Colored patterns still need a pattern renderer. Keep the gray
-    // approximation and report that conversion rather than invent a fill.
-    if [fill, foreground]
-        .into_iter()
+    // A pattern in a color of its own still needs a pattern renderer. Keep
+    // the black approximation and report that conversion rather than invent
+    // a fill. A percentage over a fill color is kept as it is.
+    let tinted: &[Option<Rgb>] = if val.starts_with("pct") {
+        &[foreground]
+    } else {
+        &[fill, foreground]
+    };
+    if tinted
+        .iter()
         .flatten()
         .any(|c| c.r() != c.g() || c.g() != c.b())
     {
@@ -3435,6 +3442,8 @@ fn read_shading(e: &Element, report: &mut ImportReport) -> (u16, Option<Rgb>) {
     }
     if let Some(pct) = val.strip_prefix("pct") {
         let n: u16 = pct.parse().unwrap_or(0);
+        // Black dots over the fill color, as Quill lays shading over its
+        // background.
         return (
             match n {
                 12 => 125,
@@ -3443,7 +3452,7 @@ fn read_shading(e: &Element, report: &mut ImportReport) -> (u16, Option<Rgb>) {
                 87 => 875,
                 n => n.min(100) * 10,
             },
-            None,
+            fill,
         );
     }
     if let Some(c) = fill {
@@ -4189,13 +4198,26 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_color_patterns_and_theme_only_fills_still_warn() {
-        let body = "<w:p><w:pPr><w:shd w:val='pct25' w:fill='FF0000'/></w:pPr></w:p>\
+    fn a_percentage_over_a_fill_is_kept_and_other_color_patterns_still_warn() {
+        // Black dots over a fill are what Quill's shading is.
+        let kept = "<w:p><w:pPr><w:shd w:val='pct25' w:fill='FF0000'/></w:pPr></w:p>";
+        let (doc, report) = read_reported(&docx(kept)).unwrap();
+        assert!(report.is_empty());
+        assert_eq!(doc.main.paras[0].pap.shading, 250);
+        assert_eq!(doc.main.paras[0].pap.shading_color, Some(Rgb(0xFF0000)));
+        // A pattern in a color of its own, and a fill known only by theme,
+        // are not.
+        let body = "<w:p><w:pPr><w:shd w:val='pct25' w:color='FF0000'/></w:pPr></w:p>\
             <w:p><w:pPr><w:shd w:themeFill='accent1'/></w:pPr></w:p>";
         let (doc, report) = read_reported(&docx(body)).unwrap();
         assert_eq!(report.notes(), [notes::SHADING_COLORS]);
         assert_eq!(doc.main.paras[0].pap.shading, 250);
         assert_eq!(doc.main.paras[0].pap.shading_color, None);
+        // A solid pattern in a color is that color as the background.
+        let solid = "<w:p><w:pPr><w:shd w:val='solid' w:color='00FF00'/></w:pPr></w:p>";
+        let doc = read(&docx(solid)).unwrap();
+        assert_eq!(doc.main.paras[0].pap.shading, 0);
+        assert_eq!(doc.main.paras[0].pap.shading_color, Some(Rgb(0x00FF00)));
     }
 
     #[test]

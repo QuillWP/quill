@@ -321,11 +321,10 @@ pub(super) fn draw_row(
         let area = Rect::new(ox + x0, top, x1 - x0, height);
         if selected.contains(&k) {
             c.fill(area, highlight);
-        } else if let Some(color) = cell.shading_color {
+        } else if let Some(color) =
+            quill_core::props::shading_fill(cell.shading, cell.shading_color)
+        {
             c.fill(area, color.0);
-        } else if cell.shading > 0 {
-            let v = (255.0 * (1.0 - cell.shading as f32 / 1000.0)).round() as u32;
-            c.fill(area, v << 16 | v << 8 | v);
         }
     }
     if let Some(g) = grid {
@@ -368,18 +367,14 @@ pub(super) fn draw_row(
     }
     for (k, &(_, _, x0, x1)) in row.cells.iter().enumerate() {
         let b = &row.props.cells[k].borders;
+        // The right line is drawn from x1 outward, so the top and bottom
+        // lines run on under it to meet it at the corner.
+        let end = ox + x1 + border_width(b.right.style);
         if !row.joined_above.get(k).copied().unwrap_or(false) {
-            hline_styled(c, b.top.style, ox + x0, ox + x1, top, b.top.color.0);
+            hline_styled(c, b.top.style, ox + x0, end, top, b.top.color.0);
         }
         if !row.joined_below.get(k).copied().unwrap_or(false) {
-            hline_styled(
-                c,
-                b.bottom.style,
-                ox + x0,
-                ox + x1,
-                bottom,
-                b.bottom.color.0,
-            );
+            hline_styled(c, b.bottom.style, ox + x0, end, bottom, b.bottom.color.0);
         }
         vline_styled(c, b.left.style, ox + x0, top, bottom, b.left.color.0);
         vline_styled(c, b.right.style, ox + x1, top, bottom, b.right.color.0);
@@ -390,11 +385,8 @@ pub(super) fn draw_row(
 pub fn draw_border_box(c: &mut dyn Surface, b: &BorderBox, ox: f32, py: f32) {
     let (l, r) = (ox + b.left, ox + b.right);
     let (t, bt) = (py + b.top, py + b.bottom);
-    if let Some(color) = b.shading_color {
+    if let Some(color) = quill_core::props::shading_fill(b.shading, b.shading_color) {
         c.fill(Rect::new(l, t, r - l, bt - t), color.0);
-    } else if b.shading > 0 {
-        let v = (255.0 * (1.0 - b.shading as f32 / 1000.0)).round() as u32;
-        c.fill(Rect::new(l, t, r - l, bt - t), v << 16 | v << 8 | v);
     }
     let lw = border_width(b.left_line);
     let rw = border_width(b.right_line);
@@ -532,7 +524,6 @@ impl DocView {
         let area = self.area;
         let clip = c.set_clip(area);
         let ox = self.area.x + self.text_x();
-        let n = self.layouts.len();
         // In dark mode the desk round the pages takes the interface's dark
         // colors and the pages and their text a dark page's (`page_ink`).
         // Only the drawing changes: the document keeps its own colors.
@@ -618,9 +609,6 @@ impl DocView {
                     x += 4.0;
                 }
             }
-            // The original's end-of-document mark: a short bar under the last line.
-            let end_y = oy + self.tops[n] + 2.0;
-            c.fill(Rect::new(ox + 1.0, end_y, 12.0, 1.5), color::BLACK);
         }
 
         if focused && self.is_composing() {

@@ -1223,6 +1223,9 @@ impl WinState {
             return (Effect::None, None);
         }
         self.view.mouse_up();
+        if std::mem::take(&mut self.view.border_for_table) {
+            return (Effect::Dialog(DialogId::BorderTable), None);
+        }
         self.scroll_press = None;
         self.horizontal_press = None;
         if self.scale_drag.take().is_some() {

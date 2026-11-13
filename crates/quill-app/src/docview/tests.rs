@@ -1080,6 +1080,21 @@ fn a_right_click_in_any_selected_cell_keeps_the_selection() {
 }
 
 #[test]
+fn a_selected_table_has_no_hyperlink_in_its_context_menu() {
+    let mut clip = Clipboard::new();
+    let mut v = with_table(&mut clip);
+    v.sel = Selection::caret(Position::new(2, 0));
+    v.exec(Cmd::SelectTable, false, &mut clip);
+    let (menu, _) = crate::app_menus::context_menu(&v, false, false);
+    assert!(!menu.items.iter().any(|i| i.label.starts_with("Hyperlink")));
+    assert!(
+        menu.items
+            .iter()
+            .any(|i| i.label.starts_with("Borders and"))
+    );
+}
+
+#[test]
 fn whole_tables_cut_copy_and_paste_in_one_piece() {
     let mut clip = Clipboard::new();
     let table = "aTc bTc Tr cTc dTc Tr";

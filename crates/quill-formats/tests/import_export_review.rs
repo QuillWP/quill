@@ -54,8 +54,8 @@ fn cell_shading_and_borders_survive_docx_and_rtf() {
     }
 }
 
-/// An ODT table cell with a background color and a border: Quill's cells
-/// shade in gray only, so red becomes the nearest gray step.
+/// An ODT table cell with a background color and a border: the color stays
+/// as the cell's background.
 #[test]
 fn odt_cells_read_background_and_border() {
     let x = r##"<?xml version="1.0" encoding="UTF-8"?>
@@ -72,7 +72,8 @@ fn odt_cells_read_background_and_border() {
     let d = odt_read::read_flat_reported(x.as_bytes()).unwrap().0;
     let row = quill_core::table::row_at(&d.main.paras, 0).unwrap();
     let p = quill_core::table::row_props(&d.main.paras, &row, 6000);
-    assert!(p.cells[0].shading > 0);
+    assert_eq!(p.cells[0].shading_color, Some(quill_core::Rgb(0xFF0000)));
+    assert_eq!(p.cells[0].shading, 0);
     assert_eq!(p.cells[0].borders.top.style, BorderStyle::Single);
     assert_eq!(p.cells[1].shading, 0);
     assert_eq!(p.cells[1].borders.top.style, BorderStyle::None);
@@ -140,7 +141,11 @@ fn odt_export_keeps_cell_borders_shading_and_alignment() {
     let back = odt_read::read(&quill_formats::odt::write(&doc, 0)).unwrap();
     let row = quill_core::table::row_at(&back.main.paras, 0).unwrap();
     let p = quill_core::table::row_props(&back.main.paras, &row, 6000);
-    assert_eq!(p.cells[0].shading, 500);
+    // ODT has no percentages, so 50% comes back as the gray it looks like.
+    assert_eq!(
+        quill_core::props::shading_fill(p.cells[0].shading, p.cells[0].shading_color),
+        Some(quill_core::Rgb(0x808080))
+    );
     assert_eq!(p.cells[0].borders.top.style, BorderStyle::Thick);
     assert_eq!(p.cells[0].borders.left.style, BorderStyle::Thick);
     assert_eq!(p.cells[0].valign, quill_core::props::VAlign::Bottom);

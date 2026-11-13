@@ -11,7 +11,7 @@
 
 <p align="center"><a href="https://quillwp.com">quillwp.com</a></p>
 
-**Status: alpha · version 0.21.0.** Alpha testers wanted.
+**Status: alpha · version 0.22.0.** Alpha testers wanted.
 **[Download a build](https://github.com/QuillWP/quill/releases)** from the releases page.
 
 ![Quill editing a document set in Avenir Next with headings, a bulleted list and a table](docs/images/screenshot.png)

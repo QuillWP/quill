@@ -524,20 +524,6 @@ fn parse_color(v: &str) -> Option<Rgb> {
     Rgb::from_hex(hex)
 }
 
-/// Shading as the original's gray percentage, from a background color.
-fn shading(v: &str) -> u16 {
-    let Some(c) = parse_color(v) else {
-        return 0;
-    };
-    let lum = (c.r() as u32 * 30 + c.g() as u32 * 59 + c.b() as u32 * 11) / 100;
-    let pct = ((255 - lum) * 1000 / 255) as u16;
-    quill_core::props::SHADING_STEPS
-        .iter()
-        .copied()
-        .min_by_key(|s| s.abs_diff(pct))
-        .unwrap_or(0)
-}
-
 /// A border like "0.5pt solid #000000", or "none".
 fn border(v: Option<&str>, padding: Option<&str>) -> BorderLine {
     let Some(v) = v else {
@@ -865,8 +851,8 @@ impl<'a> Reader<'a> {
             p.keep_together = v == "always";
         }
         if let Some(v) = e.attr("background-color") {
-            p.shading = shading(v);
             p.shading_color = parse_color(v);
+            p.shading = 0;
         }
         if e.attrs.iter().any(|(k, _)| k.starts_with("border")) {
             p.borders = borders(e);
@@ -2322,9 +2308,7 @@ impl<'a> Reader<'a> {
                     cells.push(CellProps {
                         width,
                         borders: cp.map(borders).unwrap_or_default(),
-                        shading: cp
-                            .and_then(|p| p.attr("background-color"))
-                            .map_or(0, shading),
+                        shading: 0,
                         shading_color: cp
                             .and_then(|p| p.attr("background-color"))
                             .and_then(parse_color),

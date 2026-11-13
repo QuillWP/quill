@@ -156,11 +156,9 @@ fn para_props(p: &ParaProps) -> String {
         LineSpacing::Exactly(n) => format!("fo:line-height=\"{}pt\"", points(n)),
         LineSpacing::AtLeast(n) => format!("style:line-height-at-least=\"{}pt\"", points(n)),
     };
-    let gray = 255 - (255u32 * p.shading.min(1000) as u32 / 1000);
-    let fill = if p.shading_color.is_some() || p.shading > 0 {
-        format!("#{:06x}", p.shading_color.map_or(gray * 0x010101, |c| c.0))
-    } else {
-        "transparent".into()
+    let fill = match quill_core::props::shading_fill(p.shading, p.shading_color) {
+        Some(c) => format!("#{:06x}", c.0),
+        None => "transparent".into(),
     };
     format!(
         r##"<style:paragraph-properties fo:text-align="{}" fo:margin-left="{}pt" fo:margin-right="{}pt" fo:margin-top="{}pt" fo:margin-bottom="{}pt" fo:text-indent="{}pt" {line} fo:break-before="{}" fo:keep-with-next="{}" fo:keep-together="{}" fo:background-color="{fill}"/>"##,
@@ -243,14 +241,8 @@ impl Writer<'_> {
         ] {
             let _ = write!(props, r#" fo:border-{edge}="{}""#, border_value(&line));
         }
-        if let Some(color) = cell.shading_color {
+        if let Some(color) = quill_core::props::shading_fill(cell.shading, cell.shading_color) {
             let _ = write!(props, r##" fo:background-color="#{:06x}""##, color.0);
-        } else if cell.shading > 0 {
-            let gray = 255 - (255u32 * cell.shading.min(1000) as u32 / 1000);
-            let _ = write!(
-                props,
-                r##" fo:background-color="#{gray:02x}{gray:02x}{gray:02x}""##
-            );
         }
         match cell.valign {
             VAlign::Top => {}

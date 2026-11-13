@@ -162,6 +162,10 @@ pub enum DialogId {
     Section,
     Document,
     Border,
+    /// Border with Apply To: Cells chosen.
+    BorderCells,
+    /// Border with Apply To: Table chosen.
+    BorderTable,
     Style,
     CharacterStyles,
     Preferences,
@@ -376,6 +380,8 @@ pub struct DocView {
     /// Control is held, so a picture's handles crop.
     pub crop_held: bool,
     table_drag: Option<table_move::TableDrag>,
+    /// A click on a selected table's handle asks for its Border dialog.
+    pub border_for_table: bool,
     /// A cell border being dragged.
     border_drag: Option<borders::BorderDrag>,
     /// Frames placed on the pages (Page Layout view and printing).
@@ -470,6 +476,7 @@ impl DocView {
             pic_crop: None,
             crop_held: false,
             table_drag: None,
+            border_for_table: false,
             border_drag: None,
             frames: Vec::new(),
             wraps: Vec::new(),

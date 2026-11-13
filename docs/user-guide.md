@@ -364,13 +364,14 @@ can open the native files as direct formatting but lose named-style identity whe
 saving them.
 
 
-Format > Border also offers solid shading colors for paragraphs and, with Apply To:
-Cells, table cells. Imported solid RGB fills appear by name or as `#RRGGBB` and stay
-exact through native saves, DOCX, RTF, HTML, ODT and PDF output. Changing only borders
-keeps the existing fills; choosing None or a gray percentage replaces the color.
-Colored patterns and DOCX theme-only fills without a resolved RGB value still use a
-fallback and an import warning. Older app versions can open the new native files but
-ignore their added color fields and lose those colors if they save the document.
+Format > Border picks the sides, the line style and a line color box (it opens the same palette
+as the Character dialog's), and the distance from text. Apply To is Paragraph, Cells or Table;
+a side changed on a cell is also set on the cell across it, so a shared edge stays one color.
+The Background box sets a plain background color (No Color puts it away); gray percentages are not offered. Imported RGB fills stay exact through native saves, DOCX,
+RTF, HTML, ODT and PDF output, and changing only borders keeps the existing shading. Colored
+patterns and DOCX theme-only fills without a resolved RGB value still use a fallback and an
+import warning. Older app versions can open the new native files but ignore their added color
+fields and lose those colors if they save the document.
 
 
 When a document uses fonts that are not installed, the message on opening it can keep them,

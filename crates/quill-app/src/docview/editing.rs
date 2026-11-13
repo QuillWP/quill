@@ -458,6 +458,7 @@ impl DocView {
             PageSetup => return Effect::Dialog(DialogId::PageSetup),
             DocumentDialog => return Effect::Dialog(DialogId::Document),
             BorderDialog => return Effect::Dialog(DialogId::Border),
+            BorderCells => return Effect::Dialog(DialogId::BorderCells),
             InsertTable => return Effect::Dialog(DialogId::InsertTable),
             TableCells => return Effect::Dialog(DialogId::TableCells),
             TableLayout => return Effect::Dialog(DialogId::TableLayout),

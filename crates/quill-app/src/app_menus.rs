@@ -703,7 +703,7 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
         toc_items.push(b.cmd("Edit Hyperlink\u{2026}", Cmd::Hyperlink));
         toc_items.push(b.cmd("Remove Hyperlink", Cmd::RemoveHyperlink));
         toc_items.push(Item::separator());
-    } else if selected {
+    } else if selected && view.selected_cells().is_none() {
         toc_items.push(b.cmd("Hyperlink\u{2026}", Cmd::Hyperlink));
         if view.has_link() {
             toc_items.push(b.cmd("Remove Hyperlink", Cmd::RemoveHyperlink));
@@ -729,6 +729,7 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
             toc_items.push(b.cmd("Merge Cells", Cmd::MergeCells));
         }
         toc_items.push(b.cmd("Split Cell", Cmd::SplitCell));
+        toc_items.push(b.cmd("Borders and Shading\u{2026}", Cmd::BorderCells));
         toc_items.push(Item::separator());
         let now = view.cell_alignment();
         let items = crate::docview::CELL_ALIGNMENTS

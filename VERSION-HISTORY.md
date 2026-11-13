@@ -7,28 +7,29 @@ Add an entry for every new tag as part of the release process.
 
 Versions 0.1.0 to 0.14.0 were all tagged on 2026-11-05.
 
-## 0.21.0 - 2026-11-13
+## 0.22.0 - 2026-11-13
 
-Windows dialogs use native controls, and the toolbar's Font Color opens the
-color palette.
+A reworked Border dialog with color boxes and Apply To Table, borders that
+join properly, and the end-of-document bar removed.
 
-- The native panel makes color swatch buttons, the palette popup, sliders
-  (trackbars) and shown-only color boxes, so Preferences > Colors, the
-  Character style dialog and Edit Color look like the rest of the system.
-- Labels sit beneath the fields, and are as wide as their text. Choosing
-  another Preferences page changes the window in place instead of closing and
-  rebuilding it.
-- A dialog opened over another (Edit Color over Preferences) is owned by the
-  one below, which stays showing, disabled, until the upper one closes.
-  Windows keeps them together and raises them together.
-- Font Color on the toolbar opens the same palette that pops out beside a
-  dialog's color box, below the button. One click on a box colors the
-  selection, Edit Color opens the editor and applies its result to the text,
-  and a press elsewhere or Escape closes it. This replaces a menu of the
-  original's eight color names.
-- The Include Endnotes section setting. DOCX has no equivalent, so it was
-  stored as private XML that Word drops when it resaves. Notes set to go at
-  the end of a section now always print at the end of the document.
+- The line color is a color box (with its HTML code beside it) that opens the
+  same palette as the Character dialog. A new line color goes to the sides
+  ticked, and the side checks are one column.
+- A Background color box with No Color sets a plain background for the
+  paragraph, cells or table. A background and a gray percentage are kept
+  together in the model: DOCX stores both, ODT and HTML store the resulting
+  color, and the dialog does not offer percentages.
+- Apply To is Paragraph, Cells or Table. What you changed in the dialog goes
+  with you when you change the target, and OK still writes only what differs
+  from what the target showed.
+- A side changed on a cell is also set on the cell across it, so a shared edge
+  is one color. Cells that do not touch the selection are left alone.
+- Clicking the handle of a selected table opens Border on Table. The right-
+  click menu in a cell has Borders and Shading..., which opens it on Cells,
+  and no longer offers Hyperlink while cells or a whole table are selected.
+- A cell's top and bottom lines run on under its right line, so the corner
+  joins.
+- The short bar drawn under the last line of every document is removed.
 
 ## 0.15.0 - 2026-11-08
 

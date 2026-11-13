@@ -424,6 +424,11 @@ fn borders(out: &mut String, b: &Borders) {
     out.push_str("</w:pBdr>");
 }
 
+/// A shading's fill attribute: the background color, or auto.
+fn fill_attr(color: Option<quill_core::props::Rgb>) -> String {
+    color.map_or_else(|| "auto".into(), |c| format!("{:06X}", c.0))
+}
+
 fn shading_val(tenths: u16) -> &'static str {
     match tenths {
         0 => "clear",
@@ -542,19 +547,12 @@ fn ppr(p: &ParaProps, base: &ParaProps) -> String {
         borders(&mut o, &p.borders);
     }
     if p.shading != base.shading || p.shading_color != base.shading_color {
-        if let Some(color) = p.shading_color {
-            let _ = write!(
-                o,
-                r#"<w:shd w:val="clear" w:color="auto" w:fill="{:06X}"/>"#,
-                color.0
-            );
-        } else {
-            let _ = write!(
-                o,
-                r#"<w:shd w:val="{}" w:color="auto" w:fill="auto"/>"#,
-                shading_val(p.shading)
-            );
-        }
+        let _ = write!(
+            o,
+            r#"<w:shd w:val="{}" w:color="auto" w:fill="{}"/>"#,
+            shading_val(p.shading),
+            fill_attr(p.shading_color)
+        );
     }
     if p.tabs != base.tabs {
         o.push_str("<w:tabs>");
@@ -1391,17 +1389,12 @@ fn table(doc: &Document, ids: &[String], paras: &[Paragraph], outer: u8, out: &m
                 border(out, "right", &cell.borders.right, cell.borders.shadow);
                 out.push_str("</w:tcBorders>");
             }
-            if let Some(color) = cell.shading_color {
+            if cell.shading_color.is_some() || cell.shading > 0 {
                 let _ = write!(
                     out,
-                    r#"<w:shd w:val="clear" w:color="auto" w:fill="{:06X}"/>"#,
-                    color.0
-                );
-            } else if cell.shading > 0 {
-                let _ = write!(
-                    out,
-                    r#"<w:shd w:val="{}" w:color="auto" w:fill="auto"/>"#,
-                    shading_val(cell.shading)
+                    r#"<w:shd w:val="{}" w:color="auto" w:fill="{}"/>"#,
+                    shading_val(cell.shading),
+                    fill_attr(cell.shading_color)
                 );
             }
             match cell.valign {

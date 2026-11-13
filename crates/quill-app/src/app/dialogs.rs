@@ -189,6 +189,11 @@ impl WinState {
                 let (d, st) = crate::border_dialog::border(&self.view);
                 (d, Which::Border(st))
             }
+            DialogId::BorderCells | DialogId::BorderTable => {
+                let target = if id == DialogId::BorderTable { 2 } else { 1 };
+                let (d, st) = crate::border_dialog::border_at(&self.view, target);
+                (d, Which::Border(st))
+            }
             DialogId::Document => (crate::page_dialogs::document(&self.view), Which::Document),
             DialogId::InsertTable => {
                 let (d, st) = crate::table_dialogs::insert_table(&self.view);
@@ -294,8 +299,11 @@ impl WinState {
             }
         }
         let prefs = matches!(which, Which::Preferences { .. });
+        let delete = has_delete(which);
         let start = if prefs {
             crate::prefs_dialog::box_color(d, anchor)
+        } else if let Which::Border(st) = which {
+            crate::border_dialog::color_start(st, anchor)
         } else {
             let Some(rgb) = d.swatch_rgb(anchor) else {
                 return;
@@ -305,7 +313,7 @@ impl WinState {
         let st = crate::palette::PaletteState::new(start, &self.view.doc);
         // Preferences' colors are for every document, so Delete is only
         // for a document's own.
-        d.popout = Some(crate::palette::popout(&st, anchor, !prefs));
+        d.popout = Some(crate::palette::popout(&st, anchor, delete));
         self.color_pop = Some((anchor, st));
     }
 
@@ -315,7 +323,7 @@ impl WinState {
         else {
             return;
         };
-        let delete = !matches!(which, Which::Preferences { .. });
+        let delete = has_delete(which);
         d.popout = Some(crate::palette::popout(st, anchor, delete));
     }
 
@@ -325,6 +333,7 @@ impl WinState {
             Some((Which::Preferences { .. }, d)) => {
                 crate::prefs_dialog::show_color(d, anchor, Some(c));
             }
+            Some((Which::Border(st), d)) => crate::border_dialog::set_color(st, d, anchor, Some(c)),
             Some((_, d)) => {
                 d.set_swatch(anchor, c.0);
                 d.set_label("color_hex", &crate::palette::hex(c));
@@ -464,6 +473,11 @@ impl WinState {
             Some((Which::Preferences { .. }, d)) => {
                 if let Some(anchor) = anchor {
                     crate::prefs_dialog::show_color(d, anchor, Some(color));
+                }
+            }
+            Some((Which::Border(st), d)) => {
+                if let Some(anchor) = anchor {
+                    crate::border_dialog::set_color(st, d, anchor, Some(color));
                 }
             }
             // From the pop-out beside a color: it becomes the
@@ -1393,6 +1407,18 @@ impl WinState {
             {
                 self.toggle_color_popout(id);
             }
+            Outcome::Button(id @ ("line_color" | "shading_color"))
+                if matches!(which, Which::Border(_)) =>
+            {
+                self.toggle_color_popout(id);
+            }
+            Outcome::Button("shading_clear") if matches!(which, Which::Border(_)) => {
+                if let Which::Border(st) = which {
+                    crate::border_dialog::set_color(st, d, "shading_color", None);
+                }
+                d.popout = None;
+                self.color_pop = None;
+            }
             Outcome::Button(id)
                 if matches!(which, Which::Preferences { .. })
                     && crate::prefs_dialog::clear_color(d, id) =>
@@ -1403,7 +1429,10 @@ impl WinState {
             Outcome::Swatch { id, double }
                 if matches!(
                     which,
-                    Which::Character(_) | Which::StyleCharacter(_) | Which::Preferences { .. }
+                    Which::Character(_)
+                        | Which::StyleCharacter(_)
+                        | Which::Preferences { .. }
+                        | Which::Border(_)
                 ) =>
             {
                 self.color_popout_box(id, double);
@@ -1411,7 +1440,10 @@ impl WinState {
             Outcome::Button("edit")
                 if matches!(
                     which,
-                    Which::Character(_) | Which::StyleCharacter(_) | Which::Preferences { .. }
+                    Which::Character(_)
+                        | Which::StyleCharacter(_)
+                        | Which::Preferences { .. }
+                        | Which::Border(_)
                 ) =>
             {
                 self.color_popout_edit();
@@ -1566,9 +1598,7 @@ impl WinState {
                     }
                 }
                 Which::TableCells if id == "border" => {
-                    let (mut d, st) = crate::border_dialog::border(&self.view);
-                    d.set_selected("applyto", 1);
-                    let st = crate::border_dialog::for_cells(st, &self.view, &mut d);
+                    let (d, st) = crate::border_dialog::border_at(&self.view, 1);
                     self.dialogs.push((Which::Border(st), d));
                 }
                 Which::TableLayout => {
@@ -1611,4 +1641,10 @@ impl WinState {
             self.dialog_outcome(o, clip);
         }
     }
+}
+
+/// Whether the color pop-out of this dialog offers Delete: only where the
+/// colors are the document's own, not Preferences' or a border's.
+fn has_delete(which: &Which) -> bool {
+    !matches!(which, Which::Preferences { .. } | Which::Border(_))
 }

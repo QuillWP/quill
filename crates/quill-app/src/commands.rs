@@ -123,6 +123,9 @@ commands! {
     SectionDialog,
     DocumentDialog,
     BorderDialog,
+    /// Borders and shading for the cell the insertion point is in (the
+    /// cell right-click menu).
+    BorderCells,
     InsertTable,
     TableCells,
     TableLayout,
@@ -257,6 +260,7 @@ impl Cmd {
                 | SectionDialog
                 | DocumentDialog
                 | BorderDialog
+                | BorderCells
                 | TableCells
                 | TableLayout
                 | InsertRowAbove
@@ -330,6 +334,7 @@ impl Cmd {
             SectionDialog => "Section…",
             DocumentDialog => "Document Setup…",
             BorderDialog => "Border…",
+            BorderCells => "Borders and Shading…",
             InsertTable => "Table…",
             TableCells => "Table Cells…",
             TableLayout => "Table Layout…",

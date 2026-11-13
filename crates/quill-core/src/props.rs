@@ -335,9 +335,9 @@ pub struct CellProps {
     /// columns included.
     pub width: Twips,
     pub borders: Borders,
-    /// In tenths of a percent.
+    /// Black over the background, in tenths of a percent.
     pub shading: u16,
-    /// An explicit solid background. When present, it takes precedence over shading.
+    /// The background color. With `shading`, black is laid over it.
     pub shading_color: Option<Rgb>,
     /// Where the cell's text sits when the row is taller than it.
     pub valign: VAlign,
@@ -456,9 +456,9 @@ pub struct ParaProps {
     pub keep_together: bool,
     pub suppress_line_numbers: bool,
     pub borders: Borders,
-    /// Shading in tenths of a percent (125 = 12.5%), 0 for none.
+    /// Black over the background, in tenths of a percent (125 = 12.5%), 0 for none.
     pub shading: u16,
-    /// An explicit solid background. When present, it takes precedence over shading.
+    /// The background color. With `shading`, black is laid over it.
     pub shading_color: Option<Rgb>,
     /// The paragraph is inside a table cell. Word marks every paragraph of
     /// a cell this way; the cell's last paragraph ends in a cell mark.
@@ -599,6 +599,20 @@ pub const SHADING_STEPS: [u16; 17] = [
     0, 100, 125, 200, 250, 300, 375, 400, 500, 600, 625, 700, 750, 800, 875, 900, 1000,
 ];
 
+/// The color a shading draws: the background (white if none) with black laid
+/// over it at `tenths` of a percent. None when there is neither.
+pub fn shading_fill(tenths: u16, color: Option<Rgb>) -> Option<Rgb> {
+    if tenths == 0 {
+        return color;
+    }
+    let keep = 1000 - u32::from(tenths.min(1000));
+    let base = color.unwrap_or(Rgb(0xFF_FFFF));
+    let part = |v: u8| (u32::from(v) * keep + 500) / 1000;
+    Some(Rgb(part(base.r()) << 16
+        | part(base.g()) << 8
+        | part(base.b())))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -611,6 +625,17 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn shading_lays_black_over_the_background() {
+        assert_eq!(shading_fill(0, None), None);
+        assert_eq!(shading_fill(0, Some(Rgb(0x123456))), Some(Rgb(0x123456)));
+        // 20% black on white is the old gray.
+        assert_eq!(shading_fill(200, None), Some(Rgb(0xCCCCCC)));
+        assert_eq!(shading_fill(1000, None), Some(Rgb::BLACK));
+        // 50% black over pure red.
+        assert_eq!(shading_fill(500, Some(Rgb(0xFF0000))), Some(Rgb(0x800000)));
+    }
 
     #[test]
     fn tabs_stay_sorted_and_unique() {
