@@ -21,6 +21,8 @@ mod crash_log;
 mod customize;
 mod dialog;
 mod docview;
+mod events;
+mod file_dialog;
 mod find_dialog;
 mod font_names;
 mod frame_dialog;
@@ -115,6 +117,14 @@ fn main() {
             std::process::exit(2);
         }
     }
+    if let Some(detailed) = args.iter().find_map(|a| match a.as_str() {
+        "--with-events" => Some(false),
+        "--with-events=all" => Some(true),
+        _ => None,
+    }) {
+        let file = events::start(detailed, &args[1..]);
+        eprintln!("quill: logging steps to {}", file.display());
+    }
     // Tracked changes are signed with Preferences' Your Name and dated in
     // local time, as Word does.
     quill_core::revision::set_author_source(|| settings::with(|s| s.name.clone()));
@@ -123,11 +133,14 @@ fn main() {
         snapshot(&args[i + 1..]);
         return;
     }
+    crate::ev!("loading settings");
     settings::load();
+    crate::ev!("settings loaded");
     crash_log::install();
     // Finding the installed fonts can take a moment on a cold start, so do
     // it while the window system starts up.
     let fonts = app::start_font_load();
+    crate::ev!("font loading started in the background");
     let mut builder = EventLoop::<app::UserEvent>::with_user_event();
     // Quill puts up its own menu bar; skip winit's placeholder one.
     #[cfg(target_os = "macos")]
@@ -148,6 +161,7 @@ fn main() {
     {
         winit::platform::x11::EventLoopBuilderExtX11::with_x11(&mut builder);
     }
+    crate::ev!("building the event loop");
     let event_loop = match builder.build() {
         Ok(el) => el,
         Err(e) => {
@@ -168,6 +182,7 @@ fn main() {
     #[cfg(target_os = "macos")]
     mac_widgets::install(event_loop.create_proxy());
     let mut app = app::App::new(fonts, files, proxy);
+    crate::ev!("running the event loop");
     if let Err(e) = event_loop.run_app(&mut app) {
         eprintln!("quill: {e}");
         std::process::exit(1);
@@ -175,11 +190,21 @@ fn main() {
 }
 
 const USAGE: &str = "\
-usage: quill [FILE...]
+usage: quill [FILE...] [--with-events[=all]] [--events-file=PATH]
        quill --snapshot out.png [--size WxH] [--scale N] [--open FILE] [--script STEPS] [--settings FILE]
 
-  -h, --help    show this message
-  --version     show the version
+  -h, --help         show this message
+  --version          show the version
+  --with-events      log every step to a file as it happens, to find where Quill
+                     hangs or misbehaves when it raises no panic. Each line is
+                     flushed at once, so after a freeze the end of the file is the
+                     last thing done, and a watchdog adds a \"STUCK\" line naming
+                     the last step. The file is quill-events.log in the folder
+                     Quill was started from, started afresh each run, and lines
+                     are echoed to the console. Off unless asked for.
+  --with-events=all  the same with mouse moves, redraws and every wake of the
+                     event loop too: very detailed.
+  --events-file=PATH write the log there instead (QUILL_EVENTS_FILE does too).
 ";
 
 /// What the command line asks for, before anything starts up.
@@ -226,6 +251,8 @@ fn check_options(args: &[String]) -> Options {
             "--snapshot" => break,
             "--version" => return Options::Version,
             "-h" | "--help" => return Options::Help,
+            "--with-events" | "--with-events=all" => {}
+            a if a.starts_with("--events-file=") => {}
             a if a.starts_with('-') && !a.starts_with("-psn_") => {
                 return Options::Unknown(arg.clone());
             }

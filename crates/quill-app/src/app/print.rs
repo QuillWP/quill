@@ -66,14 +66,14 @@ impl App {
         #[cfg(target_os = "macos")]
         let native_props = doc.props.clone();
         let target = if job.pdf {
-            let mut dialog = rfd::FileDialog::new()
+            let mut dialog = crate::file_dialog::FileDialog::new()
                 .set_title("Save as PDF")
                 .set_file_name(format!("{title}.pdf"))
                 .add_filter("PDF", &["pdf"]);
             if let Some(dir) = w.st.main_view().path.as_ref().and_then(|p| p.parent()) {
                 dialog = dialog.set_directory(dir);
             }
-            let Some(path) = dialog.save_file() else {
+            let Some(path) = crate::events::timed("Save PDF dialog", || dialog.save_file()) else {
                 return;
             };
             crate::print_job::Target::Save(path)

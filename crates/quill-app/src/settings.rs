@@ -1181,6 +1181,11 @@ fn safe_profile(name: &str) -> Option<String> {
     (!safe.is_empty()).then_some(safe)
 }
 
+/// The folder Quill keeps its settings and logs in.
+pub fn data_folder() -> Option<PathBuf> {
+    path()?.parent().map(PathBuf::from)
+}
+
 fn path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let profile = profile();
@@ -1236,6 +1241,7 @@ pub fn load() {
     defaults.document.page_width = w;
     defaults.document.page_height = h;
     CURRENT.with(|c| *c.borrow_mut() = defaults);
+    crate::ev!("settings file: {:?}", path());
     if let Some(p) = path()
         && let Ok(text) = read_text(&p)
     {
@@ -1314,6 +1320,7 @@ pub fn update(f: impl FnOnce(&mut Settings)) {
     if !PERSIST.load(Ordering::Relaxed) {
         return;
     }
+    crate::ev_all!("settings changed: saving the file");
     if let Some(p) = path()
         && let Err(e) = write_user_file(&p, text.as_bytes())
     {

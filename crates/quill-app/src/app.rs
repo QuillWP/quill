@@ -572,6 +572,7 @@ impl WinState {
 
     /// Run a menu action. Returns what the application should do.
     pub fn act(&mut self, action: Action, clip: &mut Clipboard) -> Effect {
+        crate::ev!("action: {action:?}");
         if self.zoom_edit.is_some() {
             match action {
                 Action::Cmd(Cmd::SelectAll) => {
@@ -1601,6 +1602,7 @@ impl App {
 
     fn ensure_fonts(&mut self) {
         if self.fonts.is_none() {
+            crate::ev!("waiting for the first font scan to finish");
             let (system, catalog) = self
                 .fonts_scan
                 .take()
@@ -1608,6 +1610,7 @@ impl App {
                 .unwrap_or_default();
             self.system_catalog = Some(system);
             self.use_catalog(catalog);
+            crate::ev!("fonts ready");
         }
     }
 
@@ -1648,6 +1651,7 @@ impl App {
         if folders == self.font_folders_loaded {
             return;
         }
+        crate::ev!("font sources changed: searching them in the background");
         // Before the fonts are first in use, this runs again once they are.
         let Some(system) = self.system_catalog.clone() else {
             return;
@@ -2121,6 +2125,7 @@ impl App {
     }
 
     fn redraw(&mut self, id: WindowId) {
+        crate::ev_all!("redraw");
         self.sync_appearance();
         self.ensure_fonts();
         let list = self.window_list(id);
@@ -2293,15 +2298,13 @@ fn licenses() {
 #[cfg(not(target_os = "macos"))]
 fn licenses() {
     if !crate::licenses::open_text_file() {
-        rfd::MessageDialog::new()
-            .set_level(rfd::MessageLevel::Info)
-            .set_title("Licenses")
-            .set_description(
-                "Quill's licenses are in the files that come with it: LICENSE-MIT, \
-                 LICENSE-APACHE and THIRD-PARTY-NOTICES.txt.",
-            )
-            .set_buttons(rfd::MessageButtons::Ok)
-            .show();
+        message_box(
+            rfd::MessageLevel::Info,
+            "Licenses",
+            "Quill's licenses are in the files that come with it: LICENSE-MIT, \
+             LICENSE-APACHE and THIRD-PARTY-NOTICES.txt.",
+            rfd::MessageButtons::Ok,
+        );
     }
 }
 
@@ -2309,10 +2312,10 @@ fn licenses() {
 /// native application-shell integration.
 #[cfg(not(target_os = "macos"))]
 fn about() {
-    rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Info)
-        .set_title("About Quill")
-        .set_description(format!(
+    message_box(
+        rfd::MessageLevel::Info,
+        "About Quill",
+        format!(
             "Quill {}{}\n\nA small word processor written in Rust, inspired by Lucas's favorite word processor from 1992.\n\n{}\nhttps://quillwp.com\nSee Help > Licenses… for the full text.",
             env!("CARGO_PKG_VERSION"),
             if cfg!(debug_assertions) {
@@ -2321,9 +2324,9 @@ fn about() {
                 String::new()
             },
             crate::licenses::SUMMARY
-        ))
-        .set_buttons(rfd::MessageButtons::Ok)
-        .show();
+        ),
+        rfd::MessageButtons::Ok,
+    );
 }
 
 fn file_name(path: &std::path::Path) -> String {
@@ -2479,6 +2482,7 @@ fn crop_cursor(el: &ActiveEventLoop) -> Option<CustomCursor> {
 
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
+        crate::ev!("event loop: resumed (window system is up)");
         if self.crop_cursor.is_none() {
             self.crop_cursor = crop_cursor(el);
         }
@@ -2539,6 +2543,10 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
+        crate::ev!(
+            "user event: {}",
+            crate::events::short(&format!("{event:?}"))
+        );
         #[cfg(not(target_os = "macos"))]
         let _ = el;
         match event {
@@ -2694,6 +2702,8 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn new_events(&mut self, _el: &ActiveEventLoop, cause: StartCause) {
+        crate::events::busy();
+        crate::ev_all!("event loop wakes: {cause:?}");
         self.refresh_font_folders();
         if let StartCause::ResumeTimeReached { .. } = cause {
             let now = Instant::now();
@@ -2732,6 +2742,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        crate::events::window_event(&event);
         if self.is_palette_window(id) {
             self.palette_window_event(el, event);
             return;
@@ -2989,6 +3000,8 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        let _idle = crate::events::IdleOnDrop;
+        crate::ev_all!("event loop: about to wait");
         self.sync_palette_window(el);
         #[cfg(target_os = "macos")]
         self.sync_edited_marks();

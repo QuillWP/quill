@@ -125,7 +125,7 @@ pub fn select_file(path: &Path, create: bool) -> Result<(), String> {
 }
 
 pub fn choose_file(create: bool) -> Result<Option<PathBuf>, String> {
-    let mut dialog = rfd::FileDialog::new()
+    let mut dialog = crate::file_dialog::FileDialog::new()
         .set_title(if create {
             "New Custom Dictionary"
         } else {

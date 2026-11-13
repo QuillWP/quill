@@ -84,6 +84,7 @@ impl App {
     /// and a document already open comes to the front instead of opening
     /// again: two windows on one file would overwrite each other's saves.
     pub(super) fn open_files(&mut self, el: &ActiveEventLoop, paths: &[PathBuf]) {
+        crate::ev!("open files: {paths:?}");
         for path in paths {
             let open = self.windows.iter().find(|(_, w)| {
                 let here = w.st.main_view().path.as_deref();
@@ -95,6 +96,7 @@ impl App {
                 continue;
             }
             let rtf = crate::settings::with(|s| s.interpret_rtf);
+            crate::ev!("reading {path:?}");
             let (mut doc, mut report) = match quill_formats::load_reported(path, rtf) {
                 Ok(d) => d,
                 // A file named as a document that holds plain text can
@@ -292,7 +294,7 @@ impl App {
     }
 
     pub(super) fn open_dialog(&mut self, el: &ActiveEventLoop, id: Option<WindowId>) {
-        let mut dialog = rfd::FileDialog::new()
+        let mut dialog = crate::file_dialog::FileDialog::new()
             .set_title("Open")
             .add_filter("Readable Files", quill_formats::READABLE)
             .add_filter("All Files", &["*"]);
@@ -305,7 +307,10 @@ impl App {
         }
         // Modal inside winit's event handler: needs the patched winit in
         // vendor/winit (see vendor/README.md).
-        if let Some(paths) = dialog.pick_files() {
+        crate::ev!("Open: about to show the file dialog");
+        let picked = crate::events::timed("Open file dialog", || dialog.pick_files());
+        crate::ev!("Open: the dialog returned {picked:?}");
+        if let Some(paths) = picked {
             self.open_files(el, &paths);
         }
     }
@@ -343,10 +348,15 @@ impl App {
                         .as_ref()
                         .and_then(|path| path.parent());
                 #[cfg(target_os = "macos")]
-                let selected = crate::mac_save::save_file(&w.window, &filename, directory);
+                let selected = {
+                    crate::ev!("Save: about to show the save panel");
+                    crate::events::timed("Save panel", || {
+                        crate::mac_save::save_file(&w.window, &filename, directory)
+                    })
+                };
                 #[cfg(not(target_os = "macos"))]
                 let selected = {
-                    let mut dialog = rfd::FileDialog::new()
+                    let mut dialog = crate::file_dialog::FileDialog::new()
                         .set_title("Save As")
                         .set_file_name(&filename);
                     for format in std::iter::once(initial)
@@ -357,7 +367,10 @@ impl App {
                     if let Some(dir) = directory {
                         dialog = dialog.set_directory(dir);
                     }
-                    dialog.save_file()
+                    {
+                        crate::ev!("Save: about to show the file dialog");
+                        crate::events::timed("Save file dialog", || dialog.save_file())
+                    }
                 };
                 chosen = true;
                 match selected {
@@ -480,6 +493,7 @@ impl App {
         view.doc.props.view = Some(view.current_view());
         // In Markdown source view the text is the file for Markdown, and
         // every other format gets the document the text stands for.
+        crate::ev!("writing {path:?} as {format:?}");
         let saved = {
             let view = w.st.main_view();
             match (view.markdown_text(), format) {
@@ -491,6 +505,7 @@ impl App {
                 (None, _) => quill_formats::save(&view.doc, &path, format),
             }
         };
+        crate::ev!("written: {:?}", saved.as_ref().map(|_| ()));
         if let Err(error) = saved {
             let check = (format == Format::Quill && w.st.main_view().markdown_text().is_none())
                 .then(|| quill_formats::native_check(&w.st.main_view().doc))

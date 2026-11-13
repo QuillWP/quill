@@ -36,6 +36,7 @@ pub fn install() {
         {
             let _ = file.write_all(entry.as_bytes());
         }
+        crate::ev!("PANIC: {info}");
         previous(info);
     }));
 }

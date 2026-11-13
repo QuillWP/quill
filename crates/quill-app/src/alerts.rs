@@ -12,19 +12,20 @@ pub(crate) fn message_box(
     text: impl AsRef<str>,
     buttons: rfd::MessageButtons,
 ) -> rfd::MessageDialogResult {
-    #[cfg(target_os = "macos")]
-    {
-        crate::mac_alert::show(level, title, text.as_ref(), buttons)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        rfd::MessageDialog::new()
-            .set_level(level)
-            .set_title(title)
-            .set_description(text.as_ref())
-            .set_buttons(buttons)
-            .show()
-    }
+    let what = format!(
+        "message box {title:?}: {}",
+        crate::events::short(text.as_ref())
+    );
+    crate::events::timed(&what, || {
+        #[cfg(target_os = "macos")]
+        {
+            crate::mac_alert::show(level, title, text.as_ref(), buttons)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            crate::file_dialog::message(level, title, text.as_ref(), buttons)
+        }
+    })
 }
 
 /// Ask a question with `yes` and Cancel; true for `yes`.

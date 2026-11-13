@@ -719,7 +719,7 @@ fn pick_font_folder(directory: Option<&std::path::Path>) -> Option<std::path::Pa
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let mut dialog = rfd::FileDialog::new().set_title("Choose a Font Folder");
+        let mut dialog = crate::file_dialog::FileDialog::new().set_title("Choose a Font Folder");
         if let Some(directory) = directory {
             dialog = dialog.set_directory(directory);
         }

@@ -1245,6 +1245,10 @@ impl WinState {
 
     /// Act on what happened in the open dialog.
     pub(super) fn dialog_outcome(&mut self, o: Outcome, clip: &mut Clipboard) {
+        if crate::events::enabled() {
+            let title = self.dialogs.last().map(|(_, d)| d.title.clone());
+            crate::ev!("dialog {title:?}: {o:?}");
+        }
         if let Some((Which::FontSources(draft), d)) = self.dialogs.last_mut() {
             crate::prefs_dialog::font_sources_changed(d, draft);
             match o {

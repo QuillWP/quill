@@ -46,6 +46,7 @@ impl App {
 
     /// Bring the system menu bar up to date.
     pub(super) fn sync_menus(&mut self) {
+        crate::ev_all!("sync menus");
         if let Some(i) = self.front.and_then(|id| self.index(id)) {
             self.take_doc(i);
         }

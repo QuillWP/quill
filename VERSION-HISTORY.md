@@ -7,32 +7,30 @@ Add an entry for every new tag as part of the release process.
 
 Versions 0.1.0 to 0.14.0 were all tagged on 2026-11-05.
 
-## 0.19.0 - 2026-11-12
+## 0.20.0 - 2026-11-12
 
-Paragraph Styles matches Character Styles, Clear Formatting arrives, and Tools
-> Commands is taken out.
+Hang fixes for Windows and Linux dialogs, and a step-by-step event log for
+finding hangs.
 
-- Paragraph Styles uses the Character Styles layout: +, -, Edit and Duplicate
-  under the list, Apply, Remove Style and Update to Selection on the right,
-  and the This Document or All Styles choice kept. Update to Selection
-  redefines the style from the selection.
-- Apply works (it did nothing at first), the question before replacing all
-  settings from a file is back, and the formatting toolbar's style list is No
-  Style, Clear Formatting, Normal, then every other style by name.
-  Character... in a style editor uses the same color palette as Format >
-  Character.
-- Format > Clear Formatting (below Revert To Style) puts the selected
-  paragraphs back to Normal with no manual paragraph or character formatting
-  and no character styles, as one undo step. Text, pictures and a table cell's
-  place are kept.
-- It is also a row in the toolbar's style list and in the Style Sheets
-  palette, and a button in both style lists. In Character Styles it clears
-  only the selected text, or makes the next text typed plain when there is
-  just a caret.
-- Style import is deferred until after version 1.0. The Import buttons and
-  everything behind them are removed from both style lists.
-- Tools > Commands is removed. A key changed there was saved and listed but
-  did nothing, because the key handling never read the changes.
+- quill --with-events writes each step to quill-events.log in the folder Quill
+  was started from (or --events-file=PATH, or QUILL_EVENTS_FILE), falling back
+  to the settings folder. --with-events=all adds mouse moves, redraws and
+  every wake of the event loop.
+- It logs startup, window events, key presses and their commands, menu
+  actions, dialog outcomes (a begin with no end means it never came back),
+  file reads and writes and panics, and the build commit. A watchdog adds a
+  STUCK line every two seconds while the program is busy and has logged
+  nothing, and a line repeated in a row is shown three times and then counted.
+- Open, Save and message dialogs are GTK dialogs on the main thread. rfd ran
+  them on a thread of its own, which froze Quill on Ubuntu 24.04. A finished
+  dialog is hidden, destroyed and its pending events run so it releases its
+  keyboard and mouse grab.
+- Save As lets you pick the file type: choosing a filter changes the name's
+  extension, as the Mac's save panel does.
+- Message boxes go through TaskDialogIndirect owned by Quill's window, with
+  their real button labels, and run on a thread of their own. File dialogs run
+  on a thread of their own too. Run on the main thread inside winit's event
+  handler, they never appeared or hung on the second use.
 
 ## 0.15.0 - 2026-11-08
 

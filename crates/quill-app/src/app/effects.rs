@@ -4,6 +4,9 @@ use super::*;
 
 impl App {
     pub(super) fn handle_effect(&mut self, el: &ActiveEventLoop, id: WindowId, effect: Effect) {
+        if effect != Effect::None {
+            crate::ev!("effect: {effect:?}");
+        }
         self.effect(el, id, effect);
         // A dialog or command may have asked for printing, or for a new
         // window.
@@ -162,10 +165,10 @@ impl App {
                 }
             }
             Effect::ChooseMergeData => {
-                let file = rfd::FileDialog::new()
+                let dialog = crate::file_dialog::FileDialog::new()
                     .set_title("Open Data Document")
-                    .add_filter("Documents", quill_formats::READABLE)
-                    .pick_file();
+                    .add_filter("Documents", quill_formats::READABLE);
+                let file = crate::events::timed("Open Data Document dialog", || dialog.pick_file());
                 let list = self.window_list(id);
                 if let (Some(path), Some(i)) = (file, self.index(id)) {
                     let env = Env {
@@ -206,7 +209,7 @@ impl App {
                 }
             }
             Effect::InsertPicture => {
-                let mut dialog = rfd::FileDialog::new()
+                let mut dialog = crate::file_dialog::FileDialog::new()
                     .set_title("Insert Picture")
                     .add_filter(
                         "Pictures",
@@ -219,7 +222,8 @@ impl App {
                 {
                     dialog = dialog.set_directory(dir);
                 }
-                if let Some(path) = dialog.pick_file() {
+                let picked = crate::events::timed("Insert Picture dialog", || dialog.pick_file());
+                if let Some(path) = picked {
                     self.insert_picture_file(id, &path);
                 }
             }

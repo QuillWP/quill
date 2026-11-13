@@ -139,6 +139,15 @@ impl App {
         } else {
             command_map::lookup(&event.logical_key, code.and_then(keycode_char), mods)
         };
+        crate::ev!(
+            "key {:?} with cmd={} shift={} opt={} ctrl={} -> command {:?}",
+            event.logical_key,
+            mods.cmd,
+            mods.shift,
+            mods.opt,
+            mods.ctrl,
+            cmd
+        );
         // After ⌘⌥T (Outline Command Prefix) the next key is an outline
         // command.
         let modifier = matches!(
@@ -260,6 +269,7 @@ impl App {
         state: ElementState,
         context: bool,
     ) {
+        crate::ev!("mouse button {state:?} (context menu: {context})");
         self.ensure_fonts();
         let list = self.window_list(id);
         let Some(i) = self.index(id) else {

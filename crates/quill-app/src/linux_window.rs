@@ -562,11 +562,16 @@ pub fn poll() {
     if !gtk::is_initialized_main_thread() {
         return;
     }
+    let mut handled = 0;
     for _ in 0..32 {
         if !gtk::events_pending() {
             break;
         }
         gtk::main_iteration_do(false);
+        handled += 1;
+    }
+    if handled > 0 {
+        crate::ev_all!("GTK: handled {handled} pending events");
     }
 }
 

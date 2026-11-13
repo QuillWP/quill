@@ -11,7 +11,7 @@
 
 <p align="center"><a href="https://quillwp.com">quillwp.com</a></p>
 
-**Status: alpha · version 0.19.0.** Alpha testers wanted.
+**Status: alpha · version 0.20.0.** Alpha testers wanted.
 **[Download a build](https://github.com/QuillWP/quill/releases)** from the releases page.
 
 ![Quill editing a document set in Avenir Next with headings, a bulleted list and a table](docs/images/screenshot.png)
@@ -22,11 +22,11 @@ Everything in the app, measured from the release build for Apple Silicon Macs:
 
 | Part | Size |
 |---|---:|
-| The program itself | 5.2 MB |
+| The program itself | 5.3 MB |
 | Thesaurus data | 1.4 MB |
 | Icons and About artwork | 0.8 MB |
 | Licenses, notices and readme | 0.2 MB |
-| **Whole app** | **7.6 MB** |
+| **Whole app** | **7.7 MB** |
 | **Download (disk image)** | **5.2 MB** |
 
 Quill is written from scratch in Rust, draws its own pages and uses native Mac
@@ -85,6 +85,15 @@ try, and are willing to report what breaks. Please
 Not yet: screen readers cannot read the document area. See
 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for what is missing or different, and
 [CONTRIBUTING.md](CONTRIBUTING.md) for how to report a problem.
+
+### Reporting a freeze
+
+If Quill freezes or misbehaves, start it from a terminal with
+`quill --with-events` (a debug build is best). It writes `quill-events.log` in
+the folder you started it from: every action, dialog and slow step, with a
+"STUCK" line when Quill sits busy and silent. Send the end of that file with
+your report. `quill --help` lists the other options, and
+[CONTRIBUTING.md](CONTRIBUTING.md) has the details.
 
 ### About the AI agent files
 
