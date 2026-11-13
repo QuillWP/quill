@@ -429,7 +429,11 @@ impl WinState {
 
     /// Edit a color: the macOS Colors panel in a real window on the Mac,
     /// Quill's own Edit Color dialog elsewhere and in tests.
-    fn edit_color(&mut self, start: quill_core::props::Rgb, target: crate::palette::Target) {
+    pub(super) fn edit_color(
+        &mut self,
+        start: quill_core::props::Rgb,
+        target: crate::palette::Target,
+    ) {
         #[cfg(all(target_os = "macos", not(test)))]
         if self.on_screen {
             if let Some(color) = crate::mac_color_panel::pick(start) {
@@ -443,6 +447,10 @@ impl WinState {
 
     /// Edit Color's OK: the color goes back to whatever asked for it.
     fn color_edited(&mut self, target: crate::palette::Target, color: quill_core::props::Rgb) {
+        if target == crate::palette::Target::Text {
+            self.view.set_color(color);
+            return;
+        }
         if let crate::palette::Target::Instead(old) = target {
             self.delete_color(old, color);
             return;

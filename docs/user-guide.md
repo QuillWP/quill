@@ -65,8 +65,8 @@ number, Return on an empty item ends the list, and Return on an empty paragraph 
 it out of the quote, one level each time.
 
 DOCX itself can carry all the document content of Lucas's favorite word
-processor from 1992 that Quill implements. Three Quill preferences have no
-standard DOCX equivalent (margin page numbers, Include Endnotes and Print
+processor from 1992 that Quill implements. Two Quill preferences have no
+standard DOCX equivalent (margin page numbers and Print
 Hidden Text), so Quill stores them as
 ignorable private XML. Current Microsoft Word removes that private XML
 when it resaves a file. Quill warns when an affected document is exported;

@@ -642,9 +642,6 @@ fn section(out: &mut String, s: &quill_core::SectionProps, landscape: bool) {
     if s.different_first_page {
         out.push_str("\\titlepg");
     }
-    if s.include_endnotes {
-        out.push_str("\\endnhere");
-    }
     if s.line_numbers != quill_core::LineNumbering::Off {
         let _ = write!(out, "\\linemod{}", s.line_count_by.max(1));
         if let Some(t) = s.line_from_text {

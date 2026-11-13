@@ -241,6 +241,8 @@ pub enum Target {
     Add,
     /// In place of this color, deleted from the document.
     Instead(Rgb),
+    /// Applied to the selected text, from the toolbar's palette.
+    Text,
 }
 
 /// What the Edit button, or a double-click on `slot`, starts from, and

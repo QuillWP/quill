@@ -44,12 +44,7 @@ fn toolbar_and_formatting_pop_ups_are_handed_to_the_system_menu_on_the_mac() {
             .iter()
             .any(|it| actions.get(it.id as usize) == Some(&Action::ToolbarPosition(1)))
     );
-    for hit in [
-        Hit::FontPopup,
-        Hit::SizePopup,
-        Hit::ColorPopup,
-        Hit::StylePopup,
-    ] {
+    for hit in [Hit::FontPopup, Hit::SizePopup, Hit::StylePopup] {
         state.open_popup(hit, &mut label, &env);
         let rect = state.menu.as_ref().expect("a pop-up opens").open.rect;
         let (menu, _, at) = state.take_popup_menu().expect("the pop-up's menu");
@@ -2243,4 +2238,61 @@ fn apply_in_paragraph_styles_gives_the_style_to_the_paragraph() {
     let mut clip = Clipboard::new();
     state.dialog_outcome(Outcome::Apply, &mut clip);
     assert_eq!(state.view.current_pap().style, id);
+}
+
+#[test]
+fn the_toolbar_color_button_opens_the_palette_and_a_box_colors_the_text() {
+    use quill_core::props::Rgb;
+    let mut doc = quill_core::text::from_plain_text("Some text");
+    doc.main.paras[0].format_range(0, 9, &mut |c| c.color = Rgb(0x336699));
+    let mut state = WinState::new(DocView::new(doc, "Doc".into()));
+    state.width = 900.0;
+    state.height = 700.0;
+    state.view.sel = Selection::new(Position::new(0, 0), Position::new(0, 4));
+    let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+        return;
+    };
+    let mut cache = GlyphCache::new();
+    let mut label = Label {
+        fonts: &mut fonts,
+        cache: &mut cache,
+    };
+    let env = Env {
+        font_names: &[],
+        font_families: &[],
+        recent: &[],
+        windows: &[],
+    };
+    state.open_popup(Hit::ColorPopup, &mut label, &env);
+    assert!(state.menu.is_none(), "the palette is not a menu");
+    let t = state.tool_pal.as_ref().expect("the palette opens");
+    // The selection's own color is in the custom row, marked.
+    assert!(
+        t.pop
+            .items
+            .iter()
+            .any(|i| i.rgb == Some(0x336699) && i.selected)
+    );
+    // Press the red standard box.
+    let red = t
+        .pop
+        .items
+        .iter()
+        .find(|i| i.rgb == Some(0xFF0000))
+        .unwrap();
+    let (x, y) = (t.panel.x + red.rect.x + 2.0, t.panel.y + red.rect.y + 2.0);
+    state.tool_palette_down(x, y);
+    assert!(state.tool_pal.is_none(), "choosing puts it away");
+    assert_eq!(
+        state.view.doc.main.paras[0].chp_of_char(0).color,
+        Rgb(0xFF0000)
+    );
+    assert_eq!(
+        state.view.doc.main.paras[0].chp_of_char(5).color,
+        Rgb(0x336699)
+    );
+    // A press outside only puts it away.
+    state.open_popup(Hit::ColorPopup, &mut label, &env);
+    assert!(state.tool_palette_down(2.0, 2.0).is_some());
+    assert!(state.tool_pal.is_none());
 }

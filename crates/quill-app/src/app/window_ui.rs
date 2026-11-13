@@ -657,6 +657,7 @@ impl WinState {
                 draw(c, &mut label, submenu, open);
             }
         }
+        self.draw_tool_palette(c, &mut label);
         let below_ruler = self.text_top() + 8.0;
         for (which, d) in &mut self.dialogs {
             #[cfg(target_os = "macos")]
@@ -842,11 +843,20 @@ impl WinState {
     }
 
     pub(super) fn open_popup(&mut self, hit: Hit, label: &mut Label, env: &Env) {
+        if hit == Hit::ColorPopup {
+            // Font Color is the palette, not a list of names.
+            let anchor = bars::popup_rect(
+                hit,
+                self.formatting_toolbar_top(),
+                self.paragraph_toolbar_top(),
+            );
+            self.open_tool_palette(anchor);
+            return;
+        }
         let cx = self.context(env);
         let (m, actions) = match hit {
             Hit::FontPopup => app_menus::font_popup(&cx),
             Hit::SizePopup => app_menus::size_popup(&cx),
-            Hit::ColorPopup => app_menus::color_popup(&cx),
             _ => app_menus::style_popup(&cx),
         };
         let anchor = bars::popup_rect(

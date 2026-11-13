@@ -573,7 +573,6 @@ fn section(o: &mut Out, s: &SectionProps) {
         margin_page_numbers,
         page_number_from_top,
         page_number_from_right,
-        include_endnotes,
         line_numbers,
         line_count_by,
         line_from_text,
@@ -608,7 +607,6 @@ fn section(o: &mut Out, s: &SectionProps) {
     o.flag(9, *margin_page_numbers);
     o.int(10, *page_number_from_top as i64);
     o.int(11, *page_number_from_right as i64);
-    o.flag(12, *include_endnotes);
     o.uint(
         13,
         match line_numbers {
@@ -1258,7 +1256,6 @@ fn read_section(b: &[u8], budget: &mut crate::ReadBudget) -> Result<SectionProps
             9 => s.margin_page_numbers = flag(f)?,
             10 => s.page_number_from_top = i32_of(f)?,
             11 => s.page_number_from_right = i32_of(f)?,
-            12 => s.include_endnotes = flag(f)?,
             13 => {
                 s.line_numbers = match uint(f)? {
                     1 => LineNumbering::ByPage,

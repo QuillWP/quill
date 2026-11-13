@@ -61,6 +61,7 @@ mod styles;
 #[cfg(not(target_os = "macos"))]
 mod system_preview;
 mod tips;
+mod toolbar_palette;
 mod window_ui;
 pub use fonts::start_font_load;
 use fonts::{FontFolders, FontLoad};
@@ -182,6 +183,8 @@ pub struct WinState {
     /// The color palette popped out beside a dialog's color, while it is.
     /// The color pop-out's state, and the color box it came out of.
     color_pop: Option<(&'static str, crate::palette::PaletteState)>,
+    /// The formatting toolbar's color palette, while it is open.
+    tool_pal: Option<toolbar_palette::ToolPalette>,
     pub show_toolbar: bool,
     toolbar_press: Option<usize>,
     /// The toolbar button under the pointer.
@@ -364,6 +367,7 @@ impl WinState {
             native_dialogs: false,
             on_screen: false,
             color_pop: None,
+            tool_pal: None,
             dialog_mouse: false,
             font_names: Vec::new(),
             font_families: Vec::new(),
@@ -619,7 +623,6 @@ impl WinState {
                 });
             }
             Action::Size(hp) => self.view.set_size(hp),
-            Action::Color(c) => self.view.set_color(c),
             Action::CellAlign(i) => {
                 if let Some(&(_, v, h)) = crate::docview::CELL_ALIGNMENTS.get(i) {
                     self.view.align_cells(v, h);
@@ -714,6 +717,9 @@ impl WinState {
                 self.dialog_outcome(o, clip);
                 return Effect::None;
             }
+        }
+        if let Some(effect) = self.tool_palette_down(cx, cy) {
+            return effect;
         }
         // A click while a menu is open either works the menu or closes it.
         if let Some(t) = &mut self.menu {
@@ -1392,6 +1398,9 @@ struct DocWindow {
     dialog: Option<crate::mac_dialog::NativeDialog>,
     #[cfg(windows)]
     dialog: Option<crate::win_dialog::NativeDialog>,
+    /// Native dialogs under the one showing, as Edit Color over Preferences.
+    #[cfg(windows)]
+    dialog_below: Vec<crate::win_dialog::NativeDialog>,
     window: Rc<Window>,
     surface: softbuffer::Surface<Rc<Window>, Rc<Window>>,
     st: WinState,
@@ -1481,6 +1490,9 @@ pub enum UserEvent {
     },
     #[cfg(windows)]
     WindowsDialog { panel: usize, id: &'static str },
+    /// The palette window was put away by a press outside it.
+    #[cfg(windows)]
+    WindowsPopoutClosed { panel: usize },
     /// A control in a native AppKit dialog changed or was pressed.
     #[cfg(target_os = "macos")]
     NativeDialog {
@@ -2083,6 +2095,8 @@ impl App {
                 print_settings: crate::mac_print::Settings::default(),
                 #[cfg(any(target_os = "macos", windows))]
                 dialog: None,
+                #[cfg(windows)]
+                dialog_below: Vec::new(),
                 window,
                 surface,
                 st,
@@ -2182,17 +2196,58 @@ impl App {
         {
             let depth = w.st.dialogs.len();
             let top = w.st.dialogs.last().map(|(_, d)| d);
-            if !matches!((&w.dialog, top), (Some(native), Some(dialog)) if native.matches(depth, dialog))
+            // A dialog opened over another leaves the first showing, held
+            // until the one above is closed.
+            if let (Some(native), Some(dialog)) = (&w.dialog, top)
+                && depth > native.depth()
+                && crate::win_dialog::supported(dialog)
+                && let Some(lower) = w.dialog.take()
+            {
+                lower.hold();
+                w.dialog_below.push(lower);
+            }
+            // Back to the one below: it is still there.
+            if w.dialog
+                .as_ref()
+                .is_some_and(|native| native.depth() > depth)
             {
                 w.dialog = None;
-                if let Some(dialog) = top {
-                    w.dialog = crate::win_dialog::NativeDialog::show(
-                        &w.window,
-                        depth,
-                        dialog,
-                        self.proxy.clone(),
-                    );
+                if w.dialog_below.last().is_some_and(|b| b.same_level(depth)) {
+                    w.dialog = w.dialog_below.pop();
                 }
+            }
+            w.dialog_below.retain(|b| b.depth() < depth);
+            if let Some(native) = &w.dialog {
+                native.release();
+            } else if let Some(lower) = w.dialog_below.last() {
+                lower.release();
+            }
+            if !matches!((&w.dialog, top), (Some(native), Some(dialog)) if native.matches(depth, dialog))
+            {
+                // The same dialog showing another page (a Preferences tab)
+                // keeps its window and swaps the controls in it.
+                let reused = match (&mut w.dialog, top) {
+                    (Some(native), Some(dialog))
+                        if native.same_level(depth) && crate::win_dialog::supported(dialog) =>
+                    {
+                        native.rebuild(depth, dialog)
+                    }
+                    _ => false,
+                };
+                if !reused {
+                    w.dialog = None;
+                }
+            }
+            if w.dialog.is_none()
+                && let Some(dialog) = top
+            {
+                w.dialog = crate::win_dialog::NativeDialog::show(
+                    &w.window,
+                    depth,
+                    dialog,
+                    self.proxy.clone(),
+                    w.dialog_below.last().map(|b| b.hwnd()),
+                );
             }
             if let (Some(native), Some(dialog)) = (&mut w.dialog, top) {
                 native.sync_from_model(dialog);
@@ -2670,14 +2725,42 @@ impl ApplicationHandler<UserEvent> for App {
                     .find(|(_, w)| w.dialog.as_ref().is_some_and(|d| d.panel_id() == panel))
                     && let (Some(native), Some((_, dialog))) = (&w.dialog, w.st.dialogs.last_mut())
                 {
-                    native.apply_to_model(dialog, id);
-                    let outcome = crate::win_dialog::NativeDialog::outcome(dialog, id);
+                    // A box or button of the color palette is not an item of
+                    // the dialog.
+                    let popped = dialog.popout.is_some()
+                        && (id.starts_with("std")
+                            || id.starts_with("cus")
+                            || id == "edit"
+                            || id == "delete_color");
+                    let outcome = if popped {
+                        if id == "edit" || id == "delete_color" {
+                            crate::dialog::Outcome::Button(id)
+                        } else {
+                            crate::dialog::Outcome::Swatch { id, double: false }
+                        }
+                    } else {
+                        native.apply_to_model(dialog, id);
+                        crate::win_dialog::NativeDialog::outcome(dialog, id)
+                    };
                     let clip = self.clipboard.get_or_insert_with(Clipboard::new);
                     w.st.dialog_outcome(outcome, clip);
                     w.window.request_redraw();
                 }
                 if let Some(window) = window {
                     self.handle_effect(el, window, Effect::None);
+                }
+            }
+            #[cfg(windows)]
+            UserEvent::WindowsPopoutClosed { panel } => {
+                if let Some((_, w)) = self
+                    .windows
+                    .iter_mut()
+                    .find(|(_, w)| w.dialog.as_ref().is_some_and(|d| d.panel_id() == panel))
+                    && let Some((_, dialog)) = w.st.dialogs.last_mut()
+                {
+                    dialog.popout = None;
+                    w.st.color_pop = None;
+                    w.window.request_redraw();
                 }
             }
             #[cfg(target_os = "macos")]

@@ -1731,7 +1731,6 @@ impl Reader {
                 self.sec.margin_page_numbers = true;
                 self.sec.page_number_from_top = v.max(0);
             }
-            "endnhere" => self.sec.include_endnotes = true,
             "linemod" if v > 0 => {
                 self.sec.line_count_by = v.min(100) as u16;
                 if self.sec.line_numbers == quill_core::LineNumbering::Off {

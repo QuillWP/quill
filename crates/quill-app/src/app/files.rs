@@ -746,9 +746,6 @@ fn docx_word_rewrite_losses(doc: &quill_core::Document) -> Vec<&'static str> {
     if (0..sections).any(|section| doc.nth_section(section).margin_page_numbers) {
         settings.push("• Margin page numbers");
     }
-    if (0..sections).any(|section| doc.nth_section(section).include_endnotes) {
-        settings.push("• Include Endnotes");
-    }
     if doc.props.print_hidden {
         settings.push("• Print Hidden Text");
     }
@@ -1120,15 +1117,10 @@ mod tests {
         assert!(docx_word_rewrite_losses(&doc).is_empty());
 
         doc.section.margin_page_numbers = true;
-        doc.section.include_endnotes = true;
         doc.props.print_hidden = true;
         assert_eq!(
             docx_word_rewrite_losses(&doc),
-            [
-                "• Margin page numbers",
-                "• Include Endnotes",
-                "• Print Hidden Text"
-            ]
+            ["• Margin page numbers", "• Print Hidden Text"]
         );
 
         doc.main.paras[0].pap.frame = Some(quill_core::Frame {

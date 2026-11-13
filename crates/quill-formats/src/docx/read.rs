@@ -3514,7 +3514,6 @@ fn section_settings(e: &Element) -> SectionProps {
         sec.page_number_from_top = twips_or(m, "top", sec.page_number_from_top);
         sec.page_number_from_right = twips_or(m, "right", sec.page_number_from_right);
     }
-    sec.include_endnotes = e.child("includeEndnotes").is_some();
     s
 }
 

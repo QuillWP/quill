@@ -345,7 +345,6 @@ fn kitchen_sink() -> Document {
         s.margin_page_numbers = true;
         s.page_number_from_top = 400;
         s.page_number_from_right = 300;
-        s.include_endnotes = true;
         s.different_first_page = true;
     });
     doc.insert_table(StoryId::Main, Position::new(13, 0), 2, 3, 2000);
@@ -379,7 +378,6 @@ fn kitchen_sink() -> Document {
     doc.section.margin_page_numbers = true;
     doc.section.page_number_from_top = 500;
     doc.section.page_number_from_right = 600;
-    doc.section.include_endnotes = true;
 
     // All six headers and footers.
     doc.props.even_odd_headers = true;

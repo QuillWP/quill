@@ -179,7 +179,6 @@ pub struct SectionProps {
     pub margin_page_numbers: bool,
     pub page_number_from_top: Twips,
     pub page_number_from_right: Twips,
-    pub include_endnotes: bool,
     /// Line numbers in the left margin, every `line_count_by` lines,
     /// `line_from_text` from the text (None for the original's automatic 0.25 in).
     pub line_numbers: LineNumbering,
@@ -216,7 +215,6 @@ impl Default for SectionProps {
             margin_page_numbers: false,
             page_number_from_top: 720,
             page_number_from_right: 720,
-            include_endnotes: false,
             line_numbers: LineNumbering::Off,
             line_count_by: 1,
             line_from_text: None,

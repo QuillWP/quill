@@ -790,7 +790,6 @@ impl Settings {
             "sec.page_number_from_right",
             s.page_number_from_right.to_string(),
         );
-        put(&mut out, "sec.include_endnotes", b(s.include_endnotes));
         put(
             &mut out,
             "sec.line_numbers",
@@ -1103,7 +1102,6 @@ impl Settings {
                 "sec.page_number_from_right" => {
                     sec.page_number_from_right = num(sec.page_number_from_right)
                 }
-                "sec.include_endnotes" => sec.include_endnotes = flag,
                 "sec.line_numbers" => {
                     use quill_core::LineNumbering as L;
                     sec.line_numbers = match v {

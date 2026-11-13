@@ -148,6 +148,52 @@ pub struct PopItem {
     pub enabled: bool,
 }
 
+/// A popped-out panel at `panel`: a soft shadow, the frame, then its boxes
+/// and buttons. Dialogs and the toolbar's color palette both use it.
+pub fn draw_popout_panel(c: &mut Canvas, label: &mut Label, panel: Rect, p: &Popout) {
+    // A soft shadow, then the panel.
+    c.fill(
+        Rect::new(panel.x + 1.0, panel.y + 2.0, panel.w, panel.h),
+        0xC4C4C4,
+    );
+    modern_box(c, panel, 6.0, 0xA8A8A8, 0xFFFFFF);
+    for it in &p.items {
+        let r = Rect::new(
+            panel.x + it.rect.x,
+            panel.y + it.rect.y,
+            it.rect.w,
+            it.rect.h,
+        );
+        if !it.label.is_empty() {
+            modern_box(c, r, 5.0, 0xB5B5B5, 0xF4F4F4);
+            let ink = if it.enabled { 0x202020 } else { 0xA0A0A0 };
+            let w = label.width(MODERN_FONT, SIZE, false, it.label);
+            label.draw(
+                c,
+                MODERN_FONT,
+                SIZE,
+                false,
+                r.x + (r.w - w) / 2.0,
+                r.y + r.h / 2.0 + 4.5,
+                it.label,
+                ink,
+            );
+            continue;
+        }
+        match it.rgb {
+            Some(rgb) => {
+                c.fill(r, rgb);
+                c.frame(r, 0x808080);
+            }
+            None => c.frame(r, 0xC8C8C8),
+        }
+        if it.selected {
+            c.frame(r.inset(-2.0), 0x0A84FF);
+            c.frame(r.inset(-3.0), 0x0A84FF);
+        }
+    }
+}
+
 pub struct Dialog {
     pub title: String,
     /// A platform window title when the classic dialog deliberately has no
@@ -938,49 +984,8 @@ impl Dialog {
     }
 
     fn draw_popout(&self, c: &mut Canvas, label: &mut Label) {
-        let (Some(p), Some(panel)) = (&self.popout, self.popout_rect()) else {
-            return;
-        };
-        // A soft shadow, then the panel.
-        c.fill(
-            Rect::new(panel.x + 1.0, panel.y + 2.0, panel.w, panel.h),
-            0xC4C4C4,
-        );
-        modern_box(c, panel, 6.0, 0xA8A8A8, 0xFFFFFF);
-        for it in &p.items {
-            let r = Rect::new(
-                panel.x + it.rect.x,
-                panel.y + it.rect.y,
-                it.rect.w,
-                it.rect.h,
-            );
-            if !it.label.is_empty() {
-                modern_box(c, r, 5.0, 0xB5B5B5, 0xF4F4F4);
-                let ink = if it.enabled { 0x202020 } else { 0xA0A0A0 };
-                let w = label.width(MODERN_FONT, SIZE, false, it.label);
-                label.draw(
-                    c,
-                    MODERN_FONT,
-                    SIZE,
-                    false,
-                    r.x + (r.w - w) / 2.0,
-                    r.y + r.h / 2.0 + 4.5,
-                    it.label,
-                    ink,
-                );
-                continue;
-            }
-            match it.rgb {
-                Some(rgb) => {
-                    c.fill(r, rgb);
-                    c.frame(r, 0x808080);
-                }
-                None => c.frame(r, 0xC8C8C8),
-            }
-            if it.selected {
-                c.frame(r.inset(-2.0), 0x0A84FF);
-                c.frame(r.inset(-3.0), 0x0A84FF);
-            }
+        if let (Some(p), Some(panel)) = (&self.popout, self.popout_rect()) {
+            draw_popout_panel(c, label, panel, p);
         }
     }
 

@@ -91,6 +91,13 @@ impl App {
                 return;
             }
         }
+        if w.st.tool_pal.is_some() {
+            if event.logical_key == Key::Named(NamedKey::Escape) {
+                w.st.tool_pal = None;
+            }
+            w.window.request_redraw();
+            return;
+        }
         if w.st.menu.is_some() {
             if event.logical_key == Key::Named(NamedKey::Escape) {
                 w.st.menu = None;
@@ -240,6 +247,9 @@ impl App {
             return;
         }
         w.st.view.end_composing();
+        if w.st.tool_pal.is_some() {
+            return;
+        }
         if w.st.dialog_has_keys() {
             w.st.dialog_key(DKey::Char, Some(text), clip);
             w.window.request_redraw();

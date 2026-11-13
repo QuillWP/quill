@@ -7,30 +7,28 @@ Add an entry for every new tag as part of the release process.
 
 Versions 0.1.0 to 0.14.0 were all tagged on 2026-11-05.
 
-## 0.20.0 - 2026-11-12
+## 0.21.0 - 2026-11-13
 
-Hang fixes for Windows and Linux dialogs, and a step-by-step event log for
-finding hangs.
+Windows dialogs use native controls, and the toolbar's Font Color opens the
+color palette.
 
-- quill --with-events writes each step to quill-events.log in the folder Quill
-  was started from (or --events-file=PATH, or QUILL_EVENTS_FILE), falling back
-  to the settings folder. --with-events=all adds mouse moves, redraws and
-  every wake of the event loop.
-- It logs startup, window events, key presses and their commands, menu
-  actions, dialog outcomes (a begin with no end means it never came back),
-  file reads and writes and panics, and the build commit. A watchdog adds a
-  STUCK line every two seconds while the program is busy and has logged
-  nothing, and a line repeated in a row is shown three times and then counted.
-- Open, Save and message dialogs are GTK dialogs on the main thread. rfd ran
-  them on a thread of its own, which froze Quill on Ubuntu 24.04. A finished
-  dialog is hidden, destroyed and its pending events run so it releases its
-  keyboard and mouse grab.
-- Save As lets you pick the file type: choosing a filter changes the name's
-  extension, as the Mac's save panel does.
-- Message boxes go through TaskDialogIndirect owned by Quill's window, with
-  their real button labels, and run on a thread of their own. File dialogs run
-  on a thread of their own too. Run on the main thread inside winit's event
-  handler, they never appeared or hung on the second use.
+- The native panel makes color swatch buttons, the palette popup, sliders
+  (trackbars) and shown-only color boxes, so Preferences > Colors, the
+  Character style dialog and Edit Color look like the rest of the system.
+- Labels sit beneath the fields, and are as wide as their text. Choosing
+  another Preferences page changes the window in place instead of closing and
+  rebuilding it.
+- A dialog opened over another (Edit Color over Preferences) is owned by the
+  one below, which stays showing, disabled, until the upper one closes.
+  Windows keeps them together and raises them together.
+- Font Color on the toolbar opens the same palette that pops out beside a
+  dialog's color box, below the button. One click on a box colors the
+  selection, Edit Color opens the editor and applies its result to the text,
+  and a press elsewhere or Escape closes it. This replaces a menu of the
+  original's eight color names.
+- The Include Endnotes section setting. DOCX has no equivalent, so it was
+  stored as private XML that Word drops when it resaves. Notes set to go at
+  the end of a section now always print at the end of the document.
 
 ## 0.15.0 - 2026-11-08
 

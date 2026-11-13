@@ -334,17 +334,6 @@ pub fn section(view: &DocView) -> Dialog {
     let names: Vec<&str> = STARTS.iter().map(|x| x.0).collect();
     let at = STARTS.iter().position(|x| x.1 == s.start).unwrap_or(0);
     d.popup("start", &names, at, 52.0, 6.0, 124.0);
-    d.check(
-        "endnotes",
-        "Include Endnotes",
-        192.0,
-        8.0,
-        s.include_endnotes,
-    );
-    // Only meaningful when footnotes go at the end of each section.
-    if view.doc.props.footnote_position != FootnotePosition::EndOfSection {
-        d.disable("endnotes");
-    }
 
     d.group("Columns", 10.0, 30.0, 169.0, 62.0);
     d.text("Number:", 15.0, 43.0);
@@ -444,7 +433,6 @@ fn read_section(d: &Dialog, base: &SectionProps) -> Option<SectionProps> {
     let mut s = base.clone();
     let len = |id, old| units::parse_length_from(&d.field_text(id), old);
     s.start = STARTS[d.selected("start").min(4)].1;
-    s.include_endnotes = d.is_on("endnotes");
     s.columns = d.field_text("columns").trim().parse().ok()?;
     if !(1..=quill_core::limits::MAX_COLUMNS).contains(&s.columns) {
         return None;
@@ -490,8 +478,7 @@ pub fn apply_section(d: &Dialog, view: &mut DocView) -> bool {
             restart_page_numbers,
             margin_page_numbers,
             page_number_from_top,
-            page_number_from_right,
-            include_endnotes
+            page_number_from_right
         );
     });
     true

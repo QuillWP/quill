@@ -179,21 +179,19 @@ impl DocView {
         })
     }
 
-    /// The notes that go at the end of each section (or of the document),
-    /// by the paragraph they follow.
+    /// The notes that go at the end of the document, by the paragraph they
+    /// follow.
     pub(super) fn end_note_groups(&self) -> Vec<(usize, Vec<u32>)> {
-        let pos = self.note_position();
         if self.notes_by_page() || !self.frames_on() {
             return Vec::new();
         }
         let mut out = Vec::new();
         let mut pending = Vec::new();
         let n = self.doc.main.paras.len();
-        for (k, (first, s)) in self.secs.iter().enumerate() {
+        for (k, (first, _)) in self.secs.iter().enumerate() {
             let last = self.secs.get(k + 1).map_or(n, |x| x.0) - 1;
             pending.extend(note_ids(&self.doc.main.paras[*first..=last]));
-            let flush = k + 1 == self.secs.len()
-                || (pos == FootnotePosition::EndOfSection && s.include_endnotes);
+            let flush = k + 1 == self.secs.len();
             if flush && !pending.is_empty() {
                 out.push((last, std::mem::take(&mut pending)));
             }

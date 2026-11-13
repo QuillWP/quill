@@ -1026,9 +1026,6 @@ fn section_props(doc: &Document, section: usize, sec: &SectionProps, out: &mut S
             sec.page_number_from_top, sec.page_number_from_right
         );
     }
-    if sec.include_endnotes {
-        out.push_str("<quill:includeEndnotes/>");
-    }
     out.push_str("</w:sectPr>");
 }
 
