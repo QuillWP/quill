@@ -484,15 +484,14 @@ pub fn read_character_spec(d: &Dialog, view: &mut DocView) -> Option<CharSpec> {
 // ----- Go To -----
 
 pub fn go_to(view: &DocView) -> Dialog {
-    let mut d = Dialog::new("", 262.0, 67.0);
+    let mut d = Dialog::new("", 262.0, 100.0);
     d.native_title = Some("Go To".to_string());
     d.plain = true;
     d.text("Go To", 13.0, 6.0);
     d.text("Page Number:", 13.0, 31.0);
     let page = (view.caret_page() + 1).to_string();
     d.field("page", &page, 107.0, 28.0, 76.0);
-    d.button("ok", "OK", 200.0, 13.0, 46.0, true);
-    d.button("cancel", "Cancel", 198.0, 39.0, 50.0, false);
+    d.action_buttons(&[("cancel", "Cancel", 58.0, false), ("ok", "OK", 58.0, true)]);
     d.focus("page");
     d
 }

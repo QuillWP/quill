@@ -14,15 +14,13 @@ use std::path::PathBuf;
 
 /// File > Print Merge.
 pub fn print_merge() -> Dialog {
-    let mut d = Dialog::new("Print Merge", 291.0, 172.0);
+    let mut d = Dialog::new("Print Merge", 291.0, 208.0);
     d.group("Records", 9.0, 17.0, 133.0, 68.0);
     d.radio("all", "All", 15.0, 26.0, 1, true);
     d.radio("range", "From:", 15.0, 43.0, 1, false);
     d.field("from", "", 72.0, 39.0, 66.0);
     d.text("To:", 47.0, 65.0);
     d.field("to", "", 72.0, 62.0, 66.0);
-    d.button("ok", "OK", 180.0, 17.0, 99.0, true);
-    d.button("cancel", "Cancel", 182.0, 45.0, 95.0, false);
     d.button("helper", "Show Helper", 182.0, 68.0, 95.0, false);
     d.group("Merge Results", 9.0, 102.0, 269.0, 57.0);
     d.radio("print", "Merge and Print Results", 15.0, 110.0, 2, false);
@@ -35,6 +33,7 @@ pub fn print_merge() -> Dialog {
         true,
     );
     d.radio("check", "Only Check for Errors", 15.0, 144.0, 2, false);
+    d.action_buttons(&[("cancel", "Cancel", 80.0, false), ("ok", "OK", 80.0, true)]);
     d
 }
 
@@ -222,8 +221,7 @@ pub fn ask(request: &AskRequest) -> Dialog {
     d.text(&format!("Record {}", request.key.record + 1), 12.0, 12.0);
     d.text(&request.prompt, 12.0, 34.0);
     d.field("answer", &request.default, 12.0, 57.0, 346.0);
-    d.button("ok", "OK", 198.0, 88.0, 76.0, true);
-    d.button("cancel", "Cancel", 282.0, 88.0, 76.0, false);
+    d.action_buttons(&[("cancel", "Cancel", 76.0, false), ("ok", "OK", 76.0, true)]);
     d.focus("answer");
     d
 }

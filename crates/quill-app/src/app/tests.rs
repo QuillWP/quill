@@ -56,6 +56,58 @@ fn toolbar_and_formatting_pop_ups_are_handed_to_the_system_menu_on_the_mac() {
         }
         assert_eq!(at, ((rect.x * 1.5) as f64, (rect.y * 1.5) as f64));
     }
+    state.width = 520.0;
+    state.open_toolbar_overflow(&mut label);
+    let (menu, _, _) = state
+        .take_popup_menu()
+        .expect("the narrow standard toolbar has overflow");
+    assert!(menu.items.iter().any(|item| item.label == "Print Preview"));
+    assert!(menu.items.iter().any(|item| item.label == "Toolbar Menu"));
+    state.open_bar_overflow(false, &mut label, &env);
+    let (menu, actions, _) = state
+        .take_popup_menu()
+        .expect("the narrow formatting toolbar has overflow");
+    let graph = menu
+        .items
+        .iter()
+        .find(|item| item.label == "Insert Graph")
+        .unwrap();
+    assert!(!graph.enabled);
+    assert_eq!(
+        actions[graph.id as usize],
+        Action::Bar(Hit::Tool("Insert Graph"))
+    );
+    state.open_bar_overflow(true, &mut label, &env);
+    let (menu, _, _) = state
+        .take_popup_menu()
+        .expect("the narrow paragraph toolbar has overflow");
+    assert!(menu.items.iter().any(|item| item.label == "Normal Scale"));
+    state.width = 180.0;
+    state.open_bar_overflow(false, &mut label, &env);
+    let (menu, _, _) = state
+        .take_popup_menu()
+        .expect("an extremely narrow formatting toolbar has overflow");
+    let size = menu
+        .items
+        .iter()
+        .find(|item| item.label == "Font Size")
+        .unwrap();
+    assert!(
+        size.submenu
+            .as_ref()
+            .is_some_and(|menu| !menu.items.is_empty())
+    );
+}
+
+#[test]
+fn a_toolbar_overflow_action_uses_the_same_formatting_path() {
+    let mut state = WinState::new(DocView::new(Document::new(), "Overflow".into()));
+    let mut clip = Clipboard::new();
+    assert!(!state.view.current_chp().bold);
+    state.act(Action::Bar(Hit::Bold), &mut clip);
+    assert!(state.view.current_chp().bold);
+    state.act(Action::Bar(Hit::SpaceBefore(true)), &mut clip);
+    assert_eq!(state.view.current_pap().before, 240);
 }
 use quill_core::{Position, Selection};
 
@@ -1266,6 +1318,22 @@ fn assert_visual_baseline(
 #[test]
 fn representative_window_visuals_match_baselines() {
     let sample = "type:Quill visual baseline\\nThe quick brown fox jumps over the lazy dog.";
+    assert_visual_baseline(
+        "narrow-overflow",
+        650,
+        620,
+        1.0,
+        "",
+        include_bytes!("../../../../tests/visual/narrow-overflow.png"),
+    );
+    assert_visual_baseline(
+        "classic-compact-100",
+        640,
+        520,
+        1.0,
+        &format!("setting:interface_style = classic|zoom:100|{sample}"),
+        include_bytes!("../../../../tests/visual/classic-compact-100.png"),
+    );
     assert_visual_baseline(
         "compact-100",
         640,

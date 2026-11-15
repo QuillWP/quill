@@ -9,8 +9,8 @@
 
 use std::cell::RefCell;
 
-use crate::bars::{background, line_color, padding};
-use crate::canvas::{self, Canvas, Label, Rect, color};
+use crate::bars::{airy, background, hover_color, line_color, padding, pressed_color};
+use crate::canvas::{self, Canvas, Label, Rect};
 use crate::commands::Cmd;
 use crate::icon::{self, Image};
 
@@ -28,14 +28,20 @@ pub fn thickness(vertical: bool) -> f32 {
 /// Button pitch (`toolbar_spacing` in the settings file, 24 by default):
 /// from one icon to the next, leaving a few points between 19-point icons.
 fn pitch() -> f32 {
-    crate::settings::with(|s| s.toolbar_spacing) as f32
+    crate::settings::with(|s| match s.interface_style {
+        crate::settings::InterfaceStyle::AiryClassic => 34.0,
+        crate::settings::InterfaceStyle::Classic => s.toolbar_spacing as f32,
+    })
 }
 /// Extra space before a new group of buttons.
 const GAP: f32 = 9.0;
 const ICON_W: u32 = 19;
 const ICON_H: u32 = 18;
-const HOVER: u32 = color::HOVER;
-const PRESSED: u32 = color::PRESSED;
+const OVERFLOW_W: f32 = 24.0;
+
+fn group_gap() -> f32 {
+    if airy() { 15.0 } else { GAP }
+}
 
 #[derive(Clone, Copy)]
 struct Tool {
@@ -153,7 +159,7 @@ fn rects(at: Place) -> Vec<Rect> {
         .iter()
         .map(|&(_, group)| {
             if group {
-                d += GAP;
+                d += group_gap();
             }
             let r = if at.vertical {
                 Rect::new(at.x + 1.0 + vert, at.y + d, w, h)
@@ -164,6 +170,43 @@ fn rects(at: Place) -> Vec<Rect> {
             r
         })
         .collect()
+}
+
+/// The extra button at the trailing edge when a horizontal toolbar cannot
+/// show every item. Its index follows the real toolbar slots.
+pub fn overflow_index() -> usize {
+    LAYOUT.len()
+}
+
+/// The hidden slots, reserving room for the overflow button when needed.
+pub fn hidden_slots(at: Place, length: f32) -> Vec<usize> {
+    if at.vertical {
+        return Vec::new();
+    }
+    let all = rects(at);
+    if all
+        .last()
+        .is_none_or(|r| r.right() <= at.x + length - padding().0)
+    {
+        return Vec::new();
+    }
+    let cutoff = at.x + length - padding().0 - OVERFLOW_W - 4.0;
+    all.iter()
+        .enumerate()
+        .filter_map(|(i, r)| (r.right() > cutoff).then_some(i))
+        .collect()
+}
+
+/// The overflow button's frame, including its hit target.
+pub fn overflow_rect(at: Place, length: f32) -> Option<Rect> {
+    (!hidden_slots(at, length).is_empty()).then(|| {
+        Rect::new(
+            at.x + length - padding().0 - OVERFLOW_W,
+            at.y,
+            OVERFLOW_W,
+            thickness(false) - 1.0,
+        )
+    })
 }
 
 /// Button `i`'s picture and command: the original's own, or as Customize set it.
@@ -228,8 +271,20 @@ fn enabled(cmd: Option<Cmd>, s: &ToolState) -> bool {
     }
 }
 
-/// Icons and the (scale, bar color) they were rendered for.
-type IconCache = ((f32, u32), Vec<Image<'static>>);
+pub fn is_enabled(i: usize, state: &ToolState) -> bool {
+    enabled(slot(i).1, state)
+}
+
+pub fn slot_name(i: usize) -> &'static str {
+    let (picture, command) = slot(i);
+    command
+        .map(crate::commands::tip_name)
+        .or_else(|| TOOLS.get(picture).map(|tool| tool.name))
+        .unwrap_or("")
+}
+
+/// Icons and the (scale, bar color, style) they were rendered for.
+type IconCache = ((f32, u32, bool), Vec<Image<'static>>);
 
 thread_local! {
     /// The icons as last rendered.
@@ -240,7 +295,7 @@ thread_local! {
 fn with_icons<R>(n: f32, f: impl FnOnce(&[Image<'static>]) -> R) -> R {
     ICONS.with(|cell| {
         let mut cache = cell.borrow_mut();
-        let key = (n, background());
+        let key = (n, background(), airy());
         if cache.as_ref().is_none_or(|(k, _)| *k != key) {
             let made = TOOLS
                 .iter()
@@ -259,7 +314,12 @@ fn fit(t: &Tool) -> f32 {
 
 /// The rounded backing behind a button's picture: a little round the icon.
 fn backing(r: Rect) -> Rect {
-    Rect::new(r.x - 1.5, r.y - 1.0, r.w + 3.0, r.h + 2.0)
+    if airy() {
+        let x = r.x - (pitch() - r.w) / 2.0 + 2.0;
+        Rect::new(x, r.y - 4.0, pitch() - 4.0, r.h + 8.0)
+    } else {
+        Rect::new(r.x - 1.5, r.y - 1.0, r.w + 3.0, r.h + 2.0)
+    }
 }
 
 /// Where a click counts for the button with icon `r`: its share of the
@@ -312,9 +372,28 @@ pub fn draw(
     } else {
         Rect::new(at.x, at.y, length, thickness(false))
     });
+    let button_rects = rects(at);
+    if airy() {
+        for (i, r) in button_rects.iter().enumerate().skip(1) {
+            if !LAYOUT[i].1 {
+                continue;
+            }
+            if at.vertical {
+                let y = r.y - group_gap() / 2.0;
+                c.hline(at.x + 8.0, at.x + thickness(true) - 8.0, y, line_color());
+            } else {
+                let x = r.x - group_gap() / 2.0;
+                c.vline(x, at.y + 7.0, at.y + thickness(false) - 7.0, line_color());
+            }
+        }
+    }
+    let hidden = hidden_slots(at, length);
     let n = c.scale;
     with_icons(n, |images| {
-        for (i, r) in rects(at).into_iter().enumerate() {
+        for (i, r) in button_rects.into_iter().enumerate() {
+            if hidden.contains(&i) {
+                continue;
+            }
             if r.w == 0.0 {
                 continue;
             }
@@ -327,10 +406,11 @@ pub fn draw(
             };
             let live = enabled(cmd, s);
             let on = cmd == Some(Cmd::ShowMarks) && s.show_marks;
+            let radius = if airy() { 5.0 } else { 4.0 };
             if pressed == Some(i) || on {
-                canvas::round_rect(c, backing(r), 4.0, PRESSED);
+                canvas::round_rect(c, backing(r), radius, pressed_color());
             } else if hover == Some(i) && live {
-                canvas::round_rect(c, backing(r), 4.0, HOVER);
+                canvas::round_rect(c, backing(r), radius, hover_color());
             }
             // Buttons that can do nothing just now show faded.
             let alpha = if live { 255 } else { c.faded() };
@@ -343,20 +423,43 @@ pub fn draw(
             c.set_scale(old);
         }
     });
+    if let Some(r) = overflow_rect(at, length) {
+        if pressed == Some(overflow_index()) {
+            canvas::round_rect(c, r.inset(2.0), 5.0, pressed_color());
+        } else if hover == Some(overflow_index()) {
+            canvas::round_rect(c, r.inset(2.0), 5.0, hover_color());
+        }
+        let im = icon::cached(OVERFLOW_S, 16, 16, c.scale);
+        icon::paint(
+            c,
+            label,
+            &im,
+            r.x + (r.w - 16.0) / 2.0,
+            r.y + (r.h - 16.0) / 2.0,
+            255,
+            background(),
+        );
+    }
     c.restore_clip(clip);
 }
 
 /// The button under a point, by index, whether it can be used now or not:
 /// a faded button still says what it is.
-pub fn button_at(at: Place, x: f32, y: f32) -> Option<usize> {
+pub fn button_at(at: Place, length: f32, x: f32, y: f32) -> Option<usize> {
+    if overflow_rect(at, length).is_some_and(|r| r.contains(x, y)) {
+        return Some(overflow_index());
+    }
+    let hidden = hidden_slots(at, length);
     rects(at)
         .iter()
-        .position(|r| r.w > 0.0 && cell(at, *r).contains(x, y))
+        .enumerate()
+        .find(|(i, r)| !hidden.contains(i) && r.w > 0.0 && cell(at, **r).contains(x, y))
+        .map(|(i, _)| i)
 }
 
 /// The enabled button under a point, by index.
-pub fn hit(at: Place, x: f32, y: f32, s: &ToolState) -> Option<usize> {
-    button_at(at, x, y).filter(|&i| enabled(slot(i).1, s))
+pub fn hit(at: Place, length: f32, x: f32, y: f32, s: &ToolState) -> Option<usize> {
+    button_at(at, length, x, y).filter(|&i| i == overflow_index() || enabled(slot(i).1, s))
 }
 
 /// Button `i`'s frame, for placing a menu that drops from it.
@@ -370,6 +473,9 @@ pub fn button_rect(at: Place, i: usize) -> Option<Rect> {
 
 /// Button `i`'s tooltip: what its command is called, and its shortcut.
 pub fn tip(i: usize) -> Option<String> {
+    if i == overflow_index() {
+        return Some("More Toolbar Items".into());
+    }
     let (pic, cmd) = slot(i);
     match cmd {
         Some(c) => Some(crate::commands::tip(crate::commands::tip_name(c), Some(c))),
@@ -564,6 +670,9 @@ const MARKS_S: &str = "
     line k 11 3 11 14
     line k 6 3 12 3
 ";
+const OVERFLOW_S: &str = "
+    line k/1.5 4 6 8 10 12 6
+";
 
 #[cfg(test)]
 mod tests {
@@ -639,17 +748,54 @@ mod tests {
 
     #[test]
     fn buttons_sit_a_pitch_apart_with_gaps_between_groups() {
-        let r = rects(Place {
+        let original = crate::settings::get();
+        for style in crate::settings::InterfaceStyle::ALL {
+            crate::settings::update(|s| s.interface_style = style);
+            let r = rects(Place {
+                x: 0.0,
+                y: 0.0,
+                vertical: false,
+            });
+            let groups = LAYOUT.iter().filter(|l| l.1).count() as f32;
+            assert_eq!(r[0].x, padding().0);
+            assert_eq!(r[1].x - r[0].x, pitch());
+            assert_eq!(
+                r.last().unwrap().right(),
+                padding().0
+                    + groups * group_gap()
+                    + (LAYOUT.len() - 1) as f32 * pitch()
+                    + ICON_W as f32
+            );
+        }
+        crate::settings::update(|s| *s = original);
+    }
+
+    #[test]
+    fn a_narrow_horizontal_toolbar_reserves_an_overflow_button() {
+        let at = Place {
             x: 0.0,
-            y: 0.0,
+            y: 10.0,
             vertical: false,
-        });
-        let groups = LAYOUT.iter().filter(|l| l.1).count() as f32;
-        assert_eq!(r[0].x, padding().0);
-        assert_eq!(r[1].x - r[0].x, pitch());
+        };
+        assert!(hidden_slots(at, 2000.0).is_empty());
+        assert!(overflow_rect(at, 2000.0).is_none());
+        let hidden = hidden_slots(at, 360.0);
+        assert!(!hidden.is_empty());
+        assert!(hidden.contains(&(LAYOUT.len() - 1)));
+        let overflow = overflow_rect(at, 360.0).unwrap();
         assert_eq!(
-            r.last().unwrap().right(),
-            padding().0 + groups * GAP + (LAYOUT.len() - 1) as f32 * pitch() + ICON_W as f32
+            button_at(at, 360.0, overflow.x + 2.0, overflow.y + 2.0),
+            Some(overflow_index())
+        );
+        assert!(
+            hidden_slots(
+                Place {
+                    vertical: true,
+                    ..at
+                },
+                100.0
+            )
+            .is_empty()
         );
     }
 

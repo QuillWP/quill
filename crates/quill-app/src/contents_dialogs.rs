@@ -15,7 +15,7 @@ fn collection_dialog(
     group: &str,
     page_numbers: bool,
 ) -> Dialog {
-    let mut d = Dialog::new(title, 360.0, 118.0);
+    let mut d = Dialog::new(title, 360.0, 154.0);
     d.text(
         if page_numbers { "Collect:" } else { "Format:" },
         10.0,
@@ -34,8 +34,10 @@ fn collection_dialog(
     d.field("from", "", 128.0, y + 17.0, 36.0);
     d.text("To:", 174.0, y + 20.0);
     d.field("to", "", 204.0, y + 17.0, 36.0);
-    d.button("ok", "Start", 276.0, 8.0, 74.0, true);
-    d.button("cancel", "Cancel", 276.0, 34.0, 74.0, false);
+    d.action_buttons(&[
+        ("cancel", "Cancel", 74.0, false),
+        ("ok", "Start", 74.0, true),
+    ]);
     d
 }
 
@@ -116,7 +118,7 @@ const NUMBERING: [(&str, LineNumbering); 4] = [
 /// Section > Line Numbers….
 pub fn line_numbers(view: &DocView) -> Dialog {
     let s = view.current_section();
-    let mut d = Dialog::new("Line Numbers", 290.0, 104.0);
+    let mut d = Dialog::new("Line Numbers", 290.0, 140.0);
     let names: Vec<&str> = NUMBERING.iter().map(|x| x.0).collect();
     let at = NUMBERING
         .iter()
@@ -128,8 +130,7 @@ pub fn line_numbers(view: &DocView) -> Dialog {
     d.text("From Text:", 10.0, 72.0);
     let from = s.line_from_text.map_or("Auto".to_string(), units::length);
     d.field("from", &from, 96.0, 69.0, 60.0);
-    d.button("ok", "OK", 206.0, 8.0, 74.0, true);
-    d.button("cancel", "Cancel", 206.0, 34.0, 74.0, false);
+    d.action_buttons(&[("cancel", "Cancel", 74.0, false), ("ok", "OK", 74.0, true)]);
     d
 }
 

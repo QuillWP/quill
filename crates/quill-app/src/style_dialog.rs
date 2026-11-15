@@ -72,7 +72,7 @@ pub struct ListState {
 pub fn list(view: &DocView) -> (Dialog, ListState) {
     // The same layout as the Character Styles list, with the two radio
     // buttons above the list.
-    let mut d = Dialog::new("Paragraph Styles", 460.0, 312.0);
+    let mut d = Dialog::new("Paragraph Styles", 460.0, 348.0);
     d.radio("docstyles", "This Document", 12.0, 12.0, 1, true);
     d.radio("allstyles", "All Styles", 140.0, 12.0, 1, false);
     let mut st = ListState {
@@ -89,10 +89,10 @@ pub fn list(view: &DocView) -> (Dialog, ListState) {
     d.button("remove", "Remove Style", 282.0, 66.0, 166.0, false);
     d.button("update", "Update to Selection", 282.0, 96.0, 166.0, false);
     d.button("clear", "Clear Formatting", 282.0, 136.0, 166.0, false);
-    d.button("ok", "Close", 282.0, 218.0, 166.0, true);
     d.note("description", "", 12.0, 252.0, 436.0);
     d.note("description2", "", 12.0, 268.0, 436.0);
     d.note("status", "", 12.0, 288.0, 436.0);
+    d.action_buttons(&[("ok", "Close", 100.0, true)]);
     refresh_list(&mut st, &mut d, view, Some(view.current_pap().style));
     (d, st)
 }
@@ -250,8 +250,10 @@ pub fn delete_from_list(view: &mut DocView, id: StyleId) -> Option<(Dialog, Vec<
     d.text(&format!("{paragraphs} \u{201c}{name}\u{201d}."), 14.0, 12.0);
     d.text("Change them to:", 14.0, 42.0);
     d.popup_owned("replacement", options, 0, 120.0, 39.0, 160.0);
-    d.button("ok", "Delete", 296.0, 10.0, 70.0, true);
-    d.button("cancel", "Cancel", 296.0, 40.0, 70.0, false);
+    d.action_buttons(&[
+        ("cancel", "Cancel", 70.0, false),
+        ("ok", "Delete", 70.0, true),
+    ]);
     Some((d, choices))
 }
 
@@ -278,11 +280,8 @@ pub fn editor(view: &DocView, id: Option<StyleId>) -> (Dialog, StyleState) {
         ),
         None => "New Paragraph Style".to_string(),
     };
-    let mut d = Dialog::new(&title, 484.0, 368.0);
+    let mut d = Dialog::new(&title, 484.0, 404.0);
     d.close_box = true;
-    d.button("ok", "OK", 350.0, 14.0, 120.0, true);
-    d.button("cancel", "Cancel", 350.0, 40.0, 120.0, false);
-    d.button("apply", "Apply", 350.0, 66.0, 120.0, false);
     d.button("paragraph", "Paragraph…", 350.0, 92.0, 120.0, false);
     d.button("character", "Character…", 350.0, 118.0, 120.0, false);
     d.text("Style:", 15.0, 12.0);
@@ -325,6 +324,11 @@ pub fn editor(view: &DocView, id: Option<StyleId>) -> (Dialog, StyleState) {
         339.0,
         454.0,
     );
+    d.action_buttons(&[
+        ("cancel", "Cancel", 100.0, false),
+        ("apply", "Apply", 100.0, false),
+        ("ok", "OK", 100.0, true),
+    ]);
     let mut st = StyleState {
         entries: entries(view),
         selected: 0,
@@ -657,7 +661,7 @@ pub fn reapply(view: &DocView, id: StyleId) -> Option<Dialog> {
     if same_pap == st.pap && view.current_chp() == st.chp {
         return None;
     }
-    let mut d = Dialog::new("Style", 360.0, 92.0);
+    let mut d = Dialog::new("Style", 360.0, 128.0);
     d.text(&format!("Style: {}", st.name), 14.0, 10.0);
     d.radio(
         "redefine",
@@ -675,8 +679,7 @@ pub fn reapply(view: &DocView, id: StyleId) -> Option<Dialog> {
         1,
         false,
     );
-    d.button("ok", "OK", 286.0, 10.0, 60.0, true);
-    d.button("cancel", "Cancel", 286.0, 40.0, 60.0, false);
+    d.action_buttons(&[("cancel", "Cancel", 70.0, false), ("ok", "OK", 70.0, true)]);
     Some(d)
 }
 

@@ -454,7 +454,7 @@ pub fn draw(c: &mut Canvas, label: &mut Label, p: &Palette, b: Rect, doc: &Docum
         c.fill(
             r,
             if enabled && p.hover == Some(Hit::Button(button)) {
-                color::HOVER
+                crate::bars::hover_color()
             } else {
                 color::WHITE
             },

@@ -48,8 +48,10 @@ pub fn word_count(view: &DocView) -> (Dialog, Counts) {
         d.text_as(count_id("notes", id), "", 213.0, y);
         d.text_as(count_id("total", id), "", 326.0, y);
     }
-    d.button("count", "Count", 18.0, 116.0, 54.0, true);
-    d.button("cancel", "Cancel", 81.0, 116.0, 52.0, false);
+    d.action_buttons(&[
+        ("cancel", "Cancel", 60.0, false),
+        ("count", "Count", 60.0, true),
+    ]);
     // Counting is quick, so it is done as the dialog opens.
     d.enable("count", false);
     let checks = count_checks(&d);
@@ -121,12 +123,11 @@ const CASES: [(&str, &str, Case); 5] = [
 ];
 
 pub fn change_case() -> Dialog {
-    let mut d = Dialog::new("Change Case", 217.0, 102.0);
+    let mut d = Dialog::new("Change Case", 217.0, 138.0);
     for (k, (id, label, _)) in CASES.iter().enumerate() {
         d.radio(id, label, 11.0, 9.0 + 17.0 * k as f32, 1, k == 0);
     }
-    d.button("ok", "OK", 147.0, 13.0, 54.0, true);
-    d.button("cancel", "Cancel", 148.0, 40.0, 52.0, false);
+    d.action_buttons(&[("cancel", "Cancel", 60.0, false), ("ok", "OK", 60.0, true)]);
     d
 }
 
@@ -143,7 +144,7 @@ pub fn chosen_case(d: &Dialog) -> Case {
 /// Insert > Footnote (from memory of the original: a mark of your own or an
 /// automatic number, and the separator buttons).
 pub fn footnote() -> Dialog {
-    let mut d = Dialog::new("Footnote", 384.0, 128.0);
+    let mut d = Dialog::new("Footnote", 384.0, 164.0);
     d.text("Footnote Reference Mark:", 12.0, 12.0);
     d.field("mark", "", 180.0, 9.0, 70.0);
     d.check("auto", "Auto-numbered Reference", 12.0, 38.0, true);
@@ -154,8 +155,7 @@ pub fn footnote() -> Dialog {
     for id in ["sep", "cont_sep", "notice"] {
         d.enable(id, false);
     }
-    d.button("ok", "OK", 300.0, 8.0, 74.0, true);
-    d.button("cancel", "Cancel", 300.0, 34.0, 74.0, false);
+    d.action_buttons(&[("cancel", "Cancel", 74.0, false), ("ok", "OK", 74.0, true)]);
     d.focus("mark");
     d
 }
@@ -176,7 +176,7 @@ pub fn footnote_mark(d: &Dialog) -> Option<String> {
 // ----- Renumber -----
 
 pub fn renumber() -> Dialog {
-    let mut d = Dialog::new("Renumber", 352.0, 106.0);
+    let mut d = Dialog::new("Renumber", 352.0, 112.0);
     d.text("Paragraphs:", 14.0, 8.0);
     d.radio("all", "All", 104.0, 8.0, 1, true);
     d.radio("numbered", "Only If Already Numbered", 142.0, 8.0, 1, false);
@@ -189,8 +189,7 @@ pub fn renumber() -> Dialog {
     d.radio("n11", "1.1…", 116.0, 54.0, 2, false);
     d.radio("example", "By Example", 174.0, 54.0, 2, false);
     d.radio("remove", "Remove", 273.0, 54.0, 2, false);
-    d.button("ok", "OK", 19.0, 80.0, 52.0, true);
-    d.button("cancel", "Cancel", 87.0, 80.0, 55.0, false);
+    d.action_buttons(&[("cancel", "Cancel", 60.0, false), ("ok", "OK", 60.0, true)]);
     d.focus("start");
     d
 }

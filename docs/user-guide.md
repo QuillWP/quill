@@ -263,6 +263,11 @@ if needed, and displays the actual applied percentage to two decimal places.
 Zoom accepts 10-800% and remembers the last applied percentage between launches;
 it does not change saved document measurements or formatting.
 
+When a window is too narrow for a toolbar, a down arrow appears at that toolbar's right
+edge. Its menu contains only the controls hidden at the current width, with the same enabled
+and selected states as their buttons. Widening the window returns controls to the bar and
+removes them from the menu; the arrow disappears when everything fits.
+
 The Print Preview command, toolbar button and shortcut open the macOS print
 panel, which shows its own preview.
 
@@ -429,6 +434,12 @@ near-black, black and automatic text shows white, white text shows dark, and oth
 turn lighter or darker so text stays as readable against its highlight or shading as it was.
 Pictures keep their colors. Only the screen changes: the document keeps its own colors, and
 printing, Save as PDF and every saved format are the same as in Light.
+
+Preferences > View > Interface > Style chooses the shape and spacing of Quill's own
+window chrome. Airy Classic is the default: it uses near-white bars, quiet dividers,
+roomier controls, grouped tools and monochrome icons, with blue reserved for active tools.
+Classic keeps the earlier compact gray interface. This choice is independent of Appearance,
+so either interface style can be Light, Dark or Auto.
 
 ## Building
 

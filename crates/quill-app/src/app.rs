@@ -615,6 +615,7 @@ impl WinState {
             Action::RemoveRecent(index) => return Effect::RemoveRecent(index),
             Action::ClearRecent => return Effect::ClearRecent,
             Action::Zoom(choice) => self.choose_zoom(choice),
+            Action::Bar(hit) => return self.apply_bar_hit(hit, clip),
             Action::Cmd(c) => return self.view.exec(c, false, clip),
             Action::FontVariant(name, bold, italic) => {
                 let id = self.view.doc.font_id(&name);
@@ -774,6 +775,10 @@ impl WinState {
             return Effect::None;
         }
         if let Some(press) = self.toolbar_hit(cx, cy) {
+            if press == Some(toolbar::overflow_index()) {
+                self.open_toolbar_overflow(label);
+                return Effect::None;
+            }
             // The Toolbar Menu button drops its menu rather than waiting
             // for the release.
             if let Some(i) = press
@@ -787,13 +792,25 @@ impl WinState {
         }
 
         if self.show_formatting_toolbar && cy < self.paragraph_toolbar_top() {
-            if let Some(hit) = bars::formatting_toolbar_hit(self.formatting_toolbar_top(), cx, cy) {
+            if let Some(hit) =
+                bars::formatting_toolbar_hit(self.formatting_toolbar_top(), self.width, cx, cy)
+            {
+                if hit == Hit::FormattingOverflow {
+                    self.open_bar_overflow(false, label, env);
+                    return Effect::None;
+                }
                 return self.bar_click(hit, label, env, clip);
             }
             return Effect::None;
         }
         if self.show_paragraph_toolbar && cy < self.ruler_top() {
-            if let Some(hit) = bars::paragraph_toolbar_hit(self.paragraph_toolbar_top(), cx, cy) {
+            if let Some(hit) =
+                bars::paragraph_toolbar_hit(self.paragraph_toolbar_top(), self.width, cx, cy)
+            {
+                if hit == Hit::ParagraphOverflow {
+                    self.open_bar_overflow(true, label, env);
+                    return Effect::None;
+                }
                 return self.bar_click(hit, label, env, clip);
             }
             return Effect::None;
@@ -983,11 +1000,24 @@ impl WinState {
         if self.main_view().in_markdown_source() {
             return Effect::None;
         }
-        let cmd = match hit {
+        match hit {
             Hit::FontPopup | Hit::SizePopup | Hit::ColorPopup | Hit::StylePopup => {
                 self.open_popup(hit, label, env);
-                return Effect::None;
+                Effect::None
             }
+            Hit::FormattingOverflow | Hit::ParagraphOverflow => Effect::None,
+            _ => self.apply_bar_hit(hit, clip),
+        }
+    }
+
+    fn apply_bar_hit(&mut self, hit: Hit, clip: &mut Clipboard) -> Effect {
+        if hit == Hit::ColorPopup {
+            let anchor = bars::overflow_rect(false, self.formatting_toolbar_top(), self.width)
+                .unwrap_or_default();
+            self.open_tool_palette(anchor);
+            return Effect::None;
+        }
+        let cmd = match hit {
             Hit::Bold => Cmd::Bold,
             Hit::Italic => Cmd::Italic,
             Hit::Underline => Cmd::Underline,
@@ -1026,6 +1056,12 @@ impl WinState {
                 self.view.format_sections(move |s| s.columns = n as u16);
                 return Effect::None;
             }
+            Hit::FontPopup
+            | Hit::SizePopup
+            | Hit::ColorPopup
+            | Hit::StylePopup
+            | Hit::FormattingOverflow
+            | Hit::ParagraphOverflow => return Effect::None,
             // The table and page scales are not built yet.
             _ => return Effect::None,
         };

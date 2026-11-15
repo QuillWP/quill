@@ -226,7 +226,7 @@ const LEADERS: [(&str, &str, TabLeader); 4] = [
 pub fn tabs(view: &DocView, selected: Option<Twips>) -> (Dialog, Which) {
     let tabs = view.current_pap().tabs.clone();
     let chosen = selected.and_then(|p| tabs.iter().find(|t| t.pos == p).copied());
-    let mut d = Dialog::new("Tabs", 312.0, 128.0);
+    let mut d = Dialog::new("Tabs", 312.0, 164.0);
     d.group("Type", 10.0, 4.0, 88.0, 116.0);
     for (k, (id, label, align)) in TAB_TYPES.into_iter().enumerate() {
         let on = chosen.map_or(align == TabAlign::Left, |t| t.align == align);
@@ -238,13 +238,12 @@ pub fn tabs(view: &DocView, selected: Option<Twips>) -> (Dialog, Which) {
         d.radio(id, label, 112.0, 22.0 + 18.0 * k as f32, 2, on);
     }
     d.button("set", "Set", 192.0, 10.0, 52.0, false);
-    d.button("ok", "OK", 252.0, 10.0, 52.0, true);
     d.button("clear", "Clear", 192.0, 40.0, 52.0, false);
-    d.button("cancel", "Cancel", 252.0, 40.0, 52.0, false);
     d.button("clearall", "Clear All", 192.0, 70.0, 80.0, false);
     d.text("Position:", 192.0, 104.0);
     let pos = chosen.map(|t| units::length(t.pos)).unwrap_or_default();
     d.field("pos", &pos, 258.0, 102.0, 46.0);
+    d.action_buttons(&[("cancel", "Cancel", 60.0, false), ("ok", "OK", 60.0, true)]);
     d.focus("pos");
     let base = tabs.clone();
     (
@@ -380,7 +379,7 @@ fn build_character(
     color_button: bool,
 ) -> (Dialog, Which) {
     let c = view.current_chp();
-    let mut d = Dialog::new("Character", 384.0, 262.0);
+    let mut d = Dialog::new("Character", 384.0, 298.0);
     let current = view.doc.font_name(c.font).to_string();
     let mut families = font_families.to_vec();
     if !families
@@ -407,9 +406,6 @@ fn build_character(
     d.font_popup("font", &families, sel, 12.0, 26.0, 200.0);
     d.text("Size:", 228.0, 8.0);
     d.field("size", &crate::bars::format_size(c.size), 228.0, 26.0, 52.0);
-    d.button("ok", "OK", 304.0, 8.0, 68.0, true);
-    d.button("cancel", "Cancel", 304.0, 38.0, 68.0, false);
-    d.button("apply", "Apply", 304.0, 66.0, 68.0, false);
     d.text("Underline:", 12.0, 56.0);
     d.popup(
         "underline",
@@ -489,14 +485,17 @@ fn build_character(
         units::points(c.spacing.abs())
     };
     d.field("sp_by", &by, 296.0, 218.0, 66.0);
+    d.action_buttons(&[
+        ("cancel", "Cancel", 68.0, false),
+        ("apply", "Apply", 68.0, false),
+        ("ok", "OK", 68.0, true),
+    ]);
     d.focus("size");
     // Left over if a window closed under its dialog.
     crate::palette::drop_edits();
     (d, Which::Character(c))
 }
 
-/// Keep the "By:" fields in step with their radio buttons, filling in
-/// The original's defaults (3 pt up, 2 pt down, 1.5 pt condensed, 3 pt expanded).
 /// The last entry in the Color popup, which opens the color palette.
 pub const OTHER_COLOR: &str = "More Colors…";
 
@@ -548,6 +547,8 @@ pub fn show_color(d: &mut Dialog, color: Option<Rgb>) {
     d.set_options("color", names, selected);
 }
 
+/// Keep the "By:" fields in step with their radio buttons, filling in the
+/// original's defaults (3 pt up, 2 pt down, 1.5 pt condensed, 3 pt expanded).
 pub fn character_changed(d: &mut Dialog, id: &str) {
     // The color popup's Other… is taken up by the window, which opens
     // the palette.
@@ -674,7 +675,7 @@ pub fn paragraph(view: &DocView) -> (Dialog, Which) {
 }
 
 pub fn paragraph_properties(p: &ParaProps) -> Dialog {
-    let mut d = Dialog::new("Paragraph", 438.0, 200.0);
+    let mut d = Dialog::new("Paragraph", 438.0, 232.0);
     d.group("Spacing", 10.0, 4.0, 334.0, 70.0);
     d.text("Before:", 18.0, 24.0);
     d.field("before", &units::length(p.before), 84.0, 22.0, 66.0);
@@ -723,12 +724,14 @@ pub fn paragraph_properties(p: &ParaProps) -> Dialog {
     );
     d.disable("noline");
 
-    d.button("ok", "OK", 358.0, 8.0, 68.0, true);
-    d.button("cancel", "Cancel", 358.0, 38.0, 68.0, false);
-    d.button("apply", "Apply", 358.0, 66.0, 68.0, false);
     d.button("tabs", "Tabs…", 358.0, 108.0, 68.0, false);
     d.button("border", "Border…", 358.0, 136.0, 68.0, false);
     d.button("frame", "Frame…", 358.0, 164.0, 68.0, false);
+    d.action_buttons(&[
+        ("cancel", "Cancel", 68.0, false),
+        ("apply", "Apply", 68.0, false),
+        ("ok", "OK", 68.0, true),
+    ]);
     d.focus("left");
     d
 }
@@ -751,7 +754,7 @@ pub fn read_paragraph(d: &Dialog, base: &ParaProps) -> Option<ParaProps> {
 /// File > Summary Info.
 pub fn summary_info(view: &DocView) -> (Dialog, Which) {
     let s = &view.doc.summary;
-    let mut d = Dialog::new("Summary Info", 380.0, 150.0);
+    let mut d = Dialog::new("Summary Info", 380.0, 186.0);
     let rows = [
         ("title", "Title:", &s.title),
         ("subject", "Subject:", &s.subject),
@@ -764,8 +767,7 @@ pub fn summary_info(view: &DocView) -> (Dialog, Which) {
         d.text(label, 10.0, y + 2.0);
         d.field(id, value, 90.0, y, 200.0);
     }
-    d.button("ok", "OK", 302.0, 10.0, 68.0, true);
-    d.button("cancel", "Cancel", 302.0, 40.0, 68.0, false);
+    d.action_buttons(&[("cancel", "Cancel", 68.0, false), ("ok", "OK", 68.0, true)]);
     d.focus("title");
     (d, Which::SummaryInfo)
 }

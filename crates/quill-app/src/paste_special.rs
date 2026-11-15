@@ -32,14 +32,16 @@ const IDS: [&str; 3] = ["form0", "form1", "form2"];
 
 /// The dialog, offering `forms` (at least one) with the first chosen.
 pub fn dialog(forms: &[Form]) -> Dialog {
-    let h = 64.0 + 22.0 * forms.len() as f32;
+    let h = 100.0 + 22.0 * forms.len() as f32;
     let mut d = Dialog::new("Paste Special", 300.0, h.max(96.0));
     d.text("Paste the Clipboard as:", 12.0, 12.0);
     for (k, f) in forms.iter().enumerate().take(IDS.len()) {
         d.radio(IDS[k], f.name(), 20.0, 36.0 + 22.0 * k as f32, 0, k == 0);
     }
-    d.button("ok", "Paste", 210.0, 12.0, 78.0, true);
-    d.button("cancel", "Cancel", 210.0, 40.0, 78.0, false);
+    d.action_buttons(&[
+        ("cancel", "Cancel", 78.0, false),
+        ("ok", "Paste", 78.0, true),
+    ]);
     d
 }
 

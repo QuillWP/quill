@@ -207,22 +207,18 @@ pub fn preferences_with(
                 s.open_with_paragraph_toolbar,
             );
             d.check("ruler", "With Ruler On", 16.0, 211.0, s.open_with_ruler);
-            d.group("Menus", 11.0, 246.0, 364.0, 44.0);
-            d.check(
-                "recent",
-                "List Recently Opened Documents",
-                16.0,
-                269.0,
-                s.recent_files,
-            );
-            d.text("Interface Size:", 16.0, 303.0);
-            let names: Vec<String> = INTERFACE_SIZES.iter().map(|z| format!("{z}%")).collect();
-            let at = INTERFACE_SIZES
+            d.group("Interface", 11.0, 246.0, 420.0, 80.0);
+            d.text("Style:", 16.0, 269.0);
+            let names: Vec<&str> = settings::InterfaceStyle::ALL
                 .iter()
-                .position(|z| *z == s.interface_scale)
-                .unwrap_or(1);
-            d.popup_owned("ui_size", names, at, 110.0, 300.0, 90.0);
-            d.text("Appearance:", 216.0, 303.0);
+                .map(|style| style.label())
+                .collect();
+            let at = settings::InterfaceStyle::ALL
+                .iter()
+                .position(|style| *style == s.interface_style)
+                .unwrap_or(0);
+            d.popup("interface_style", &names, at, 62.0, 266.0, 140.0);
+            d.text("Appearance:", 216.0, 269.0);
             let names: Vec<&str> = settings::Appearance::ALL
                 .iter()
                 .map(|a| a.label())
@@ -231,7 +227,21 @@ pub fn preferences_with(
                 .iter()
                 .position(|a| *a == s.appearance)
                 .unwrap_or(0);
-            d.popup("appearance", &names, at, 290.0, 300.0, 80.0);
+            d.popup("appearance", &names, at, 290.0, 266.0, 80.0);
+            d.text("Interface Size:", 16.0, 300.0);
+            let names: Vec<String> = INTERFACE_SIZES.iter().map(|z| format!("{z}%")).collect();
+            let at = INTERFACE_SIZES
+                .iter()
+                .position(|z| *z == s.interface_scale)
+                .unwrap_or(1);
+            d.popup_owned("ui_size", names, at, 110.0, 297.0, 90.0);
+            d.check(
+                "recent",
+                "List Recent Documents",
+                216.0,
+                300.0,
+                s.recent_files,
+            );
         }
         2 => {
             d.check("rtf", "Always Interpret RTF", 13.0, 45.0, s.interpret_rtf);
@@ -486,9 +496,11 @@ pub fn preferences_with(
             d.focus("size");
         }
     }
-    d.button("cancel", "Cancel", 135.0, height - 35.0, 80.0, false);
-    d.button("save", "Save", 223.0, height - 35.0, 70.0, false);
-    d.button("ok", "Save and Close", 301.0, height - 35.0, 130.0, true);
+    d.action_buttons(&[
+        ("cancel", "Cancel", 80.0, false),
+        ("save", "Save", 70.0, false),
+        ("ok", "Save and Close", 130.0, true),
+    ]);
     d
 }
 
@@ -842,6 +854,10 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
                 .get(d.selected("appearance"))
                 .copied()
                 .unwrap_or_default();
+            s.interface_style = settings::InterfaceStyle::ALL
+                .get(d.selected("interface_style"))
+                .copied()
+                .unwrap_or_default();
             if id == "ui_size" {
                 s.interface_scale = INTERFACE_SIZES[d.selected("ui_size").min(4)];
             }
@@ -1024,6 +1040,7 @@ pub fn save(original: &mut settings::Settings, draft: &settings::Settings) {
             table_gridlines,
             default_view,
             appearance,
+            interface_style,
             open_with_ruler,
             open_with_formatting_toolbar,
             open_with_paragraph_toolbar,
@@ -1394,6 +1411,23 @@ mod tests {
         assert_eq!(settings::get().appearance, settings::Appearance::Dark);
         let d = preferences(1, &[]);
         assert_eq!(d.selected("appearance"), 2);
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
+    fn interface_style_is_independent_of_color_appearance() {
+        settings::update(|s| *s = settings::Settings::default());
+        let mut d = preferences(1, &[]);
+        assert_eq!(d.selected_text("interface_style"), "Airy Classic");
+        d.set_selected("interface_style", 1);
+        changed(1, &mut d, "interface_style");
+        assert_eq!(
+            settings::get().interface_style,
+            settings::InterfaceStyle::Classic
+        );
+        assert_eq!(settings::get().appearance, settings::Appearance::Auto);
+        let d = preferences(1, &[]);
+        assert_eq!(d.selected_text("interface_style"), "Classic");
         settings::update(|s| *s = settings::Settings::default());
     }
 

@@ -30,7 +30,7 @@ fn picture_names() -> Vec<String> {
 }
 
 pub fn dialog() -> (Dialog, CustomizeState) {
-    let mut d = Dialog::new("Customize", 418.0, 280.0);
+    let mut d = Dialog::new("Customize", 418.0, 316.0);
     d.close_box = true;
     d.text("Button Position:", 13.0, 8.0);
     d.popup_owned("position", position_names(), 0, 13.0, 24.0, 302.0);
@@ -66,10 +66,12 @@ pub fn dialog() -> (Dialog, CustomizeState) {
         252.0,
         300.0,
     );
-    d.button("cancel", "Close", 327.0, 12.0, 73.0, true);
     d.button("revert", "Cancel", 329.0, 42.0, 71.0, false);
     d.button("change", "Change", 329.0, 70.0, 71.0, false);
-    d.button("reset", "Reset…", 329.0, 96.0, 71.0, false);
+    d.action_buttons(&[
+        ("reset", "Reset…", 80.0, false),
+        ("cancel", "Close", 80.0, true),
+    ]);
     let mut st = CustomizeState {
         cmds,
         command: usize::MAX,

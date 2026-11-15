@@ -149,15 +149,7 @@ pub fn palette(start: Option<Rgb>, doc: &Document) -> (Dialog, PaletteState) {
     d.text("HTML:", 72.0, 124.0);
     d.field("hex", &hex(current), 112.0, 120.0, 84.0);
     d.button("edit", "Edit…", 210.0, 118.0, 80.0, false);
-    d.button("ok", "OK", row - 150.0, 182.0, 74.0, true);
-    d.button(
-        "cancel",
-        "Cancel",
-        row - 70.0 + 28.0 - 14.0,
-        182.0,
-        74.0,
-        false,
-    );
+    d.action_buttons(&[("cancel", "Cancel", 74.0, false), ("ok", "OK", 74.0, true)]);
     (d, st)
 }
 
@@ -519,8 +511,7 @@ pub fn editor(start: Rgb, target: Target) -> (Dialog, EditState) {
     d.swatch("after", 246.0, 104.0, 70.0, 36.0, start.0);
     d.text("Before", 176.0, 146.0);
     d.text("After", 246.0, 146.0);
-    d.button("ok", "OK", 176.0, 176.0, 70.0, true);
-    d.button("cancel", "Cancel", 256.0, 176.0, 70.0, false);
+    d.action_buttons(&[("cancel", "Cancel", 70.0, false), ("ok", "OK", 70.0, true)]);
     d.focus("hex");
     let st = EditState { target };
     refresh(&mut d, start, None);

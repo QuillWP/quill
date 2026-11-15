@@ -32,7 +32,7 @@ pub fn dialog(at: Position, picture: Picture) -> (Dialog, PictureState) {
     let size = picture.full_size();
     let crop = picture.crop_on_page();
     let (nw, nh) = picture.natural;
-    let mut d = Dialog::new("Picture", 348.0, 202.0);
+    let mut d = Dialog::new("Picture", 348.0, 238.0);
     d.group("Size", 5.0, 5.0, 258.0, 95.0);
     d.text("Width:", 11.0, 24.0);
     d.field("width", &units::length(twips(size.0)), 62.0, 21.0, 65.0);
@@ -59,8 +59,7 @@ pub fn dialog(at: Position, picture: Picture) -> (Dialog, PictureState) {
     d.text("Bottom:", 136.0, 149.0);
     d.field("bottom", &units::length(twips(crop[3])), 188.0, 146.0, 65.0);
     d.text_as("final", "", 11.0, 180.0);
-    d.button("ok", "OK", 272.0, 15.0, 71.0, true);
-    d.button("cancel", "Cancel", 272.0, 40.0, 71.0, false);
+    d.action_buttons(&[("cancel", "Cancel", 71.0, false), ("ok", "OK", 71.0, true)]);
     let st = PictureState {
         at,
         picture,

@@ -11,7 +11,7 @@
 
 <p align="center"><a href="https://quillwp.com">quillwp.com</a></p>
 
-**Status: alpha · version 0.23.0.** Alpha testers wanted.
+**Status: alpha · version 0.24.0.** Alpha testers wanted.
 **[Download a build](https://github.com/QuillWP/quill/releases)** from the releases page.
 
 ![Quill showing an annual financial review with a full-width title banner and a row of four key figures](docs/images/normal-view.png)

@@ -180,13 +180,13 @@ impl WinState {
         };
         strip
             .contains(x, y)
-            .then(|| toolbar::hit(at, x, y, &self.tool_state()))
+            .then(|| toolbar::hit(at, len, x, y, &self.tool_state()))
     }
 
     /// The toolbar button under a point, enabled or not, for its tooltip.
     pub(super) fn toolbar_button_at(&self, x: f32, y: f32) -> Option<usize> {
-        let (at, _) = self.toolbar_place()?;
-        toolbar::button_at(at, x, y)
+        let (at, len) = self.toolbar_place()?;
+        toolbar::button_at(at, len, x, y)
     }
 
     /// The formatting or paragraph toolbar control under a point.
@@ -195,10 +195,10 @@ impl WinState {
             return None;
         }
         if self.show_formatting_toolbar && y < self.paragraph_toolbar_top() {
-            return bars::formatting_toolbar_hit(self.formatting_toolbar_top(), x, y);
+            return bars::formatting_toolbar_hit(self.formatting_toolbar_top(), self.width, x, y);
         }
         if self.show_paragraph_toolbar && y < self.ruler_top() {
-            return bars::paragraph_toolbar_hit(self.paragraph_toolbar_top(), x, y);
+            return bars::paragraph_toolbar_hit(self.paragraph_toolbar_top(), self.width, x, y);
         }
         None
     }
@@ -744,6 +744,73 @@ impl WinState {
         self.menu = Some(MenuTrack {
             source: MenuSource::Context,
             menus: vec![m],
+            actions,
+            open,
+            submenu: None,
+            typed: (String::new(), None),
+            opened: Instant::now(),
+            held: true,
+        });
+    }
+
+    /// Drop the commands that did not fit in a narrow standard toolbar.
+    pub(super) fn open_toolbar_overflow(&mut self, label: &mut Label) {
+        let Some((at, length)) = self.toolbar_place() else {
+            return;
+        };
+        let Some(anchor) = toolbar::overflow_rect(at, length) else {
+            return;
+        };
+        let state = self.tool_state();
+        let items: Vec<_> = toolbar::hidden_slots(at, length)
+            .into_iter()
+            .map(|i| {
+                let command = toolbar::command(i);
+                (
+                    toolbar::slot_name(i).to_string(),
+                    command,
+                    toolbar::is_enabled(i, &state),
+                    command == Some(Cmd::ShowMarks) && state.show_marks,
+                )
+            })
+            .collect();
+        let position = crate::settings::with(|s| s.toolbar_position);
+        let (menu, actions) = app_menus::toolbar_overflow(&items, position);
+        let bounds = Rect::new(0.0, 0.0, self.width, self.height);
+        let open = menu::place(label, &menu, anchor, bounds, true);
+        self.menu = Some(MenuTrack {
+            source: MenuSource::Context,
+            menus: vec![menu],
+            actions,
+            open,
+            submenu: None,
+            typed: (String::new(), None),
+            opened: Instant::now(),
+            held: true,
+        });
+    }
+
+    /// Drop the controls that did not fit in one of the formatting rows.
+    pub(super) fn open_bar_overflow(&mut self, paragraph: bool, label: &mut Label, env: &Env) {
+        let top = if paragraph {
+            self.paragraph_toolbar_top()
+        } else {
+            self.formatting_toolbar_top()
+        };
+        let Some(anchor) = bars::overflow_rect(paragraph, top, self.width) else {
+            return;
+        };
+        let hits = if paragraph {
+            bars::hidden_paragraph(self.width)
+        } else {
+            bars::hidden_formatting(self.width)
+        };
+        let (menu, actions) = app_menus::bar_overflow(&self.context(env), &hits, self.tab_type);
+        let bounds = Rect::new(0.0, 0.0, self.width, self.height);
+        let open = menu::place(label, &menu, anchor, bounds, true);
+        self.menu = Some(MenuTrack {
+            source: MenuSource::Context,
+            menus: vec![menu],
             actions,
             open,
             submenu: None,

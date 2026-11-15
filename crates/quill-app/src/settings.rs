@@ -95,6 +95,35 @@ impl Appearance {
     }
 }
 
+/// The shape and spacing of Quill's own window chrome. Color appearance is
+/// separate, so either style can follow the system's light or dark setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InterfaceStyle {
+    #[default]
+    AiryClassic,
+    Classic,
+}
+
+impl InterfaceStyle {
+    pub const ALL: [InterfaceStyle; 2] = [InterfaceStyle::AiryClassic, InterfaceStyle::Classic];
+
+    /// The name Preferences shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            InterfaceStyle::AiryClassic => "Airy Classic",
+            InterfaceStyle::Classic => "Classic",
+        }
+    }
+
+    /// The name the settings file uses.
+    fn key(self) -> &'static str {
+        match self {
+            InterfaceStyle::AiryClassic => "airy_classic",
+            InterfaceStyle::Classic => "classic",
+        }
+    }
+}
+
 /// Whether Quill opens again the documents that were open when it last quit
 /// (Preferences > Open And Save).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -222,6 +251,8 @@ pub struct Settings {
     pub default_view: DefaultView,
     /// Light, dark, or as the system is.
     pub appearance: Appearance,
+    /// The window chrome's visual design, independent of light or dark mode.
+    pub interface_style: InterfaceStyle,
     pub open_with_ruler: bool,
     pub open_with_formatting_toolbar: bool,
     pub open_with_paragraph_toolbar: bool,
@@ -362,7 +393,7 @@ fn unescape_path(v: &str) -> PathBuf {
 }
 
 impl Default for Settings {
-    /// The original's own defaults.
+    /// Quill's defaults for a new profile.
     fn default() -> Self {
         Settings {
             name: String::new(),
@@ -416,6 +447,7 @@ impl Default for Settings {
             text_boundaries: false,
             default_view: DefaultView::Normal,
             appearance: Appearance::Auto,
+            interface_style: InterfaceStyle::AiryClassic,
             open_with_ruler: true,
             open_with_formatting_toolbar: true,
             open_with_paragraph_toolbar: true,
@@ -512,6 +544,11 @@ impl Settings {
             self.default_view.key().to_string(),
         );
         put(&mut out, "appearance", self.appearance.key().to_string());
+        put(
+            &mut out,
+            "interface_style",
+            self.interface_style.key().to_string(),
+        );
         put(&mut out, "open_with_ruler", b(self.open_with_ruler));
         put(
             &mut out,
@@ -545,7 +582,7 @@ impl Settings {
             &mut out,
             "Interface",
             Some(
-                "Sizes are percentages; spacing and padding are in points. Quit Quill before editing.",
+                "Sizes are percentages. Classic spacing and padding are in points. Quit Quill before editing.",
             ),
         );
         put(&mut out, "document_zoom", self.document_zoom.to_string());
@@ -586,7 +623,7 @@ impl Settings {
         section(
             &mut out,
             "Colors",
-            Some("HTML codes like #DDDDDD. Bars are the toolbars and the ruler."),
+            Some("HTML codes like #DDDDDD. Classic bars are the toolbars and the ruler."),
         );
         let hex = |c: u32| format!("#{c:06X}");
         put(&mut out, "bar_background", hex(self.bar_background));
@@ -980,6 +1017,12 @@ impl Settings {
                     s.appearance = Appearance::ALL
                         .into_iter()
                         .find(|a| a.key() == v)
+                        .unwrap_or_default()
+                }
+                "interface_style" => {
+                    s.interface_style = InterfaceStyle::ALL
+                        .into_iter()
+                        .find(|style| style.key() == v)
                         .unwrap_or_default()
                 }
                 "open_with_ruler" => s.open_with_ruler = flag,
@@ -1682,6 +1725,25 @@ mod tests {
         }
         let s = Settings::from_text("appearance = purple\n");
         assert_eq!(s.appearance, Appearance::Auto);
+    }
+
+    #[test]
+    fn interface_style_reads_back_and_defaults_to_airy_classic() {
+        assert_eq!(
+            Settings::default().interface_style,
+            InterfaceStyle::AiryClassic
+        );
+        for style in InterfaceStyle::ALL {
+            let s = Settings {
+                interface_style: style,
+                ..Settings::default()
+            };
+            assert_eq!(Settings::from_text(&s.to_text()).interface_style, style);
+        }
+        assert_eq!(
+            Settings::from_text("interface_style = unknown\n").interface_style,
+            InterfaceStyle::AiryClassic
+        );
     }
 
     #[test]

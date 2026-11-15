@@ -21,7 +21,7 @@ const SWITCHES: [&str; 8] = [
 ];
 
 pub fn dialog(view: &DocView) -> Dialog {
-    let mut d = Dialog::new("Character Styles", 460.0, 300.0);
+    let mut d = Dialog::new("Character Styles", 460.0, 336.0);
     let current = view.current_chp().character_style;
     d.list(
         "list",
@@ -41,9 +41,9 @@ pub fn dialog(view: &DocView) -> Dialog {
     d.button("remove", "Remove Style", 282.0, 42.0, 166.0, false);
     d.button("update", "Update to Selection", 282.0, 72.0, 166.0, false);
     d.button("clear", "Clear Formatting", 282.0, 112.0, 166.0, false);
-    d.button("ok", "Close", 282.0, 218.0, 166.0, true);
     d.note("description", "", 12.0, 252.0, 436.0);
     d.note("status", "", 12.0, 272.0, 436.0);
+    d.action_buttons(&[("ok", "Close", 100.0, true)]);
     changed(&mut d, view);
     d
 }

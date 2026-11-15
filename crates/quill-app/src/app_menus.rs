@@ -2,6 +2,7 @@
 //! been built yet are shown disabled, so the menus already have the
 //! original's shape and fill in milestone by milestone.
 
+use crate::bars::Hit as BarHit;
 use crate::commands::{Cmd, shortcut_label};
 use crate::docview::DocView;
 use crate::menu::{Item, ItemStyle, Menu};
@@ -15,6 +16,8 @@ pub enum Action {
     None,
     /// Toolbar zoom preset, custom entry or current-page fit.
     Zoom(u8),
+    /// A formatting or paragraph toolbar control chosen from overflow.
+    Bar(BarHit),
     Cmd(Cmd),
     FontVariant(String, bool, bool),
     /// Font size in half-points.
@@ -141,6 +144,29 @@ impl Builder {
     fn later(&mut self, label: &str, key: &str) -> Item {
         self.item(label, Action::None).key(key).enabled(false)
     }
+
+    /// Bring another menu's actions into this builder and rewrite its item
+    /// ids. Overflow uses this to embed the ordinary Font, Size and Style
+    /// pop-ups without maintaining second copies of those menus.
+    fn absorb(&mut self, mut menu: Menu, actions: &[Action]) -> Menu {
+        fn remap(items: &mut [Item], actions: &[Action], into: &mut Vec<Action>) {
+            for item in items {
+                if !item.separator {
+                    let action = actions
+                        .get(item.id as usize)
+                        .cloned()
+                        .unwrap_or(Action::None);
+                    into.push(action);
+                    item.id = (into.len() - 1) as u32;
+                }
+                if let Some(submenu) = &mut item.submenu {
+                    remap(&mut submenu.items, actions, into);
+                }
+            }
+        }
+        remap(&mut menu.items, actions, &mut self.actions);
+        menu
+    }
 }
 
 fn variant_label(v: FontVariant) -> &'static str {
@@ -232,6 +258,7 @@ impl Action {
     pub fn changes_format(&self) -> bool {
         match self {
             Action::Cmd(c) => c.changes_format(),
+            Action::Bar(_) => true,
             Action::FontVariant(..)
             | Action::Size(_)
             | Action::Style(_)
@@ -856,6 +883,182 @@ pub fn toolbar_menu(position: u8) -> (Menu, Vec<Action>) {
         Item::separator(),
         b.item("Customize…", Action::CustomizeToolbar),
     ];
+    (
+        Menu {
+            title: String::new(),
+            items,
+        },
+        b.actions,
+    )
+}
+
+/// Commands clipped from the standard toolbar in a narrow window.
+pub fn toolbar_overflow(
+    items: &[(String, Option<Cmd>, bool, bool)],
+    position: u8,
+) -> (Menu, Vec<Action>) {
+    let mut b = Builder {
+        actions: vec![Action::None],
+    };
+    let mut menu_items = Vec::new();
+    for (label, command, enabled, checked) in items {
+        if *command == Some(Cmd::ToolbarMenu) {
+            let (menu, actions) = toolbar_menu(position);
+            let submenu = b.absorb(menu, &actions);
+            menu_items.push(b.item(label, Action::None).submenu(submenu));
+            continue;
+        }
+        menu_items.push(match command {
+            Some(command) => {
+                let item = b.cmd(label, *command).enabled(*enabled);
+                if *command == Cmd::ShowMarks {
+                    item.checked(*checked)
+                } else {
+                    item
+                }
+            }
+            None => b.item(label, Action::None).enabled(false),
+        });
+    }
+    (
+        Menu {
+            title: String::new(),
+            items: menu_items,
+        },
+        b.actions,
+    )
+}
+
+fn bar_command(hit: BarHit) -> Option<Cmd> {
+    Some(match hit {
+        BarHit::Bold => Cmd::Bold,
+        BarHit::Italic => Cmd::Italic,
+        BarHit::Underline => Cmd::Underline,
+        BarHit::Superscript => Cmd::Superscript,
+        BarHit::Subscript => Cmd::Subscript,
+        BarHit::Align(quill_core::Align::Left) => Cmd::AlignLeft,
+        BarHit::Align(quill_core::Align::Center) => Cmd::AlignCenter,
+        BarHit::Align(quill_core::Align::Right) => Cmd::AlignRight,
+        BarHit::Align(quill_core::Align::Justify) => Cmd::Justify,
+        BarHit::Tool(name) => crate::bars::tool_command(name)?,
+        _ => return None,
+    })
+}
+
+fn bar_label(hit: BarHit) -> &'static str {
+    match hit {
+        BarHit::FontPopup => "Font",
+        BarHit::SizePopup => "Font Size",
+        BarHit::ColorPopup => "Font Color...",
+        BarHit::StylePopup => "Style",
+        BarHit::Bold => "Bold",
+        BarHit::Italic => "Italic",
+        BarHit::Underline => "Underline",
+        BarHit::Superscript => "Superscript",
+        BarHit::Subscript => "Subscript",
+        BarHit::Columns(1) => "One Column",
+        BarHit::Columns(2) => "Two Columns",
+        BarHit::Columns(_) => "Three Columns",
+        BarHit::Align(quill_core::Align::Left) => "Align Left",
+        BarHit::Align(quill_core::Align::Center) => "Centered",
+        BarHit::Align(quill_core::Align::Right) => "Align Right",
+        BarHit::Align(quill_core::Align::Justify) => "Justified",
+        BarHit::Spacing(0) => "Single Spacing",
+        BarHit::Spacing(1) => "1.5 Line Spacing",
+        BarHit::Spacing(_) => "Double Spacing",
+        BarHit::SpaceBefore(false) => "No Space Before",
+        BarHit::SpaceBefore(true) => "12 pt Space Before",
+        BarHit::TabType(quill_core::TabAlign::Left) => "Left Tab",
+        BarHit::TabType(quill_core::TabAlign::Center) => "Center Tab",
+        BarHit::TabType(quill_core::TabAlign::Right) => "Right Tab",
+        BarHit::TabType(quill_core::TabAlign::Decimal) => "Decimal Tab",
+        BarHit::TabType(quill_core::TabAlign::Bar) => "Vertical Line Tab",
+        BarHit::Scale(0) => "Normal Scale",
+        BarHit::Scale(1) => "Table Scale",
+        BarHit::Scale(_) => "Page Scale",
+        BarHit::Tool(name) => name,
+        BarHit::FormattingOverflow | BarHit::ParagraphOverflow => "More Toolbar Items",
+    }
+}
+
+fn bar_checked(cx: &MenuContext, hit: BarHit, tab_type: quill_core::TabAlign) -> bool {
+    let chp = cx.view.current_chp();
+    let pap = cx.view.current_pap();
+    match hit {
+        BarHit::Bold => chp.bold,
+        BarHit::Italic => chp.italic,
+        BarHit::Underline => chp.underline != Underline::None,
+        BarHit::Superscript => chp.script == quill_core::Script::Super,
+        BarHit::Subscript => chp.script == quill_core::Script::Sub,
+        BarHit::Columns(n) => cx.view.current_section().columns == n as u16,
+        BarHit::Align(align) => pap.align == align,
+        BarHit::Spacing(0) => pap.line == quill_core::LineSpacing::Auto,
+        BarHit::Spacing(1) => pap.line == quill_core::LineSpacing::AtLeast(360),
+        BarHit::Spacing(_) => pap.line == quill_core::LineSpacing::AtLeast(480),
+        BarHit::SpaceBefore(open) => (pap.before > 0) == open,
+        BarHit::TabType(kind) => tab_type == kind,
+        BarHit::Scale(n) => n == 0,
+        BarHit::Tool("Show/Hide ¶") => cx.view.show_marks,
+        _ => false,
+    }
+}
+
+fn bar_checkable(hit: BarHit) -> bool {
+    matches!(
+        hit,
+        BarHit::Bold
+            | BarHit::Italic
+            | BarHit::Underline
+            | BarHit::Superscript
+            | BarHit::Subscript
+            | BarHit::Columns(_)
+            | BarHit::Align(_)
+            | BarHit::Spacing(_)
+            | BarHit::SpaceBefore(_)
+            | BarHit::TabType(_)
+            | BarHit::Scale(_)
+            | BarHit::Tool("Show/Hide ¶")
+    )
+}
+
+/// Controls clipped from a formatting or paragraph toolbar. Font, Size and
+/// Style keep their ordinary checked submenus; every other item invokes the
+/// same operation as its toolbar button.
+pub fn bar_overflow(
+    cx: &MenuContext,
+    hits: &[BarHit],
+    tab_type: quill_core::TabAlign,
+) -> (Menu, Vec<Action>) {
+    let mut b = Builder {
+        actions: vec![Action::None],
+    };
+    let mut items = Vec::new();
+    for &hit in hits {
+        let popup = match hit {
+            BarHit::FontPopup => Some(font_popup(cx)),
+            BarHit::SizePopup => Some(size_popup(cx)),
+            BarHit::StylePopup => Some(style_popup(cx)),
+            _ => None,
+        };
+        if let Some((menu, actions)) = popup {
+            let submenu = b.absorb(menu, &actions);
+            items.push(b.item(bar_label(hit), Action::None).submenu(submenu));
+            continue;
+        }
+        let enabled = !matches!(hit, BarHit::Scale(1 | 2))
+            && !matches!(hit, BarHit::Tool(name) if crate::bars::tool_command(name).is_none());
+        let mut item = b.item(bar_label(hit), Action::Bar(hit)).enabled(enabled);
+        if bar_checkable(hit) {
+            item = item.checked(bar_checked(cx, hit, tab_type));
+        }
+        if let Some(command) = bar_command(hit) {
+            item = item.key(shortcut_label(command));
+        }
+        items.push(item);
+    }
+    if cx.view.in_markdown_source() {
+        disable_formatting(&mut items, &b.actions);
+    }
     (
         Menu {
             title: String::new(),

@@ -25,13 +25,44 @@ fn zoom() -> f32 {
 /// The look every toolbar and the ruler share, from the settings file.
 /// The bars' color (`bar_background`).
 pub fn background() -> u32 {
-    crate::settings::with(|s| s.bar_background)
+    crate::settings::with(|s| match s.interface_style {
+        crate::settings::InterfaceStyle::AiryClassic => 0xF8F9FB,
+        crate::settings::InterfaceStyle::Classic => s.bar_background,
+    })
 }
 
 /// Blank points before the first control and above and below the controls
 /// (`bar_padding_horiz` and `bar_padding_vert`).
 pub fn padding() -> (f32, f32) {
-    crate::settings::with(|s| (s.bar_padding_horiz as f32, s.bar_padding_vert as f32))
+    crate::settings::with(|s| match s.interface_style {
+        crate::settings::InterfaceStyle::AiryClassic => (14.0, 7.0),
+        crate::settings::InterfaceStyle::Classic => {
+            (s.bar_padding_horiz as f32, s.bar_padding_vert as f32)
+        }
+    })
+}
+
+/// Whether Quill is drawing the roomier modern treatment.
+pub fn airy() -> bool {
+    crate::settings::with(|s| s.interface_style == crate::settings::InterfaceStyle::AiryClassic)
+}
+
+/// A quiet hover surface. Blue is reserved for a selected or pressed tool.
+pub fn hover_color() -> u32 {
+    if airy() { 0xE8EDF3 } else { color::HOVER }
+}
+
+/// The active surface in Airy Classic uses the system-like blue accent.
+pub fn pressed_color() -> u32 {
+    if airy() { 0xD9E9FC } else { color::PRESSED }
+}
+
+fn control_height() -> f32 {
+    if airy() { 22.0 } else { 16.0 }
+}
+
+fn button_radius() -> f32 {
+    if airy() { 4.0 } else { 3.0 }
 }
 
 /// The flat line under a bar that starts at `top`, in the window's own
@@ -51,7 +82,10 @@ fn darker(c: u32) -> u32 {
 
 /// The flat dividers, and the outlines of the white boxes (`line_color`).
 pub fn line_color() -> u32 {
-    crate::settings::with(|s| s.line_color)
+    crate::settings::with(|s| match s.interface_style {
+        crate::settings::InterfaceStyle::AiryClassic => 0xD9DEE5,
+        crate::settings::InterfaceStyle::Classic => s.line_color,
+    })
 }
 
 /// Heights in the window's interface units, zoom included. Item layouts
@@ -59,7 +93,7 @@ pub fn line_color() -> u32 {
 /// Both toolbars hold 16-point controls, zoomed, with the padding above
 /// and below and the divider under them.
 pub fn formatting_toolbar_height() -> f32 {
-    (16.0 * zoom() + 2.0 * padding().1 + 1.0).round()
+    (control_height() * zoom() + 2.0 * padding().1 + 1.0).round()
 }
 
 pub fn paragraph_toolbar_height() -> f32 {
@@ -73,6 +107,8 @@ const UI: &str = quill_layout::fonts::UI_FONT;
 /// A control on the formatting or paragraph toolbar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
+    FormattingOverflow,
+    ParagraphOverflow,
     FontPopup,
     SizePopup,
     ColorPopup,
@@ -99,7 +135,10 @@ pub enum Hit {
 /// The original's first control sat 8 points in; this moves the row to the
 /// bar's padding instead, and puts the controls below the top padding.
 fn spaced(items: impl IntoIterator<Item = (Hit, Rect)>) -> Vec<(Hit, Rect)> {
-    let gap = crate::settings::with(|s| s.formatting_toolbar_spacing) as f32;
+    let gap = crate::settings::with(|s| match s.interface_style {
+        crate::settings::InterfaceStyle::AiryClassic => 6.0,
+        crate::settings::InterfaceStyle::Classic => s.formatting_toolbar_spacing as f32,
+    });
     let (horiz, vert) = padding();
     let (dx, y) = (horiz / zoom() - 8.0, vert / zoom());
     items
@@ -117,7 +156,7 @@ fn lay(items: &[(Hit, f32, f32)]) -> Vec<(Hit, Rect)> {
         .iter()
         .map(|&(hit, w, before)| {
             x += before;
-            let r = Rect::new(x, 0.0, w, 16.0);
+            let r = Rect::new(x, 0.0, w, control_height());
             x += w;
             (hit, r)
         })
@@ -193,6 +232,54 @@ fn paragraph_toolbar_items() -> Vec<(Hit, Rect)> {
     lay(&v)
 }
 
+const OVERFLOW_W: f32 = 24.0;
+
+fn overflow_for(items: &[(Hit, Rect)], top: f32, width: f32) -> Option<Rect> {
+    if items
+        .last()
+        .is_none_or(|(_, r)| r.right() <= width - padding().0)
+    {
+        return None;
+    }
+    Some(Rect::new(
+        width - padding().0 - OVERFLOW_W,
+        top,
+        OVERFLOW_W,
+        formatting_toolbar_height() - 1.0,
+    ))
+}
+
+fn hidden_from(items: &[(Hit, Rect)], top: f32, width: f32) -> Vec<Hit> {
+    let Some(button) = overflow_for(items, top, width) else {
+        return Vec::new();
+    };
+    let cutoff = button.x - 4.0;
+    items
+        .iter()
+        .filter_map(|(hit, r)| (r.right() > cutoff).then_some(*hit))
+        .collect()
+}
+
+/// Formatting controls moved into the trailing overflow menu.
+pub fn hidden_formatting(width: f32) -> Vec<Hit> {
+    hidden_from(&formatting_toolbar_items(), 0.0, width)
+}
+
+/// Paragraph controls moved into the trailing overflow menu.
+pub fn hidden_paragraph(width: f32) -> Vec<Hit> {
+    hidden_from(&paragraph_toolbar_items(), 0.0, width)
+}
+
+/// The overflow button for placing its menu or color palette.
+pub fn overflow_rect(paragraph: bool, top: f32, width: f32) -> Option<Rect> {
+    let items = if paragraph {
+        paragraph_toolbar_items()
+    } else {
+        formatting_toolbar_items()
+    };
+    overflow_for(&items, top, width)
+}
+
 /// A shared picture's command, if it has one yet.
 pub fn tool_command(name: &str) -> Option<Cmd> {
     crate::toolbar::picture_named(name).and_then(|p| p.2)
@@ -201,6 +288,7 @@ pub fn tool_command(name: &str) -> Option<Cmd> {
 /// A toolbar control's tooltip, with its shortcut if it has one.
 pub fn tip(hit: Hit) -> Option<String> {
     let (name, cmd) = match hit {
+        Hit::FormattingOverflow | Hit::ParagraphOverflow => ("More Toolbar Items", None),
         Hit::FontPopup => ("Font", None),
         Hit::SizePopup => ("Font Size", None),
         Hit::ColorPopup => ("Font Color", None),
@@ -238,18 +326,30 @@ pub fn tip(hit: Hit) -> Option<String> {
     Some(crate::commands::tip(name, cmd))
 }
 
-pub fn formatting_toolbar_hit(top: f32, x: f32, y: f32) -> Option<Hit> {
+pub fn formatting_toolbar_hit(top: f32, width: f32, x: f32, y: f32) -> Option<Hit> {
+    if overflow_rect(false, top, width).is_some_and(|r| r.contains(x, y)) {
+        return Some(Hit::FormattingOverflow);
+    }
     let (top, x, y) = (top / zoom(), x / zoom(), y / zoom());
-    formatting_toolbar_items()
+    let items = formatting_toolbar_items();
+    let hidden = hidden_from(&items, top, width / zoom());
+    items
         .into_iter()
+        .filter(|(hit, _)| !hidden.contains(hit))
         .find(|(_, r)| Rect::new(r.x, r.y + top, r.w, r.h).contains(x, y))
         .map(|(h, _)| h)
 }
 
-pub fn paragraph_toolbar_hit(top: f32, x: f32, y: f32) -> Option<Hit> {
+pub fn paragraph_toolbar_hit(top: f32, width: f32, x: f32, y: f32) -> Option<Hit> {
+    if overflow_rect(true, top, width).is_some_and(|r| r.contains(x, y)) {
+        return Some(Hit::ParagraphOverflow);
+    }
     let (top, x, y) = (top / zoom(), x / zoom(), y / zoom());
-    paragraph_toolbar_items()
+    let items = paragraph_toolbar_items();
+    let hidden = hidden_from(&items, top, width / zoom());
+    items
         .into_iter()
+        .filter(|(hit, _)| !hidden.contains(hit))
         .find(|(_, r)| Rect::new(r.x, r.y + top, r.w, r.h).contains(x, y))
         .map(|(h, _)| h)
 }
@@ -294,7 +394,10 @@ fn popup_field_font(c: &mut Canvas, label: &mut Label, r: Rect, text: &str, hot:
     let clip = c.set_clip(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 17.0, r.h - 2.0));
     // `toolbar_picker_font_size` is in points as shown, so undo the zoom
     // the box is drawn at; the baseline centers capitals in the box.
-    let size = crate::settings::with(|s| s.toolbar_picker_font_size) as f32 / zoom();
+    let size = crate::settings::with(|s| match s.interface_style {
+        crate::settings::InterfaceStyle::AiryClassic => 13.0,
+        crate::settings::InterfaceStyle::Classic => s.toolbar_picker_font_size as f32,
+    }) / zoom();
     let base = r.y + r.h / 2.0 + size * 0.36;
     label.draw(c, font, size, false, r.x + 5.0, base, text, icon::INK);
     c.restore_clip(clip);
@@ -305,7 +408,7 @@ fn popup_field_font(c: &mut Canvas, label: &mut Label, r: Rect, text: &str, hot:
         label,
         &im,
         r.right() - 13.0,
-        r.y + 5.0,
+        r.y + (r.h - 6.0) / 2.0,
         255,
         color::WHITE,
     );
@@ -324,15 +427,23 @@ fn button(
     live: bool,
 ) {
     if on {
-        canvas::round_rect(c, r, 3.0, color::PRESSED);
+        canvas::round_rect(c, r, button_radius(), pressed_color());
     } else if hot && live {
-        canvas::round_rect(c, r, 3.0, color::HOVER);
+        canvas::round_rect(c, r, button_radius(), hover_color());
     }
     let n = c.scale;
     let im = icon::cached(spec, 16, 16, n);
     let alpha = if live { 255 } else { c.faded() };
     let x = r.x + ((r.w - 16.0) / 2.0).floor();
-    icon::paint(c, label, &im, x, r.y, alpha, background());
+    icon::paint(
+        c,
+        label,
+        &im,
+        x,
+        r.y + (r.h - 16.0) / 2.0,
+        alpha,
+        background(),
+    );
 }
 
 /// A button showing a standard toolbar picture shrunk to the row's 16
@@ -343,7 +454,7 @@ fn tool_button(c: &mut Canvas, label: &mut Label, r: Rect, name: &str, hot: bool
     };
     let live = cmd.is_some();
     if hot && live {
-        canvas::round_rect(c, r, 3.0, color::HOVER);
+        canvas::round_rect(c, r, button_radius(), hover_color());
     }
     let k = 16.0 / h as f32;
     let old = c.zoom(k);
@@ -351,8 +462,32 @@ fn tool_button(c: &mut Canvas, label: &mut Label, r: Rect, name: &str, hot: bool
     let im = icon::cached(spec, w, h, n);
     let x = r.x + (r.w - w as f32 * k) / 2.0;
     let alpha = if live { 255 } else { c.faded() };
-    icon::paint(c, label, &im, x / k, r.y / k, alpha, background());
+    icon::paint(
+        c,
+        label,
+        &im,
+        x / k,
+        (r.y + (r.h - 16.0) / 2.0) / k,
+        alpha,
+        background(),
+    );
     c.set_scale(old);
+}
+
+fn draw_overflow_button(c: &mut Canvas, label: &mut Label, r: Rect, hot: bool) {
+    if hot {
+        canvas::round_rect(c, r.inset(2.0), button_radius(), hover_color());
+    }
+    let im = icon::cached(OVERFLOW, 16, 16, c.scale);
+    icon::paint(
+        c,
+        label,
+        &im,
+        r.x + (r.w - 16.0) / 2.0,
+        r.y + (r.h - 16.0) / 2.0,
+        255,
+        background(),
+    );
 }
 
 /// What the formatting toolbar shows: the selection's formatting.
@@ -375,7 +510,12 @@ pub fn draw_formatting_toolbar(
     let bar = Rect::new(0.0, top, width, formatting_toolbar_height() / zoom());
     c.fill(bar, background());
     let at = |r: Rect| Rect::new(r.x, r.y + top, r.w, r.h);
-    for (hit, r) in formatting_toolbar_items() {
+    let items = formatting_toolbar_items();
+    let hidden = hidden_from(&items, top, width);
+    for (hit, r) in items.iter().copied() {
+        if hidden.contains(&hit) {
+            continue;
+        }
         let r = at(r);
         let hot = hover == Some(hit);
         let (spec, on, live) = match hit {
@@ -411,6 +551,9 @@ pub fn draw_formatting_toolbar(
             _ => continue,
         };
         button(c, label, r, spec, on, hot, live);
+    }
+    if let Some(r) = overflow_for(&items, top, width) {
+        draw_overflow_button(c, label, r, hover == Some(Hit::FormattingOverflow));
     }
     c.set_scale(old);
     divider(c, top * zoom(), width * zoom());
@@ -457,7 +600,12 @@ pub fn draw_paragraph_toolbar(
     let bar = Rect::new(0.0, ztop, zwidth, paragraph_toolbar_height() / zoom());
     c.fill(bar, background());
     let at = |r: Rect| Rect::new(r.x, r.y + ztop, r.w, r.h);
-    for (hit, r) in paragraph_toolbar_items() {
+    let items = paragraph_toolbar_items();
+    let hidden = hidden_from(&items, ztop, zwidth);
+    for (hit, r) in items.iter().copied() {
+        if hidden.contains(&hit) {
+            continue;
+        }
         let r = at(r);
         let hot = hover == Some(hit);
         let (spec, on, live) = match hit {
@@ -521,6 +669,9 @@ pub fn draw_paragraph_toolbar(
             _ => continue,
         };
         button(c, label, r, spec, on, hot, live);
+    }
+    if let Some(r) = overflow_for(&items, ztop, zwidth) {
+        draw_overflow_button(c, label, r, hover == Some(Hit::ParagraphOverflow));
     }
     c.set_scale(old);
     divider(c, top, width);
@@ -878,6 +1029,9 @@ const PAGE_SCALE: &str = "
     line k 5 3 3 3 3 13 5 13
     line k 11 3 13 3 13 13 11 13
 ";
+const OVERFLOW: &str = "
+    line k/1.5 4 6 8 10 12 6
+";
 
 #[cfg(test)]
 mod tests {
@@ -910,6 +1064,23 @@ mod tests {
         crate::settings::update(|s| s.paragraph_toolbar_tabs = true);
         assert_eq!(tabs(), 5);
         crate::settings::update(|s| s.paragraph_toolbar_tabs = false);
+    }
+
+    #[test]
+    fn narrow_bars_move_only_the_trailing_controls_to_overflow() {
+        assert!(hidden_formatting(2000.0).is_empty());
+        assert!(hidden_paragraph(2000.0).is_empty());
+        let formatting = hidden_formatting(520.0);
+        let paragraph = hidden_paragraph(520.0);
+        assert!(!formatting.is_empty() && !paragraph.is_empty());
+        assert!(!formatting.contains(&Hit::FontPopup));
+        assert!(!paragraph.contains(&Hit::StylePopup));
+        assert!(formatting.contains(&Hit::Tool("Insert Graph")));
+        let r = overflow_rect(false, 30.0, 520.0).unwrap();
+        assert_eq!(
+            formatting_toolbar_hit(30.0, 520.0, r.x + 2.0, r.y + 2.0),
+            Some(Hit::FormattingOverflow)
+        );
     }
 
     #[test]

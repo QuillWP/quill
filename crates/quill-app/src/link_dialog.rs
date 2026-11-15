@@ -33,7 +33,7 @@ pub fn dialog(view: &DocView) -> (Dialog, LinkState) {
     };
     // A selection that holds a link starts with what to do about it.
     let top = if target.within != 0 { 66.0 } else { 0.0 };
-    let mut d = Dialog::new(title, 412.0, 206.0 + top);
+    let mut d = Dialog::new(title, 412.0, 242.0 + top);
     if target.within != 0 {
         d.text("The selection already has a link:", 12.0, 12.0);
         d.radio(
@@ -72,16 +72,11 @@ pub fn dialog(view: &DocView) -> (Dialog, LinkState) {
         d.text_as(hex, &crate::palette::hex(c), 152.0, top + y + 3.0);
     }
     let editing = target.link != 0;
-    d.button(
-        "ok",
-        if editing { "Update" } else { "Insert" },
-        318.0,
-        8.0,
-        82.0,
-        true,
-    );
-    d.button("cancel", "Cancel", 318.0, 36.0, 82.0, false);
-    d.button("remove", "Remove", 318.0, 64.0, 82.0, false);
+    d.action_buttons(&[
+        ("remove", "Remove", 82.0, false),
+        ("cancel", "Cancel", 82.0, false),
+        ("ok", if editing { "Update" } else { "Insert" }, 82.0, true),
+    ]);
     d.enable("remove", editing);
     d.focus(if target.text.is_empty() || target.within != 0 {
         "text"

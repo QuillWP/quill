@@ -36,7 +36,7 @@ fn v_text(v: FrameV) -> String {
 pub fn frame(view: &DocView) -> Dialog {
     let pap = view.current_pap();
     let f = pap.frame.unwrap_or_default();
-    let mut d = Dialog::new("Frame", 352.0, 154.0);
+    let mut d = Dialog::new("Frame", 352.0, 190.0);
     d.group("Horizontal", 5.0, 5.0, 257.0, 46.0);
     d.field("h", &h_text(f.h), 11.0, 21.0, 65.0);
     d.menu_button("h_menu", "", &H_NAMES, 79.0, 21.0, 19.0);
@@ -59,10 +59,12 @@ pub fn frame(view: &DocView) -> Dialog {
     d.menu_button("width_menu", "", &["Auto"], 169.0, 101.0, 19.0);
     d.text_as("from_label", "From Text:", 8.0, 130.0);
     d.field("from", &units::length(f.from_text), 101.0, 127.0, 66.0);
-    d.button("ok", "OK", 272.0, 15.0, 71.0, true);
-    d.button("cancel", "Cancel", 272.0, 40.0, 71.0, false);
-    d.button("unframe", "Unframe", 272.0, 64.0, 71.0, false);
-    d.button("position", "Position…", 272.0, 101.0, 71.0, false);
+    d.button("position", "Position…", 190.0, 101.0, 71.0, false);
+    d.action_buttons(&[
+        ("unframe", "Unframe", 71.0, false),
+        ("cancel", "Cancel", 71.0, false),
+        ("ok", "OK", 71.0, true),
+    ]);
     d.enable("unframe", pap.frame.is_some());
     changed(&mut d, "");
     d.focus("h");
@@ -156,7 +158,7 @@ pub fn read(d: &Dialog, base: &Frame) -> Option<Frame> {
 // ----- Drop Cap -----
 
 pub fn drop_cap(view: &DocView, fonts: &[String]) -> Dialog {
-    let mut d = Dialog::new("Drop Cap", 336.0, 185.0);
+    let mut d = Dialog::new("Drop Cap", 336.0, 221.0);
     let chp = view.current_chp();
     let current = view.doc.font_name(chp.font).to_string();
     let mut names = fonts.to_vec();
@@ -174,8 +176,6 @@ pub fn drop_cap(view: &DocView, fonts: &[String]) -> Dialog {
     let heights: Vec<String> = (1..=10).map(|n| format!("{n} li")).collect();
     let refs: Vec<&str> = heights.iter().map(String::as_str).collect();
     d.menu_button("height_menu", "", &refs, 227.0, 30.0, 19.0);
-    d.button("ok", "OK", 259.0, 16.0, 62.0, true);
-    d.button("cancel", "Cancel", 258.0, 45.0, 64.0, false);
     d.check("smallcaps", "Small Caps", 11.0, 61.0, false);
     d.group("Position", 9.0, 82.0, 154.0, 95.0);
     d.radio("dropped", "Dropped", 15.0, 104.0, 1, true);
@@ -194,6 +194,7 @@ pub fn drop_cap(view: &DocView, fonts: &[String]) -> Dialog {
         "sel",
         !view.sel.is_empty() && view.sel.start().para == view.sel.end().para,
     );
+    d.action_buttons(&[("cancel", "Cancel", 64.0, false), ("ok", "OK", 64.0, true)]);
     drop_cap_changed(&mut d, "");
     d.focus("height");
     d

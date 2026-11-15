@@ -169,7 +169,7 @@ pub fn border(view: &DocView) -> (Dialog, BorderState) {
         .flat_map(|b| [b.top, b.bottom, b.left, b.right, b.between])
         .find(|l| !l.is_none())
         .map_or(Rgb::BLACK, |l| l.color);
-    let mut d = Dialog::new("Border", 368.0, 248.0);
+    let mut d = Dialog::new("Border", 368.0, 284.0);
     d.group("Border", 12.0, 6.0, 149.0, 161.0);
     d.check("top", "Top", 18.0, 24.0, sel & TOP != 0);
     d.check("bottom", "Bottom", 18.0, 46.0, sel & BOTTOM != 0);
@@ -193,8 +193,6 @@ pub fn border(view: &DocView) -> (Dialog, BorderState) {
     d.text("Color:", 176.0, 80.0);
     d.swatch_button("line_color", 174.0, 97.0, 44.0, 22.0, color.0);
     d.text_as("line_color_hex", &crate::palette::hex(color), 224.0, 100.0);
-    d.button("ok", "OK", 304.0, 15.0, 52.0, true);
-    d.button("cancel", "Cancel", 304.0, 45.0, 52.0, false);
     d.text("Background:", 169.0, 160.0);
     d.swatch_button(
         "shading_color",
@@ -219,6 +217,7 @@ pub fn border(view: &DocView) -> (Dialog, BorderState) {
         d.disable("applyto_label");
         d.disable("applyto");
     }
+    d.action_buttons(&[("cancel", "Cancel", 68.0, false), ("ok", "OK", 68.0, true)]);
     d.focus("space");
     let st = BorderState {
         base: (b, p.shading_color),

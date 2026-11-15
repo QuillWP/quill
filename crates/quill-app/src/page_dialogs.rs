@@ -14,7 +14,7 @@ const FOOTNOTE_POSITIONS: [(&str, FootnotePosition); 4] = [
 
 pub fn document(view: &DocView) -> Dialog {
     let p = &view.doc.props;
-    let mut d = Dialog::new("Document Setup", 501.0, 255.0);
+    let mut d = Dialog::new("Document Setup", 501.0, 291.0);
     d.group("Margins", 10.0, 7.0, 359.0, 87.0);
     d.text("Left:", 15.0, 25.0);
     d.field("left", &units::length(p.margin_left), 70.0, 22.0, 69.0);
@@ -96,11 +96,10 @@ pub fn document(view: &DocView) -> Dialog {
     d.field("subsize", &sc.sub_size.to_string(), 210.0, 223.0, 40.0);
     d.text("% of the size", 254.0, 226.0);
 
-    d.button("ok", "OK", 382.0, 16.0, 101.0, true);
-    d.button("cancel", "Cancel", 382.0, 42.0, 101.0, false);
-    d.button("usedefault", "Use As Default", 382.0, 66.0, 101.0, false);
+    d.button("usedefault", "Use As Default", 382.0, 16.0, 101.0, false);
     d.button("fileseries", "File Series…", 382.0, 90.0, 101.0, false);
     d.disable("fileseries");
+    d.action_buttons(&[("cancel", "Cancel", 82.0, false), ("ok", "OK", 82.0, true)]);
     d.focus("left");
     d
 }
@@ -212,7 +211,7 @@ pub fn page_setup(view: &DocView) -> Dialog {
         .iter()
         .position(|x| (x.1 - w).abs() < 20 && (x.2 - h).abs() < 20)
         .unwrap_or(0);
-    let mut d = Dialog::new("Page Setup", 422.0, 112.0);
+    let mut d = Dialog::new("Page Setup", 422.0, 146.0);
     d.text("Paper:", 12.0, 13.0);
     d.popup_owned(
         "paper",
@@ -226,9 +225,8 @@ pub fn page_setup(view: &DocView) -> Dialog {
     let wide = p.page_width > p.page_height;
     d.radio("tall", "Tall", 100.0, 45.0, 1, !wide);
     d.radio("wide", "Wide", 170.0, 45.0, 1, wide);
-    d.button("ok", "OK", 290.0, 10.0, 70.0, true);
-    d.button("cancel", "Cancel", 290.0, 40.0, 70.0, false);
-    d.button("document", "Document Setup…", 290.0, 80.0, 120.0, false);
+    d.button("document", "Document Setup…", 12.0, 80.0, 120.0, false);
+    d.action_buttons(&[("cancel", "Cancel", 70.0, false), ("ok", "OK", 70.0, true)]);
     d
 }
 
@@ -277,9 +275,11 @@ pub fn print(view: &DocView) -> Dialog {
         76.0,
         view.doc.props.print_hidden,
     );
-    d.button("ok", "Print", 316.0, 10.0, 72.0, true);
-    d.button("cancel", "Cancel", 316.0, 40.0, 72.0, false);
-    d.button("savepdf", "Save as PDF…", 270.0, 102.0, 118.0, false);
+    d.action_buttons(&[
+        ("savepdf", "Save as PDF…", 118.0, false),
+        ("cancel", "Cancel", 72.0, false),
+        ("ok", "Print", 72.0, true),
+    ]);
     d.focus("copies");
     d
 }
@@ -329,7 +329,7 @@ const FORMATS: [(&str, PageNumberFormat); 5] = [
 
 pub fn section(view: &DocView) -> Dialog {
     let s = view.current_section();
-    let mut d = Dialog::new("Section", 492.0, 181.0);
+    let mut d = Dialog::new("Section", 492.0, 217.0);
     d.text("Start:", 11.0, 8.0);
     let names: Vec<&str> = STARTS.iter().map(|x| x.0).collect();
     let at = STARTS.iter().position(|x| x.1 == s.start).unwrap_or(0);
@@ -412,11 +412,13 @@ pub fn section(view: &DocView) -> Dialog {
     );
     margin_numbers_changed(&mut d);
 
-    d.button("ok", "OK", 367.0, 6.0, 110.0, true);
-    d.button("cancel", "Cancel", 367.0, 40.0, 110.0, false);
-    d.button("apply", "Apply", 367.0, 65.0, 110.0, false);
-    d.button("usedefault", "Use As Default", 367.0, 118.0, 110.0, false);
+    d.button("usedefault", "Use As Default", 367.0, 40.0, 110.0, false);
     d.button("linenumbers", "Line Numbers…", 367.0, 142.0, 110.0, false);
+    d.action_buttons(&[
+        ("cancel", "Cancel", 90.0, false),
+        ("apply", "Apply", 90.0, false),
+        ("ok", "OK", 90.0, true),
+    ]);
     d.focus("columns");
     d
 }

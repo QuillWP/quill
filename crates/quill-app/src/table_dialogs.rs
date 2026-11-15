@@ -200,15 +200,13 @@ pub fn insert_table(view: &DocView) -> (Dialog, InsertState) {
         }
     }
     let width = available_width(view) / cols as Twips;
-    let mut d = Dialog::new("Insert Table", 318.0, 150.0);
+    let mut d = Dialog::new("Insert Table", 318.0, 186.0);
     d.text("Number of Columns:", 13.0, 16.0);
     d.field("cols", &cols.to_string(), 151.0, 14.0, 67.0);
     d.text("Number of Rows:", 13.0, 40.0);
     d.field("rows", &rows.to_string(), 151.0, 38.0, 67.0);
     d.text("Column Width:", 13.0, 65.0);
     d.field("width", &units::length(width), 151.0, 63.0, 67.0);
-    d.button("ok", "OK", 231.0, 17.0, 69.0, true);
-    d.button("cancel", "Cancel", 231.0, 42.0, 69.0, false);
     d.button("format", "Format…", 231.0, 65.0, 69.0, false);
     d.group("Convert From", 12.0, 88.0, 291.0, 53.0);
     // Two columns of choices, as in the original.
@@ -225,6 +223,7 @@ pub fn insert_table(view: &DocView) -> (Dialog, InsertState) {
             d.disable(id);
         }
     }
+    d.action_buttons(&[("cancel", "Cancel", 69.0, false), ("ok", "OK", 69.0, true)]);
     d.focus("cols");
     (d, InsertState { convert })
 }
@@ -584,7 +583,7 @@ pub fn table_cells(view: &DocView) -> Option<Dialog> {
     let (props, width) = selected_rows(view, &ts);
     let width = width.map(units::length).unwrap_or_default();
     let p = &props[0];
-    let mut d = Dialog::new("Table Cells", 352.0, 262.0);
+    let mut d = Dialog::new("Table Cells", 352.0, 298.0);
     d.text("Apply To:", 15.0, 9.0);
     d.popup("applyto", &APPLY_TO, 0, 82.0, 7.0, 170.0);
     d.text("Column Width:", 15.0, 34.0);
@@ -629,10 +628,12 @@ pub fn table_cells(view: &DocView) -> Option<Dialog> {
     d.popup("halign", &HALIGN, h, 120.0, 199.0, 132.0);
     d.text("Vertical:", 17.0, 227.0);
     d.popup("valign", &VALIGN, v, 120.0, 225.0, 132.0);
-    d.button("ok", "OK", 271.0, 11.0, 69.0, true);
-    d.button("cancel", "Cancel", 271.0, 40.0, 69.0, false);
-    d.button("apply", "Apply", 271.0, 64.0, 69.0, false);
     d.button("border", "Border…", 271.0, 88.0, 69.0, false);
+    d.action_buttons(&[
+        ("cancel", "Cancel", 69.0, false),
+        ("apply", "Apply", 69.0, false),
+        ("ok", "OK", 69.0, true),
+    ]);
     d.focus("width");
     Some(d)
 }

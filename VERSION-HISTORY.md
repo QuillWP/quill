@@ -7,6 +7,23 @@ Add an entry for every new tag as part of the release process.
 
 Versions 0.1.0 to 0.14.0 were all tagged on 2026-11-05.
 
+## 0.24.0 - 2026-11-15
+
+Airy Classic, a lighter and roomier interface that is now the default, with
+the earlier look kept as Classic. Dialog buttons move to the bottom right.
+
+- Airy Classic has lighter surfaces, quiet dividers, roomier grouped controls,
+  monochrome icons and blue active states. The earlier look is still there as
+  Classic, chosen separately from the Auto, Light and Dark appearance setting.
+  The choice is saved, and the View preferences panel is reorganized around it.
+- A toolbar too narrow for its controls gets an overflow button. Its menu lists
+  only the controls that are hidden, and each one behaves exactly like its
+  visible counterpart.
+- OK, Apply, Reset and Cancel sit in one row at the bottom right of every modal
+  dialog, in the same order. Controls for the item being edited, such as Frame
+  Position and the table Border and tab Set and Clear buttons, stay beside the
+  settings they affect.
+
 ## 0.23.0 - 2026-11-15
 
 Safer recovery, Read Aloud on the Mac, color boxes in more dialogs, and a

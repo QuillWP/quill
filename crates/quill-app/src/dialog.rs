@@ -411,6 +411,19 @@ impl Dialog {
         ));
     }
 
+    /// Put a dialog's concluding actions in one row at its bottom right.
+    /// The slice is in left-to-right order, with the default action last.
+    pub fn action_buttons(&mut self, buttons: &[(&'static str, &str, f32, bool)]) {
+        let gaps = buttons.len().saturating_sub(1) as f32 * 8.0;
+        let width: f32 = buttons.iter().map(|button| button.2).sum::<f32>() + gaps;
+        let mut x = self.width - 12.0 - width;
+        let y = self.height - 32.0;
+        for &(id, label, width, default) in buttons {
+            self.button(id, label, x, y, width, default);
+            x += width + 8.0;
+        }
+    }
+
     pub fn check(&mut self, id: &'static str, label: &str, x: f32, y: f32, on: bool) {
         self.items.push(Item::new(
             id,
@@ -1746,6 +1759,26 @@ fn hit_text(label: &mut Label, text: &str, x: f32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_buttons_form_a_bottom_right_row() {
+        let mut d = Dialog::new("Test", 300.0, 120.0);
+        d.action_buttons(&[
+            ("cancel", "Cancel", 70.0, false),
+            ("apply", "Apply", 70.0, false),
+            ("ok", "OK", 70.0, true),
+        ]);
+
+        assert_eq!(
+            d.item_rect("cancel"),
+            Some(Rect::new(62.0, 116.0, 70.0, 20.0))
+        );
+        assert_eq!(
+            d.item_rect("apply"),
+            Some(Rect::new(140.0, 116.0, 70.0, 20.0))
+        );
+        assert_eq!(d.item_rect("ok"), Some(Rect::new(218.0, 116.0, 70.0, 20.0)));
+    }
 
     fn open_popup(d: &mut Dialog, count: usize) {
         let menu = Menu {

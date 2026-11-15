@@ -95,8 +95,10 @@ pub fn dialog(missing: &[(String, String)], families: &[FontFamilyInfo]) -> (Dia
     } else {
         "Replace"
     };
-    d.button("ok", label, 310.0, height - 34.0, 118.0, true);
-    d.button("cancel", "Cancel", 234.0, height - 34.0, 68.0, false);
+    d.action_buttons(&[
+        ("cancel", "Cancel", 68.0, false),
+        ("ok", label, 118.0, true),
+    ]);
     let st = ReplaceState {
         names,
         rest: missing[rows..].to_vec(),
