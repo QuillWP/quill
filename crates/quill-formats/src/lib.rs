@@ -202,7 +202,10 @@ pub fn load_reported_trusting(
 ) -> Result<(Document, report::ImportReport), String> {
     // Whatever the file says, its measurements end up within Word's range,
     // and it's no bigger than Quill can save and open again.
-    let (mut doc, report) = read_any(path, interpret_rtf, trust_outside_pictures)?;
+    // A file with more tracked changes than the table can keep is refused
+    // rather than opened with changes missing or re-dated.
+    let (mut doc, report) =
+        quill_core::revision::strict(|| read_any(path, interpret_rtf, trust_outside_pictures))?;
     too_large(path, doc.size())?;
     doc.keep_in_bounds();
     Ok((doc, report))
@@ -709,6 +712,11 @@ pub fn native_check(doc: &Document) -> Option<(NativeLoss, Document)> {
 /// every part. The save time and other details the writer fills in are
 /// left out.
 fn native_loss(doc: &Document, back: &Document) -> Option<NativeLoss> {
+    // The file keeps only the pictures the text uses, renumbered from 1
+    // (`compact_for_save`), so that is what must come back. A picture kept
+    // only for Undo is not a loss.
+    let kept = doc.compact_for_save();
+    let doc = &kept;
     let whole = |part| NativeLoss {
         part,
         para: None,

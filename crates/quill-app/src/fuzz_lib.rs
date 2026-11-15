@@ -3,6 +3,18 @@
 
 #![cfg(feature = "fuzzing")]
 
+// The application binary supplies these logging macros through events.rs.
+// Fuzz targets link only this small library and deliberately keep no log.
+#[macro_export]
+macro_rules! ev {
+    ($($arg:tt)*) => {};
+}
+
+#[macro_export]
+macro_rules! ev_all {
+    ($($arg:tt)*) => {};
+}
+
 /// Settings reports write failures through the application in production.
 /// Fuzzing never enables persistence, so this is only a link-time stub.
 pub mod app {

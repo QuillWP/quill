@@ -1365,10 +1365,11 @@ fn collapsed_replace_cannot_change_document_from_stale_actions() {
     crate::find_dialog::switch_mode(&mut st, &mut d, &state.view, true);
     d.set_field("with", "bird");
     crate::find_dialog::switch_mode(&mut st, &mut d, &state.view, false);
-    assert!(!d.items.iter().any(|i| matches!(
-        i.id,
-        "with" | "replace" | "replaceall" | "fmt_rep" | "spc_rep"
-    )));
+    assert!(
+        !d.items
+            .iter()
+            .any(|i| matches!(i.id, "with" | "replace" | "replaceall" | "spc_rep"))
+    );
     state.dialogs.push((Which::Find(st), d));
     state
         .view
@@ -1514,27 +1515,6 @@ fn more_colors_opens_the_palette_and_what_it_picks_goes_into_the_popup() {
     };
     assert_eq!(p.custom.first(), Some(&quill_core::props::Rgb(0x102030)));
     assert_eq!(p.current, quill_core::props::Rgb(0x102030));
-}
-
-#[test]
-fn find_format_character_more_colors_is_handled() {
-    let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
-    let (character, _) = format_dialogs::character_for_find(&state.view, &[]);
-    state.dialogs.push((
-        Which::FindFormat {
-            replace: false,
-            kind: 0,
-        },
-        character,
-    ));
-    let mut clip = Clipboard::without_system();
-
-    let n = state.dialogs[0].1.options("color").len();
-    state.dialogs[0].1.set_selected("color", n - 1);
-    state.dialog_outcome(Outcome::Changed("color"), &mut clip);
-
-    assert_eq!(state.dialogs.len(), 2);
-    assert!(matches!(state.dialogs[1].0, Which::Palette(_)));
 }
 
 #[test]
@@ -2221,6 +2201,67 @@ fn a_styles_character_dialog_picks_colors_from_the_palette() {
 }
 
 #[test]
+fn a_character_style_editor_picks_colors_from_the_palette_and_can_clear_them() {
+    let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+    let editor = crate::character_style_dialog::editor(&state.view, &[], None);
+    assert_eq!(crate::find_dialog::spec_color(&editor), None);
+    state
+        .dialogs
+        .push((Which::CharacterStyleEdit(None), editor));
+    let mut clip = Clipboard::new();
+    state.dialog_outcome(Outcome::Button("color"), &mut clip);
+    assert!(
+        state.dialogs.last().unwrap().1.popout.is_some(),
+        "the palette opens beside the color box"
+    );
+    state.show_chosen_color("color", quill_core::props::Rgb(0x123456));
+    let d = &state.dialogs.last().unwrap().1;
+    assert_eq!(
+        crate::find_dialog::spec_color(d),
+        Some(quill_core::props::Rgb(0x123456))
+    );
+    state.dialog_outcome(Outcome::Button("color_clear"), &mut clip);
+    let d = &state.dialogs.last().unwrap().1;
+    assert_eq!(crate::find_dialog::spec_color(d), None);
+    assert!(d.popout.is_none());
+}
+
+#[test]
+fn the_hyperlink_dialog_picks_each_of_its_colors_from_the_palette() {
+    use quill_core::props::Rgb;
+    let mut view = DocView::new(Document::new(), "Doc".into());
+    view.type_text("site");
+    view.sel = Selection::new(Position::new(0, 0), Position::new(0, 4));
+    let (mut d, st) = crate::link_dialog::dialog(&view);
+    d.set_field("url", "https://example.com");
+    let mut state = WinState::new(view);
+    state.dialogs.push((Which::Hyperlink(st), d));
+    let mut clip = Clipboard::new();
+    for (id, hex, rgb) in [
+        ("color", "color_hex", 0x112233),
+        ("hover", "hover_hex", 0x445566),
+        ("visited", "visited_hex", 0x778899),
+    ] {
+        state.dialog_outcome(Outcome::Button(id), &mut clip);
+        assert!(
+            state.dialogs.last().unwrap().1.popout.is_some(),
+            "{id} opens the palette"
+        );
+        state.show_chosen_color(id, Rgb(rgb));
+        let d = &state.dialogs.last().unwrap().1;
+        assert_eq!(d.swatch_rgb(id), Some(rgb));
+        assert_eq!(d.item_label(hex), crate::palette::hex(Rgb(rgb)));
+    }
+    let (d, st) = match state.dialogs.last() {
+        Some((Which::Hyperlink(st), d)) => (d, st),
+        _ => panic!("the dialog is still open"),
+    };
+    let (_, link, color) = crate::link_dialog::read(d, st).unwrap();
+    assert_eq!(color, Rgb(0x112233));
+    assert_eq!((link.hover, link.visited), (Rgb(0x445566), Rgb(0x778899)));
+}
+
+#[test]
 fn apply_in_paragraph_styles_gives_the_style_to_the_paragraph() {
     let mut doc = Document::new();
     let id = doc.add_style(
@@ -2295,4 +2336,54 @@ fn the_toolbar_color_button_opens_the_palette_and_a_box_colors_the_text() {
     state.open_popup(Hit::ColorPopup, &mut label, &env);
     assert!(state.tool_palette_down(2.0, 2.0).is_some());
     assert!(state.tool_pal.is_none());
+}
+
+#[test]
+fn a_point_is_in_the_window_only_inside_its_size() {
+    let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+    state.width = 800.0;
+    state.height = 600.0;
+    assert!(state.point_in_window(10.0, 10.0));
+    assert!(state.point_in_window(799.0, 599.0));
+    assert!(!state.point_in_window(-1.0, 10.0));
+    assert!(!state.point_in_window(10.0, 601.0));
+    assert!(!state.point_in_window(900.0, 10.0));
+}
+
+#[test]
+fn right_clicking_a_tables_handle_selects_the_table_not_the_line_above() {
+    let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+        return;
+    };
+    let mut doc = quill_core::text::from_plain_text("A line before the table");
+    let end = doc.main.paras[0].text.len();
+    doc.begin("t", Default::default());
+    doc.insert_table(quill_core::StoryId::Main, Position::new(0, end), 2, 2, 4000);
+    doc.commit(Default::default());
+    let mut state = WinState::new(DocView::new(doc, "Doc".into()));
+    state.width = 900.0;
+    state.height = 700.0;
+    state.view.area = Rect::new(40.0, 40.0, 800.0, 600.0);
+    let first_table_para = state
+        .view
+        .doc
+        .main
+        .paras
+        .iter()
+        .position(|p| p.pap.in_table)
+        .expect("a table");
+    assert!(first_table_para > 0, "text comes before the table");
+    state.view.sel = Selection::caret(Position::new(first_table_para, 0));
+    state.view.update_layout(&mut fonts);
+    let (_, _, r) = state.view.table_handle().expect("the table has a handle");
+    let z = state.view_zoom();
+    let mut clip = Clipboard::new();
+    let (menu, _) = state
+        .context_menu_at((r.x + r.w / 2.0) * z, (r.y + r.h / 2.0) * z, &mut clip)
+        .expect("a menu opens on the handle");
+    assert!(menu.items.iter().any(|i| i.label.starts_with("Borders")));
+    let ts = crate::table_dialogs::table_selection(&state.view).expect("a table is selected");
+    assert_eq!(ts.rows.len(), 2, "the whole table is selected");
+    assert_eq!((ts.from, ts.to), (0, 1));
+    assert!(state.view.sel.start().para >= first_table_para);
 }

@@ -429,36 +429,6 @@ fn fill_attr(color: Option<quill_core::props::Rgb>) -> String {
     color.map_or_else(|| "auto".into(), |c| format!("{:06X}", c.0))
 }
 
-fn shading_val(tenths: u16) -> &'static str {
-    match tenths {
-        0 => "clear",
-        1..=75 => "pct5",
-        76..=112 => "pct10",
-        113..=137 => "pct12",
-        138..=175 => "pct15",
-        176..=225 => "pct20",
-        226..=275 => "pct25",
-        276..=325 => "pct30",
-        326..=362 => "pct35",
-        363..=387 => "pct37",
-        388..=425 => "pct40",
-        426..=475 => "pct45",
-        476..=525 => "pct50",
-        526..=575 => "pct55",
-        576..=612 => "pct60",
-        613..=637 => "pct62",
-        638..=675 => "pct65",
-        676..=725 => "pct70",
-        726..=775 => "pct75",
-        776..=825 => "pct80",
-        826..=862 => "pct85",
-        863..=887 => "pct87",
-        888..=925 => "pct90",
-        926..=975 => "pct95",
-        _ => "solid",
-    }
-}
-
 /// Paragraph properties that differ from `base`, as the inside of pPr
 /// (without pStyle and rPr, which callers add).
 /// A frame as `w:framePr`.
@@ -546,11 +516,10 @@ fn ppr(p: &ParaProps, base: &ParaProps) -> String {
     if p.borders != base.borders {
         borders(&mut o, &p.borders);
     }
-    if p.shading != base.shading || p.shading_color != base.shading_color {
+    if p.shading_color != base.shading_color {
         let _ = write!(
             o,
-            r#"<w:shd w:val="{}" w:color="auto" w:fill="{}"/>"#,
-            shading_val(p.shading),
+            r#"<w:shd w:val="clear" w:color="auto" w:fill="{}"/>"#,
             fill_attr(p.shading_color)
         );
     }
@@ -1389,11 +1358,10 @@ fn table(doc: &Document, ids: &[String], paras: &[Paragraph], outer: u8, out: &m
                 border(out, "right", &cell.borders.right, cell.borders.shadow);
                 out.push_str("</w:tcBorders>");
             }
-            if cell.shading_color.is_some() || cell.shading > 0 {
+            if cell.shading_color.is_some() {
                 let _ = write!(
                     out,
-                    r#"<w:shd w:val="{}" w:color="auto" w:fill="{}"/>"#,
-                    shading_val(cell.shading),
+                    r#"<w:shd w:val="clear" w:color="auto" w:fill="{}"/>"#,
                     fill_attr(cell.shading_color)
                 );
             }

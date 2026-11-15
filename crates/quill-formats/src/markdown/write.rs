@@ -9,7 +9,7 @@
 //! document only links to on the web stays a link.
 
 use super::is_mono;
-use super::read::{CODE_SHADING, QUOTE_GAP, QUOTE_INDENT, bare_address, linked_picture_alt};
+use super::read::{CODE_FILL, QUOTE_GAP, QUOTE_INDENT, bare_address, linked_picture_alt};
 use crate::export::{Block, base64, blocks_at};
 use quill_core::Document;
 use quill_core::para::{Mark, Paragraph, chars};
@@ -563,7 +563,9 @@ impl Writer<'_> {
     }
 
     fn is_code(&self, p: &Paragraph) -> bool {
-        p.pap.shading >= CODE_SHADING && p.mark == Mark::Paragraph && self.mono(&p.chp_at(0))
+        p.pap.shading_color == Some(CODE_FILL)
+            && p.mark == Mark::Paragraph
+            && self.mono(&p.chp_at(0))
     }
 
     fn code_lines(&self, p: &Paragraph) -> Vec<String> {

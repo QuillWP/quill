@@ -76,7 +76,10 @@ impl WinState {
             self.switch_pane();
         }
         let (dx, dy) = self.document_point(x, y);
-        if !self.view.area.contains(dx, dy) {
+        // Right-clicking a table's handle selects the table and gives the
+        // menu its cells have.
+        let on_handle = self.view.select_table_at_handle(dx, dy);
+        if !on_handle && !self.view.area.contains(dx, dy) {
             return None;
         }
         for (_, dialog) in &mut self.dialogs {
@@ -84,7 +87,7 @@ impl WinState {
                 dialog.inactive = true;
             }
         }
-        if !self.view.select_picture_at(dx, dy) {
+        if !on_handle && !self.view.select_picture_at(dx, dy) {
             let (pos, upstream) = self.view.hit(dx, dy);
             self.view.context_at(pos, upstream);
         }

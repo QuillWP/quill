@@ -38,8 +38,8 @@ pub(super) const QUOTE_INDENT: i32 = 720;
 /// Twips between a quote's rule and its text, per level of quoting. The
 /// writer reads the depth back from this.
 pub(super) const QUOTE_GAP: i32 = 80;
-/// Shading (tenths of a percent) that marks a paragraph as code.
-pub(super) const CODE_SHADING: u16 = 100;
+/// The background that marks a paragraph as code (10% black over white).
+pub(super) const CODE_FILL: quill_core::props::Rgb = quill_core::props::Rgb(0xE6E6E6);
 
 enum Block {
     Para(String),
@@ -1559,14 +1559,14 @@ impl Reader {
                     for (n, line) in lines.iter().enumerate() {
                         let mut pap = self.pap(cx, false);
                         pap.after = if n + 1 == lines.len() { 120 } else { 0 };
-                        pap.shading = CODE_SHADING;
+                        pap.shading_color = Some(CODE_FILL);
                         let mut p = Paragraph::new(pap, chp);
                         p.insert(0, &line.replace('\t', "    "), chp);
                         out.push(p);
                     }
                     if lines.is_empty() {
                         let mut pap = self.pap(cx, false);
-                        pap.shading = CODE_SHADING;
+                        pap.shading_color = Some(CODE_FILL);
                         out.push(Paragraph::new(pap, chp));
                     }
                 }
@@ -1866,7 +1866,7 @@ pub fn read_trusting(
         for (k, line) in front.iter().enumerate() {
             let mut pap = r.pap(Ctx::default(), false);
             pap.after = if k + 1 == n { 120 } else { 0 };
-            pap.shading = CODE_SHADING;
+            pap.shading_color = Some(CODE_FILL);
             let mut p = Paragraph::new(pap, chp);
             p.insert(0, line, chp);
             paras.push(p);

@@ -1199,7 +1199,7 @@ impl Reader {
                 "pageBreakBefore" => p.page_break_before = x.on(),
                 "suppressLineNumbers" => p.suppress_line_numbers = x.on(),
                 "pBdr" => p.borders = read_borders(x, &p.borders),
-                "shd" => (p.shading, p.shading_color) = read_shading(x, &mut self.report),
+                "shd" => p.shading_color = read_shading(x, &mut self.report),
                 _ => {}
             }
         }
@@ -1719,7 +1719,6 @@ impl Reader {
                 // Borders and shading: the table's edges, then its style's
                 // for this cell, then the cell's own.
                 let mut borders = edges.for_cell(at);
-                let mut shading = 0;
                 let mut shading_color = None;
                 let mut valign = quill_core::props::VAlign::Top;
                 // Word's vertical merge: "restart" starts one, and a
@@ -1745,13 +1744,12 @@ impl Reader {
                         borders = cell_borders(b, &borders, at);
                     }
                     if let Some(shd) = pr.child("shd") {
-                        (shading, shading_color) = read_shading(shd, &mut self.report);
+                        shading_color = read_shading(shd, &mut self.report);
                     }
                 }
                 cells.push(CellProps {
                     width,
                     borders,
-                    shading,
                     shading_color,
                     valign,
                     vmerge,
@@ -3398,11 +3396,13 @@ fn character_mask(e: &Element) -> u16 {
     })
 }
 
-/// Solid backgrounds stay RGB; patterns use a legacy gray approximation.
-fn read_shading(e: &Element, report: &mut ImportReport) -> (u16, Option<Rgb>) {
+/// Solid backgrounds stay RGB. A pattern becomes the flat color it looks
+/// like: black dots over the fill, or a gray of the fill's brightness.
+fn read_shading(e: &Element, report: &mut ImportReport) -> Option<Rgb> {
+    use quill_core::props::shading_fill;
     let val = e.attr("val").unwrap_or("clear");
     if val == "nil" {
-        return (0, None);
+        return None;
     }
     let fill = e
         .attr("fill")
@@ -3416,14 +3416,14 @@ fn read_shading(e: &Element, report: &mut ImportReport) -> (u16, Option<Rgb>) {
         if fill.is_none() && e.attr("themeFill").is_some() {
             report.note(notes::SHADING_COLORS);
         }
-        return (0, fill);
+        return fill;
     }
     if val == "solid" {
         if foreground.is_none() && e.attr("themeColor").is_some() {
             report.note(notes::SHADING_COLORS);
         }
         // A solid pattern in a color is that color as the background.
-        return foreground.map_or((1000, None), |c| (0, Some(c)));
+        return Some(foreground.unwrap_or(Rgb::BLACK));
     }
     // A pattern in a color of its own still needs a pattern renderer. Keep
     // the black approximation and report that conversion rather than invent
@@ -3442,32 +3442,22 @@ fn read_shading(e: &Element, report: &mut ImportReport) -> (u16, Option<Rgb>) {
     }
     if let Some(pct) = val.strip_prefix("pct") {
         let n: u16 = pct.parse().unwrap_or(0);
-        // Black dots over the fill color, as Quill lays shading over its
-        // background.
-        return (
-            match n {
-                12 => 125,
-                37 => 375,
-                62 => 625,
-                87 => 875,
-                n => n.min(100) * 10,
-            },
-            fill,
-        );
+        // Black dots over the fill color.
+        let tenths = match n {
+            12 => 125,
+            37 => 375,
+            62 => 625,
+            87 => 875,
+            n => n.min(100) * 10,
+        };
+        return shading_fill(tenths, fill);
     }
     if let Some(c) = fill {
         let lum = (c.r() as u32 * 30 + c.g() as u32 * 59 + c.b() as u32 * 11) / 100;
         let pct = ((255 - lum) * 1000 / 255) as u16;
-        return (
-            quill_core::props::SHADING_STEPS
-                .iter()
-                .copied()
-                .min_by_key(|s| s.abs_diff(pct))
-                .unwrap_or(0),
-            None,
-        );
+        return shading_fill(pct, None);
     }
-    (0, None)
+    None
 }
 
 /// A `w:sectPr`'s section settings (the page size and margins are the
@@ -3768,7 +3758,7 @@ mod tests {
         assert!(row(grid).cells[0].shading_color.is_some());
         assert!(!paras[grid + 3].chp_of_char(0).bold);
         assert!(!paras[no_header].chp_of_char(0).bold);
-        assert_eq!(row(no_header).cells[0].shading, 0);
+        assert_eq!(row(no_header).cells[0].shading_color, None);
         // The default style's cell margins: 108 a side.
         assert_eq!(row(plain).gap, 216);
     }
@@ -4198,41 +4188,38 @@ mod tests {
     }
 
     #[test]
-    fn a_percentage_over_a_fill_is_kept_and_other_color_patterns_still_warn() {
-        // Black dots over a fill are what Quill's shading is.
+    fn a_percentage_over_a_fill_becomes_a_flat_color_and_other_color_patterns_still_warn() {
+        // Black dots over a fill: 25% black over red.
         let kept = "<w:p><w:pPr><w:shd w:val='pct25' w:fill='FF0000'/></w:pPr></w:p>";
         let (doc, report) = read_reported(&docx(kept)).unwrap();
         assert!(report.is_empty());
-        assert_eq!(doc.main.paras[0].pap.shading, 250);
-        assert_eq!(doc.main.paras[0].pap.shading_color, Some(Rgb(0xFF0000)));
+        assert_eq!(doc.main.paras[0].pap.shading_color, Some(Rgb(0xBF0000)));
         // A pattern in a color of its own, and a fill known only by theme,
         // are not.
         let body = "<w:p><w:pPr><w:shd w:val='pct25' w:color='FF0000'/></w:pPr></w:p>\
             <w:p><w:pPr><w:shd w:themeFill='accent1'/></w:pPr></w:p>";
         let (doc, report) = read_reported(&docx(body)).unwrap();
         assert_eq!(report.notes(), [notes::SHADING_COLORS]);
-        assert_eq!(doc.main.paras[0].pap.shading, 250);
-        assert_eq!(doc.main.paras[0].pap.shading_color, None);
+        assert_eq!(doc.main.paras[0].pap.shading_color, Some(Rgb(0xBFBFBF)));
         // A solid pattern in a color is that color as the background.
         let solid = "<w:p><w:pPr><w:shd w:val='solid' w:color='00FF00'/></w:pPr></w:p>";
         let doc = read(&docx(solid)).unwrap();
-        assert_eq!(doc.main.paras[0].pap.shading, 0);
         assert_eq!(doc.main.paras[0].pap.shading_color, Some(Rgb(0x00FF00)));
     }
 
     #[test]
     fn excessive_shading_percentages_are_bounded_before_multiplication() {
         for (pattern, expected) in [
-            ("pct65535", 1000),
-            ("pct100", 1000),
-            ("pct12", 125),
-            ("pct0", 0),
+            ("pct65535", Some(Rgb::BLACK)),
+            ("pct100", Some(Rgb::BLACK)),
+            ("pct12", Some(Rgb(0xDFDFDF))),
+            ("pct0", None),
         ] {
             let body = format!(
                 "<w:p><w:pPr><w:shd w:val='{pattern}'/></w:pPr><w:r><w:t>kept</w:t></w:r></w:p>"
             );
             let doc = read(&docx(&body)).unwrap();
-            assert_eq!(doc.main.paras[0].pap.shading, expected);
+            assert_eq!(doc.main.paras[0].pap.shading_color, expected);
             assert_eq!(doc.main.paras[0].text, "kept");
         }
     }

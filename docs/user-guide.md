@@ -129,6 +129,14 @@ New text takes the character format of the text it replaces. With Apply to
 set to Selection, only matches wholly inside the selection change; `^` and
 `$` still mean the start and end of the paragraph.
 
+## Read Aloud on the Mac
+
+**Tools > Read Aloud** speaks the selected text. With only an insertion point it reads the
+whole main document. Choosing Read Aloud again replaces what is currently being spoken;
+**Tools > Stop Reading** stops it immediately. Quill uses the voices installed in macOS and
+does not include voice data of its own. Read Aloud is a Mac feature; it is not shown in the
+Windows or Linux menus.
+
 ## Tracked changes
 
 Tools > Track Changes (Command-Shift-E) records insertions, deletions and

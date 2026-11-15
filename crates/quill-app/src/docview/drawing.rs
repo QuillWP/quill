@@ -321,9 +321,7 @@ pub(super) fn draw_row(
         let area = Rect::new(ox + x0, top, x1 - x0, height);
         if selected.contains(&k) {
             c.fill(area, highlight);
-        } else if let Some(color) =
-            quill_core::props::shading_fill(cell.shading, cell.shading_color)
-        {
+        } else if let Some(color) = cell.shading_color {
             c.fill(area, color.0);
         }
     }
@@ -385,7 +383,7 @@ pub(super) fn draw_row(
 pub fn draw_border_box(c: &mut dyn Surface, b: &BorderBox, ox: f32, py: f32) {
     let (l, r) = (ox + b.left, ox + b.right);
     let (t, bt) = (py + b.top, py + b.bottom);
-    if let Some(color) = quill_core::props::shading_fill(b.shading, b.shading_color) {
+    if let Some(color) = b.shading_color {
         c.fill(Rect::new(l, t, r - l, bt - t), color.0);
     }
     let lw = border_width(b.left_line);

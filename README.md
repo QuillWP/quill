@@ -11,10 +11,12 @@
 
 <p align="center"><a href="https://quillwp.com">quillwp.com</a></p>
 
-**Status: alpha · version 0.22.0.** Alpha testers wanted.
+**Status: alpha · version 0.23.0.** Alpha testers wanted.
 **[Download a build](https://github.com/QuillWP/quill/releases)** from the releases page.
 
-![Quill editing a document set in Avenir Next with headings, a bulleted list and a table](docs/images/screenshot.png)
+![Quill showing an annual financial review with a full-width title banner and a row of four key figures](docs/images/normal-view.png)
+
+*Quill on macOS in Normal view: a report with a full-width title banner and a row of headline figures built from a table.*
 
 ## Small on purpose
 
@@ -56,7 +58,33 @@ menus and dialogs. It uses the fonts already installed on your Mac.
   Markdown and plain text, and export PDF. Quill warns when a format cannot
   keep everything.
 
-![A Quill document showing character effects, a drop cap, borders, shading, justified text and hyphenation](docs/images/formatting.png)
+## See Quill at work
+
+**Layout and pictures**
+
+![Quill showing a magazine feature with a drop cap, a centered title and a picture with a caption set into the text](docs/images/elegant-handling-of-images.png)
+
+*A magazine-style feature in Page Layout view: a drop cap, a title block with rules, and a captioned picture with text wrapped around it.*
+
+**Tables and charts**
+
+![Quill showing a consolidated income statement as a formatted table, with a bar chart below it](docs/images/table-formatting.png)
+
+*A financial table with shaded header and total rows, indented line items, right-aligned figures and heavier rules between groups, with a bar chart beneath it. The table handle at the top left selects the whole table.*
+
+**Light and dark**
+
+| | |
+|---|---|
+| ![Quill in light mode showing a document titled Apache License with a three-column contents table](docs/images/light-mode.png) | ![The same Apache License document in Quill's dark mode](docs/images/dark-mode.png) |
+| *Light mode: a two-column document with a centered title, ruled headings and a three-column contents table.* | *The same document in dark mode. The toolbars, ruler and page follow the system appearance, and the document's colors are adjusted to stay readable.* |
+
+**Long documents and styles**
+
+| | |
+|---|---|
+| ![Quill showing a book's contents page with chapter titles, dotted leaders and page numbers](docs/images/table-of-contents.png) | ![Quill's Style Sheets pane listing paragraph and character styles, with Heading 2 selected](docs/images/stylesheets.png) |
+| *A table of contents built from chapter headings, with dot leaders and page numbers that update with the document.* | *The Style Sheets pane lists every paragraph and character style. Create, edit, copy or delete styles, and apply one to the current paragraph with a click.* |
 
 ## Built to protect your work
 

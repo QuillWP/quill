@@ -74,6 +74,21 @@ currently built and published by hand from the maintainer's Mac.
 - [ ] Each opens a .docx made by current Microsoft Word, and Word opens
       what Quill saves.
 
+## Publishing several tags at once
+
+When quill-review has tags that have not reached the public repository,
+publish them oldest first, one commit per tag, built from the tag's own tree
+(`git archive vX.Y.Z`), never from the working tree. For each: set the
+workspace version and the README status line to that version, add its section
+to `VERSION-HISTORY.md` headed with the date of the tag commit in
+quill-review, run the checks above, build the release and debug packages
+(`--dist` and `--dist --debug`) and keep both disk images of every version in
+`dist/`, record their sizes in the README table, and commit and tag. Review
+all the commits together before pushing, then push, and make one GitHub
+release per tag with both disk images and that version's history section.
+State in the release which packages were built (Mac only, ad hoc signed unless
+the signing variables were set) and which debug.
+
 ## Tagging
 
 - [ ] Tag the release (`git tag vX.Y.Z && git push --tags`) and create the

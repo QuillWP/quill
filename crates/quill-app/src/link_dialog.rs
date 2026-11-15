@@ -5,32 +5,15 @@
 use crate::dialog::Dialog;
 use crate::docview::{DocView, LinkTarget};
 use quill_core::Link;
-use quill_core::link::{BROWSER_BLUE, BROWSER_PURPLE};
-use quill_core::props::{Rgb, WORD_COLORS};
+use quill_core::link::BROWSER_BLUE;
+use quill_core::props::Rgb;
 
-/// What the dialog started from, and the colors its menus offer.
+/// What the dialog started from.
 #[derive(Clone, Debug)]
 pub struct LinkState {
     pub target: LinkTarget,
-    colors: Vec<(String, Rgb)>,
     /// The address the dialog opened with.
     url: String,
-}
-
-/// A browser's colors, then the original's eight, then any color the link has
-/// that is none of those.
-fn colors(have: &[Rgb]) -> Vec<(String, Rgb)> {
-    let mut out: Vec<(String, Rgb)> = vec![
-        ("Link Blue".into(), BROWSER_BLUE),
-        ("Visited Purple".into(), BROWSER_PURPLE),
-    ];
-    out.extend(WORD_COLORS.iter().map(|(n, c)| (n.to_string(), *c)));
-    for &c in have {
-        if !out.iter().any(|(_, x)| *x == c) {
-            out.push((format!("#{:06X}", c.0 & 0xFF_FFFF), c));
-        }
-    }
-    out
 }
 
 pub fn dialog(view: &DocView) -> (Dialog, LinkState) {
@@ -43,10 +26,6 @@ pub fn dialog(view: &DocView) -> (Dialog, LinkState) {
     let link = quill_core::link::get(existing)
         .map(|l| (*l).clone())
         .unwrap_or_else(|| Link::new(""));
-    let colors = colors(&[target.color, link.hover, link.visited]);
-    let names: Vec<&str> = colors.iter().map(|(n, _)| n.as_str()).collect();
-    let index = |c: Rgb| colors.iter().position(|(_, x)| *x == c).unwrap_or(0);
-
     let title = if target.link == 0 {
         "Create Hyperlink"
     } else {
@@ -82,33 +61,16 @@ pub fn dialog(view: &DocView) -> (Dialog, LinkState) {
     );
     d.radio("new", "New Window", 110.0, top + 86.0, 1, link.new_window);
     d.group("Colors", 10.0, top + 112.0, 294.0, 86.0);
-    d.text("Link:", 20.0, top + 132.0);
-    d.popup(
-        "color",
-        &names,
-        index(target.color),
-        100.0,
-        top + 129.0,
-        192.0,
-    );
-    d.text("Hover:", 20.0, top + 154.0);
-    d.popup(
-        "hover",
-        &names,
-        index(link.hover),
-        100.0,
-        top + 151.0,
-        192.0,
-    );
-    d.text("Visited:", 20.0, top + 176.0);
-    d.popup(
-        "visited",
-        &names,
-        index(link.visited),
-        100.0,
-        top + 173.0,
-        192.0,
-    );
+    // Each color is a box that opens the palette, with its HTML code beside.
+    for (id, hex, label, y, c) in [
+        ("color", "color_hex", "Link:", 129.0, target.color),
+        ("hover", "hover_hex", "Hover:", 151.0, link.hover),
+        ("visited", "visited_hex", "Visited:", 173.0, link.visited),
+    ] {
+        d.text(label, 20.0, top + y + 3.0);
+        d.swatch_button(id, 100.0, top + y + 1.0, 44.0, 20.0, c.0);
+        d.text_as(hex, &crate::palette::hex(c), 152.0, top + y + 3.0);
+    }
     let editing = target.link != 0;
     d.button(
         "ok",
@@ -127,28 +89,20 @@ pub fn dialog(view: &DocView) -> (Dialog, LinkState) {
         "url"
     });
     let url = link.url;
-    let st = LinkState {
-        target,
-        colors,
-        url,
-    };
+    let st = LinkState { target, url };
     changed(&mut d, &st);
     (d, st)
 }
 
 /// The text, link and color the dialog describes, or None while either
 /// field is empty.
-pub fn read(d: &Dialog, st: &LinkState) -> Option<(String, Link, Rgb)> {
+pub fn read(d: &Dialog, _st: &LinkState) -> Option<(String, Link, Rgb)> {
     let text = d.field_text("text");
     let url = d.field_text("url").trim().to_string();
     if text.is_empty() || url.is_empty() {
         return None;
     }
-    let color = |id| {
-        st.colors
-            .get(d.selected(id))
-            .map_or(BROWSER_BLUE, |(_, c)| *c)
-    };
+    let color = |id| d.swatch_rgb(id).map_or(BROWSER_BLUE, Rgb);
     let link = Link {
         url,
         new_window: d.radio_on(1) == "new",
@@ -177,6 +131,7 @@ pub fn changed(d: &mut Dialog, st: &LinkState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quill_core::link::BROWSER_PURPLE;
     use quill_core::{Document, Position, Selection};
 
     #[test]

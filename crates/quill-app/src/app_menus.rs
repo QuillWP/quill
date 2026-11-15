@@ -41,6 +41,10 @@ pub enum Action {
     CustomizeToolbar,
     About,
     Licenses,
+    #[cfg(target_os = "macos")]
+    ReadAloud,
+    #[cfg(target_os = "macos")]
+    StopReading,
     /// Open an entry from File > Open Recent.
     Recent(usize),
     /// Take one entry out of the recent list (Open Recent > Remove from List).
@@ -574,6 +578,10 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Look Up", Cmd::LookUp).key("⌃⌘D"),
             b.cmd("Hyphenation…", Cmd::Hyphenation),
             b.cmd("Word Count…", Cmd::WordCount),
+            #[cfg(target_os = "macos")]
+            b.item("Read Aloud", Action::ReadAloud),
+            #[cfg(target_os = "macos")]
+            b.item("Stop Reading", Action::StopReading),
             sep(),
             b.cmd("Track Changes", Cmd::TrackChanges)
                 .checked(v.doc.props.track_changes),

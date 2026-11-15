@@ -2857,8 +2857,7 @@ fn restyle_pap(p: &ParaProps, old: &ParaProps, new: &ParaProps) -> ParaProps {
         suppress_line_numbers,
         borders
     );
-    if (p.shading, p.shading_color) == (old.shading, old.shading_color) {
-        out.shading = new.shading;
+    if p.shading_color == old.shading_color {
         out.shading_color = new.shading_color;
     }
     out

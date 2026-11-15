@@ -5,14 +5,22 @@
 //! Every change Quill sees is kept once in a table shared by all open
 //! documents and runs hold its number. Equal changes get the same number,
 //! so neighboring runs of one change still merge, and undo, copy and the
-//! layout cache need nothing new. Entries are never removed.
+//! layout cache need nothing new. Entries are never removed, so the table
+//! has a budget (see `MAX_REVISIONS`).
 
 use crate::props::CharProps;
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
 /// Longest author name kept, in bytes. Word's own limit is 255 characters.
 pub const MAX_AUTHOR: usize = 255;
+/// The most distinct changes one process remembers. Changes are dated to
+/// the minute, so a heavily reviewed book needs a few tens of thousands.
+pub const MAX_REVISIONS: usize = 100_000;
+/// The most memory the table may use in all, counted roughly: each entry's
+/// size, its names and dates, and its place in the two maps.
+pub const MAX_TABLE_BYTES: usize = 32 << 20;
 
 /// Who made a change and when. The date is ISO 8601 as Word writes it,
 /// "2026-10-23T14:05:00Z".
@@ -60,6 +68,69 @@ impl Revision {
 struct Table {
     revisions: Vec<Arc<Revision>>,
     ids: HashMap<Arc<Revision>, u32>,
+    /// The newest entry of each shape: a change with its dates left blank.
+    /// Once the table is full, a change made while typing reuses the entry
+    /// of its shape, so it keeps its author and kind and only its date is
+    /// out of date.
+    latest: HashMap<Revision, u32>,
+    /// Bytes counted for the entries so far.
+    bytes: usize,
+}
+
+/// The change with its dates left out.
+fn shape(rev: &Revision) -> Revision {
+    let blank = |s: &Stamp| Stamp {
+        author: s.author.clone(),
+        date: String::new(),
+    };
+    Revision {
+        inserted: rev.inserted.as_ref().map(blank),
+        deleted: rev.deleted.as_ref().map(blank),
+        formatted: rev.formatted.as_ref().map(|(s, old)| (blank(s), *old)),
+    }
+}
+
+/// What an entry costs against `MAX_TABLE_BYTES`.
+fn cost(rev: &Revision) -> usize {
+    let stamp = |s: &Stamp| s.author.len() + s.date.len();
+    // Two map slots and the vector's pointer, as a round number.
+    const SLOTS: usize = 96;
+    std::mem::size_of::<Revision>()
+        + rev.inserted.as_ref().map_or(0, stamp)
+        + rev.deleted.as_ref().map_or(0, stamp)
+        + rev.formatted.as_ref().map_or(0, |(s, _)| stamp(s))
+        + SLOTS
+}
+
+impl Table {
+    /// Add `rev` unless a limit would be passed. The second value is true
+    /// when it was left out because the table is full. Typing (`strict`
+    /// false) then gets the entry of the same shape, or 0 if there is
+    /// none; reading a file (`strict` true) gets 0 and is told to refuse
+    /// the file, so no date in it is changed.
+    fn add(
+        &mut self,
+        rev: Revision,
+        max_count: usize,
+        max_bytes: usize,
+        strict: bool,
+    ) -> (u32, bool) {
+        let c = cost(&rev);
+        if self.revisions.len() >= max_count || self.bytes.saturating_add(c) > max_bytes {
+            if strict {
+                return (0, true);
+            }
+            return (self.latest.get(&shape(&rev)).copied().unwrap_or(0), false);
+        }
+        self.bytes += c;
+        let key = shape(&rev);
+        let rev = Arc::new(rev);
+        self.revisions.push(rev.clone());
+        let id = self.revisions.len() as u32;
+        self.latest.insert(key, id);
+        self.ids.insert(rev, id);
+        (id, false)
+    }
 }
 
 fn table() -> &'static RwLock<Table> {
@@ -67,8 +138,33 @@ fn table() -> &'static RwLock<Table> {
     TABLE.get_or_init(Default::default)
 }
 
+thread_local! {
+    /// Set while a file is being read: a change the table has no room for
+    /// is refused instead of reusing another's date.
+    static STRICT: Cell<bool> = const { Cell::new(false) };
+    /// How many changes were refused on this thread.
+    static REFUSED: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Run `read`, which makes the changes of a file being opened. If the table
+/// had no room for one of them, the file is refused: a change would
+/// otherwise take a stranger's date, or come in untracked.
+pub fn strict<T>(read: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let was = STRICT.replace(true);
+    let before = REFUSED.get();
+    let result = read();
+    STRICT.set(was);
+    if REFUSED.get() != before {
+        return Err(format!(
+            "The file has more tracked changes than Quill can keep ({MAX_REVISIONS}). Accept or reject some of them where it was made, then open it again."
+        ));
+    }
+    result
+}
+
 /// The number for `rev`, adding it to the table if it is new. An empty
-/// revision is 0, which means "no change".
+/// revision is 0, which means "no change". Changes already in the table
+/// keep their numbers. When the table is full, see `Table::add`.
 pub fn intern(mut rev: Revision) -> u32 {
     if rev.is_empty() {
         return 0;
@@ -94,10 +190,10 @@ pub fn intern(mut rev: Revision) -> u32 {
     if let Some(&id) = t.ids.get(&rev) {
         return id;
     }
-    let rev = Arc::new(rev);
-    t.revisions.push(rev.clone());
-    let id = t.revisions.len() as u32;
-    t.ids.insert(rev, id);
+    let (id, refused) = t.add(rev, MAX_REVISIONS, MAX_TABLE_BYTES, STRICT.get());
+    if refused {
+        REFUSED.set(REFUSED.get() + 1);
+    }
     id
 }
 
@@ -250,5 +346,63 @@ mod tests {
         assert_eq!(civil_from_days(20_749), (2026, 10, 23));
         assert_eq!(days_from_civil(2026, 10, 23), 20_749);
         assert_eq!(days_from_civil(1970, 1, 1), 0);
+    }
+
+    fn by(author: &str, date: &str) -> Revision {
+        Revision {
+            inserted: Some(Stamp::new(author, date)),
+            ..Revision::default()
+        }
+    }
+
+    #[test]
+    fn a_full_table_gives_typing_the_entry_of_the_same_shape() {
+        let mut t = Table::default();
+        let (first, _) = t.add(by("Ada", "2026-10-23T10:00:00Z"), 2, usize::MAX, false);
+        let (_, _) = t.add(by("Bo", "2026-10-23T10:00:00Z"), 2, usize::MAX, false);
+        assert_eq!(t.revisions.len(), 2);
+        // Full: Ada's later change takes her entry, so it is still hers and
+        // still an insertion.
+        let (id, refused) = t.add(by("Ada", "2026-10-23T11:30:00Z"), 2, usize::MAX, false);
+        assert_eq!((id, refused), (first, false));
+        assert_eq!(t.revisions.len(), 2);
+        // A name the table has not seen has nothing to reuse.
+        assert_eq!(
+            t.add(by("Cy", "2026-10-23T11:30:00Z"), 2, usize::MAX, false),
+            (0, false)
+        );
+    }
+
+    #[test]
+    fn a_full_table_refuses_a_file_instead_of_changing_its_dates() {
+        let mut t = Table::default();
+        t.add(by("Ada", "2026-10-23T10:00:00Z"), 1, usize::MAX, true);
+        assert_eq!(
+            t.add(by("Ada", "2026-10-23T11:00:00Z"), 1, usize::MAX, true),
+            (0, true)
+        );
+        assert_eq!(t.revisions.len(), 1);
+    }
+
+    #[test]
+    fn the_table_stops_growing_at_its_byte_limit_too() {
+        let mut t = Table::default();
+        let one = cost(&by("Ada", "2026-10-23T10:00:00Z"));
+        t.add(by("Ada", "2026-10-23T10:00:00Z"), 10, one + one / 2, true);
+        let (_, refused) = t.add(by("Bo", "2026-10-23T10:00:00Z"), 10, one + one / 2, true);
+        assert!(refused);
+    }
+
+    #[test]
+    fn reading_a_file_that_was_refused_a_change_fails() {
+        assert_eq!(strict(|| Ok(5)), Ok(5));
+        let refused = strict(|| {
+            REFUSED.set(REFUSED.get() + 1);
+            Ok(5)
+        });
+        assert!(refused.unwrap_err().contains("tracked changes"));
+        // The next read starts clean, and typing is not strict.
+        assert!(!STRICT.get());
+        assert_eq!(strict(|| Ok(1)), Ok(1));
     }
 }

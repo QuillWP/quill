@@ -212,7 +212,6 @@ fn kitchen_sink() -> Document {
         p.borders.right.style = BorderStyle::Dotted;
         p.borders.between.style = BorderStyle::Hairline;
         p.borders.shadow = true;
-        p.shading = 250;
         p.shading_color = Some(quill_core::Rgb(0xEBF0FA));
     });
 
@@ -353,7 +352,6 @@ fn kitchen_sink() -> Document {
     let mut p1 = row_props(&doc.main.paras, &r1, 8640);
     p1.cells[1].width = 3000;
     p1.cells[0].borders.top.style = BorderStyle::Single;
-    p1.cells[2].shading = 100;
     p1.cells[2].shading_color = Some(quill_core::Rgb(0xABCDEF));
     p1.height = RowHeight::AtLeast(400);
     p1.indent = 360;

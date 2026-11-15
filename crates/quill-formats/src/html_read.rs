@@ -344,10 +344,8 @@ fn css(doc: &mut Document, frame: &mut Frame, style: &str) {
             "background-color" => {
                 if lower == "transparent" {
                     p.shading_color = None;
-                    p.shading = 0;
                 } else if let Some(c) = color(value) {
                     p.shading_color = Some(c);
-                    p.shading = 0;
                 }
             }
             "text-align" => {
@@ -1517,7 +1515,6 @@ impl<'a> Reader<'a> {
                         right: edge,
                         ..Borders::default()
                     },
-                    shading: 0,
                     shading_color: cf.pap.shading_color,
                     valign: Default::default(),
                     vmerge: if rows_spanned > 1 {

@@ -7,6 +7,55 @@ Add an entry for every new tag as part of the release process.
 
 Versions 0.1.0 to 0.14.0 were all tagged on 2026-11-05.
 
+## 0.23.0 - 2026-11-15
+
+Safer recovery, Read Aloud on the Mac, color boxes in more dialogs, and a
+round of fixes found while testing on Windows and Ubuntu.
+
+**Safety**
+
+- A recovered document stays quarantined until its window has drawn a first
+  frame. Before, a document that panicked during its first layout or paint was
+  already back in the automatic queue and could stop every later launch.
+  Autosave is held off while it is quarantined, and either recovery state is
+  cleaned up on save or close.
+- A saved clipboard crash is kept as a regression test.
+- A picture kept only for Undo no longer stops a .qwp save. The save check now
+  compares against the same compacted document the writer saves.
+- The table of tracked changes has a budget of 100,000 entries and 32 MiB.
+  Opening a file that needs more fails with a message instead of opening with
+  changes missing or re-dated. Typing is never blocked.
+- Updated tokio and rustix to the first releases that fix their RustSec
+  unsoundness advisories, and moved the clipboard library to a Windows
+  dependency that is not yanked.
+
+**Read Aloud (Mac)**
+
+- Selected text, or the whole document, can be spoken with the voices already
+  installed on the Mac. No voice data is bundled. Stop Reading ends it at
+  once. The commands are not in the Windows and Linux builds.
+
+**Colors**
+
+- Edit Character Style, the Hyperlink dialog and Format > Character on Windows
+  and Linux use the same color box and palette as Border, with the HTML code
+  beside it. A character style may set no color, with a None button.
+- Paragraphs and table cells keep one flat fill color. The shading percentage
+  is gone from the model and every format. Readers fold an imported percentage
+  into a flat color so patterns look the same.
+
+**Fixes**
+
+- Settings and Cmd-comma no longer scroll a scrolled document back to the
+  caret.
+- Right-clicking a table's handle selects the table and shows the table menu.
+  Return at the start of a table that begins the document puts a paragraph
+  above it.
+- Linux: a menu is no longer closed by the focus change around a mouse press.
+- The Styles palette sorts paragraph and character styles together on All.
+- Find and Replace by format is removed. Find and Replace work on text only.
+- The version in Cargo.toml and the README now matches the release.
+
 ## 0.22.0 - 2026-11-13
 
 A reworked Border dialog with color boxes and Apply To Table, borders that
@@ -30,6 +79,252 @@ join properly, and the end-of-document bar removed.
 - A cell's top and bottom lines run on under its right line, so the corner
   joins.
 - The short bar drawn under the last line of every document is removed.
+
+## 0.21.0 - 2026-11-13
+
+Windows dialogs use native controls, and the toolbar's Font Color opens the
+color palette.
+
+**Windows dialogs**
+
+- The native panel makes color swatch buttons, the palette popup, sliders
+  (trackbars) and shown-only color boxes, so Preferences > Colors, the
+  Character style dialog and Edit Color look like the rest of the system.
+- Labels sit beneath the fields, and are as wide as their text. Choosing
+  another Preferences page changes the window in place instead of closing and
+  rebuilding it.
+- A dialog opened over another (Edit Color over Preferences) is owned by the
+  one below, which stays showing, disabled, until the upper one closes.
+  Windows keeps them together and raises them together.
+
+**Colors**
+
+- Font Color on the toolbar opens the same palette that pops out beside a
+  dialog's color box, below the button. One click on a box colors the
+  selection, Edit Color opens the editor and applies its result to the text,
+  and a press elsewhere or Escape closes it. This replaces a menu of the
+  original's eight color names.
+
+**Removed**
+
+- The Include Endnotes section setting. DOCX has no equivalent, so it was
+  stored as private XML that other word processors drop when they resave.
+  Notes set to go at the end of a section now always print at the end of the
+  document.
+
+## 0.20.0 - 2026-11-12
+
+Hang fixes for Windows and Linux dialogs, and a step-by-step event log for
+finding hangs.
+
+**Event log**
+
+- quill --with-events writes each step to quill-events.log in the folder Quill
+  was started from (or --events-file=PATH, or QUILL_EVENTS_FILE), falling back
+  to the settings folder. --with-events=all adds mouse moves, redraws and
+  every wake of the event loop.
+- It logs startup, window events, key presses and their commands, menu
+  actions, dialog outcomes (a begin with no end means it never came back),
+  file reads and writes and panics, and the build commit. A watchdog adds a
+  STUCK line every two seconds while the program is busy and has logged
+  nothing, and a line repeated in a row is shown three times and then counted.
+
+**Linux**
+
+- Open, Save and message dialogs are GTK dialogs on the main thread. rfd ran
+  them on a thread of its own, which froze Quill on Ubuntu 24.04. A finished
+  dialog is hidden, destroyed and its pending events run so it releases its
+  keyboard and mouse grab.
+- Save As lets you pick the file type: choosing a filter changes the name's
+  extension, as the Mac's save panel does.
+
+**Windows**
+
+- Message boxes go through TaskDialogIndirect owned by Quill's window, with
+  their real button labels, and run on a thread of their own. File dialogs run
+  on a thread of their own too. Run on the main thread inside winit's event
+  handler, they never appeared or hung on the second use.
+
+## 0.19.0 - 2026-11-12
+
+Paragraph Styles matches Character Styles, Clear Formatting arrives, and Tools
+> Commands is taken out.
+
+**Paragraph Styles**
+
+- Paragraph Styles uses the Character Styles layout: +, -, Edit and Duplicate
+  under the list, Apply, Remove Style and Update to Selection on the right,
+  and the This Document or All Styles choice kept. Update to Selection
+  redefines the style from the selection.
+- Apply works (it did nothing at first), the question before replacing all
+  settings from a file is back, and the formatting toolbar's style list is No
+  Style, Clear Formatting, Normal, then every other style by name.
+  Character... in a style editor uses the same color palette as Format >
+  Character.
+
+**Clear Formatting**
+
+- Format > Clear Formatting (below Revert To Style) puts the selected
+  paragraphs back to Normal with no manual paragraph or character formatting
+  and no character styles, as one undo step. Text, pictures and a table cell's
+  place are kept.
+- It is also a row in the toolbar's style list and in the Style Sheets
+  palette, and a button in both style lists. In Character Styles it clears
+  only the selected text, or makes the next text typed plain when there is
+  just a caret.
+
+**Removed for now**
+
+- Style import is deferred until after version 1.0. The Import buttons and
+  everything behind them are removed from both style lists.
+- Tools > Commands is removed. A key changed there was saved and listed but
+  did nothing, because the key handling never read the changes.
+
+## 0.18.0 - 2026-11-11
+
+A security and robustness pass: hard limits on hostile files, faster readers,
+writers that stop at the size limits, large files split up, and questions
+before risky saves.
+
+**Hostile and oversized files**
+
+- Invalid headers nested inside native stories are dropped. Go To page
+  arithmetic saturates, and dialog values, Renumber starts and roman numerals
+  stay within the document limits.
+- Picture metadata, format numbers and .docx list number text are bounded,
+  with checked arithmetic.
+- The .odt reader charges every paragraph to the read budget, so a small file
+  of millions of empty paragraphs, or a text:s element that makes a billion
+  spaces, is refused with the usual too-large message in about 0.2 s. Unique
+  pictures are counted as .docx and .odt readers decode them.
+- The .qwp, .docx and .odt writers and the Markdown table writer stop building
+  a document once it passes the size limits. Oversized Markdown stays in
+  Source view.
+
+**Speed**
+
+- Unclosed Markdown links and angle brackets no longer rescan the paragraph:
+  seven 80,000-opener files that took up to 8.8 s each now open in about 0.1
+  s. HTML raw-text endings are scanned without copying.
+- DOCX table style XML is shared across cells, repeated XML and header parts
+  are cached, and converted .docx and .odt pictures are reused.
+
+**Questions before risky actions**
+
+- Saving over a file that changed on disk asks Replace File or Cancel.
+- Save As says so when it changes an unknown extension to .qwp, and lets you
+  cancel.
+- Replacing all settings from a file asks first, defaulting to not replacing.
+  Print Merge asks before reading files outside the document's own.
+- Recovery files are marked while they are opened, license text is written
+  inside a private folder, Windows links open through ShellExecuteW, and the
+  active modal print panel is identified.
+
+**Editing**
+
+- Command-Shift-Z is Redo, and Edit > Redo names the change. Repeat
+  (Command-Y) only repeats. Plain Text has no default key.
+- On the Mac the window's close button shows a dot while the document has
+  unsaved changes.
+
+**Structure and size**
+
+- Tests move out of app.rs, docview.rs, the formats lib.rs and the core
+  document.rs into files of their own. Message boxes, tooltips, font loading,
+  menu tracking, printing, effects, and key, text and mouse handling move out
+  of app.rs into their own modules, and the atomic write code into atomic.rs.
+- Unused code is deleted, six-digit colors are read in one place, and the HTML
+  reader looks entity names up in a small table of the 252 HTML 4 references
+  instead of a 133 KB function. The format bodies are no longer generic.
+  Packaged binaries no longer carry the builder's folder names, and the About
+  picture is not copied into the Mac app's Resources twice.
+- KNOWN-ISSUES, CONTRIBUTING and SECURITY are added, and stale documentation
+  is fixed.
+
+## 0.17.0 - 2026-11-11
+
+Font sources get their own preferences, Linux windows and appearance behave,
+and Format > Style becomes a Paragraph Styles list.
+
+**Fonts**
+
+- Additional font sources move into Preferences > Fonts, and a macOS app
+  bundle can be a source (only its Resources and Library/Fonts are searched).
+- Preferences > Fonts has Markdown settings: the font and size of Source view
+  (default Courier New 10) and the body font and size of Markdown files
+  (default New York 12). Open documents take a change in place without being
+  marked modified.
+- Sources are added one at a time in the order they were added. A family the
+  system already has keeps its own faces, and a later copy is left out whole.
+- A source that has been moved or deleted is dropped from the list. Choose
+  refuses the top of a disk, the home folder and system and program folders.
+  One search visits at most 2,000 folders and 20,000 font files, and runs on a
+  thread of its own so the window does not stop.
+- Add Source is greyed out while a row is still waiting for its folder.
+
+**Linux**
+
+- Windows open through X11 (XWayland on a Wayland desktop) so they get the
+  theme's title bar and GTK's menu bar. QUILL_BACKEND=wayland keeps native
+  Wayland windows.
+- The debug program is quill-debug, with its own window class and app ID.
+- Auto appearance follows GNOME's color-scheme setting (or a -dark GTK theme,
+  or GTK_THEME). The Style Sheets window stays above the documents without
+  taking the keyboard, and the palette's chosen row starts over when another
+  document comes to the front.
+
+**Styles**
+
+- Style Sheets moves from View to Window. The Character Styles menu is gone;
+  Character Styles... is in Format.
+- Format > Style is now Paragraph Styles... (still Command-T): a list with
+  This Document or All Styles, the style's description and use count, and New,
+  Edit and Delete. OK in the editor saves the style without restyling the
+  selection; Apply saves it and also gives it to the selected paragraphs.
+- Deleting a style that paragraphs use asks what they become: No Style
+  (Normal) or another style.
+
+## 0.16.0 - 2026-11-11
+
+The Style Sheets palette, a Light, Dark or Auto appearance and a build stamp
+in debug builds.
+
+**Style Sheets palette**
+
+- View > Style Sheets is one list of paragraph and character styles with All,
+  Paragraph and Character tabs (Para and Char when it is narrow). Clicking a
+  row applies the style the way the toolbar's style menus do. New, Edit, Copy
+  and Delete sit beside it and leave Normal, the automatic styles and No Style
+  alone.
+- It docks to the right of the text, or comes out into a small window of its
+  own with the system's title bar (a floating tool window on the Mac that
+  hides when Quill is not in front). Whether it shows, its tab and whether it
+  is docked are saved in the settings.
+- No Style at the top of the paragraph styles puts the selected paragraphs
+  back to Normal and takes off their character styles, as one undo step.
+- The Style dialog's Character Style menu ends with New Character Style, which
+  opens the editor and returns with the new style linked.
+- The palette and the style dialogs now share one copy and one delete. That
+  fixes the next text taking the wrong style after deleting a character style
+  and copies being named "Body copy copy".
+
+**Appearance**
+
+- Preferences > View has Appearance: Auto (follows the system while Quill
+  runs), Light or Dark. On the Mac the whole application takes it, including
+  alerts and the Open and Save panels.
+- In dark mode the page is drawn dark: white paper goes near-black, black and
+  automatic text near-white, white text dark, and colors keep their hue.
+  Pictures are not touched. Printing, PDF and export are as before.
+
+**Builds and testing**
+
+- A debug build's About window shows when and from what it was built (time,
+  branch, commit, and "modified" for uncommitted changes). Release builds are
+  unchanged.
+- tools/smoketest.py checks a build quickly (version, drawing, opening a small
+  document in each main format) in a scratch home folder with its own profile,
+  so it never touches real settings.
 
 ## 0.15.0 - 2026-11-08
 

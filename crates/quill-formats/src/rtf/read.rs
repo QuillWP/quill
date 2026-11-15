@@ -127,6 +127,10 @@ struct State {
     /// A tab stop being built: leader and alignment come before `\tx`.
     tab_align: TabAlign,
     tab_leader: TabLeader,
+    /// `\shading` of the paragraph, in tenths of a percent, and the
+    /// `\cbpat` color it goes over. Together they make its flat fill.
+    shd_tenths: u16,
+    shd_base: Option<Rgb>,
     /// Which border `\brdr...` words apply to.
     border: Option<u8>,
     /// The tracked change the text is part of.
@@ -318,6 +322,8 @@ fn read_into(data: &[u8], report: &mut ImportReport) -> Result<Document, String>
             uc: 1,
             tab_align: TabAlign::Left,
             tab_leader: TabLeader::None,
+            shd_tenths: 0,
+            shd_base: None,
             border: None,
             rev: RevWords::default(),
             list_text: false,
@@ -1205,7 +1211,9 @@ impl Reader {
             if w == "clcbpat" {
                 self.std_rows[level].cell.shading_color = color;
             } else {
-                self.pap_mut().shading_color = color;
+                self.st.shd_base = color;
+                self.pap_mut().shading_color =
+                    quill_core::props::shading_fill(self.st.shd_tenths, color);
             }
             return;
         }
@@ -1831,6 +1839,8 @@ impl Reader {
                     .map_or_else(ParaProps::default, |id| self.doc.styles.get(id).pap.clone());
                 self.st.tab_align = TabAlign::Left;
                 self.st.tab_leader = TabLeader::None;
+                self.st.shd_tenths = 0;
+                self.st.shd_base = None;
             }
             "quillchardirect" => {
                 self.st.chp.direct_format =
@@ -1990,7 +2000,12 @@ impl Reader {
                     }
                 }
             }
-            "shading" => self.pap_mut().shading = (v / 10).clamp(0, 1000) as u16,
+            // In hundredths of a percent: black over the fill color.
+            "shading" => {
+                self.st.shd_tenths = (v / 10).clamp(0, 1000) as u16;
+                let (tenths, base) = (self.st.shd_tenths, self.st.shd_base);
+                self.pap_mut().shading_color = quill_core::props::shading_fill(tenths, base);
+            }
             _ => {}
         }
     }
@@ -2209,6 +2224,8 @@ struct StdRow {
     /// The cell being defined, and the border its `\brdr...` words are for
     /// (0 top, 1 bottom, 2 left, 3 right).
     cell: CellProps,
+    /// The cell's `\clshdng`, in tenths of a percent.
+    shd_tenths: u16,
     border: Option<u8>,
     /// The right edge of the last cell defined.
     edge: i32,
@@ -2275,8 +2292,8 @@ impl StdRow {
             "clbrdrb" => self.border = Some(1),
             "clbrdrl" => self.border = Some(2),
             "clbrdrr" => self.border = Some(3),
-            // In hundredths of a percent; Quill keeps tenths.
-            "clshdng" => self.cell.shading = (v / 10).clamp(0, 1000) as u16,
+            // In hundredths of a percent; folded into the color at `\cellx`.
+            "clshdng" => self.shd_tenths = (v / 10).clamp(0, 1000) as u16,
             "cellx" => {
                 if self.cells.len() < MAX_TABLE_ENTRIES {
                     // The model has one symmetric inset for the whole row.
@@ -2292,6 +2309,9 @@ impl StdRow {
                         .unwrap_or(0);
                     self.widest_padding = Some(self.widest_padding.unwrap_or(0).max(inset));
                     let mut cell = std::mem::take(&mut self.cell);
+                    cell.shading_color =
+                        quill_core::props::shading_fill(self.shd_tenths, cell.shading_color);
+                    self.shd_tenths = 0;
                     cell.width = (v - self.edge).max(144);
                     self.cells.push(cell);
                 }
@@ -2372,21 +2392,21 @@ fn parse_row_data(data: &str) -> Option<RowProps> {
             .map(str::parse)
             .collect::<Result<_, _>>()
             .ok()?;
-        // A 14th number, written only when not Top, is the vertical
-        // alignment; a 15th, the vertical merge.
-        if !(13..=15).contains(&v.len()) || v[0] < 0 || !(0..=1000).contains(&v[1]) {
+        // A 13th number, written only when not Top, is the vertical
+        // alignment; a 14th, the vertical merge.
+        if !(12..=14).contains(&v.len()) || v[0] < 0 {
             return None;
         }
         let mut borders = quill_core::props::Borders {
-            shadow: v[2] != 0,
+            shadow: v[1] != 0,
             ..Default::default()
         };
         for (line, pair) in [
-            (&mut borders.top, &v[3..5]),
-            (&mut borders.bottom, &v[5..7]),
-            (&mut borders.left, &v[7..9]),
-            (&mut borders.right, &v[9..11]),
-            (&mut borders.between, &v[11..13]),
+            (&mut borders.top, &v[2..4]),
+            (&mut borders.bottom, &v[4..6]),
+            (&mut borders.left, &v[6..8]),
+            (&mut borders.right, &v[8..10]),
+            (&mut borders.between, &v[10..12]),
         ] {
             line.style = parse_border_style(pair[0])?;
             line.space = pair[1];
@@ -2405,15 +2425,14 @@ fn parse_row_data(data: &str) -> Option<RowProps> {
         }
         cells.push(CellProps {
             width: v[0],
-            shading: v[1] as u16,
             shading_color,
             borders,
-            valign: match v.get(13) {
+            valign: match v.get(12) {
                 Some(1) => quill_core::props::VAlign::Center,
                 Some(2) => quill_core::props::VAlign::Bottom,
                 _ => quill_core::props::VAlign::Top,
             },
-            vmerge: match v.get(14) {
+            vmerge: match v.get(13) {
                 Some(1) => quill_core::props::VMerge::Restart,
                 Some(2) => quill_core::props::VMerge::Continue,
                 _ => quill_core::props::VMerge::None,
@@ -2584,8 +2603,8 @@ mod tests {
         assert_eq!(p.cells[0].borders.top.style, BorderStyle::Single);
         assert_eq!(p.cells[0].borders.bottom.style, BorderStyle::Thick);
         assert_eq!(p.cells[0].borders.left.style, BorderStyle::None);
-        assert_eq!(p.cells[0].shading, 500);
-        assert_eq!(p.cells[1].shading, 0);
+        assert_eq!(p.cells[0].shading_color, Some(Rgb(0x808080)));
+        assert_eq!(p.cells[1].shading_color, None);
         // The paragraph after the row did not take the cell borders.
         let last = doc.main.paras.last().unwrap();
         assert!(last.pap.borders.is_none());

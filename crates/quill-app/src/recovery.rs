@@ -117,12 +117,40 @@ pub fn save(
 
 /// A document left by an earlier process.
 pub struct Recovered {
-    pub path: PathBuf,
+    pub opening: Opening,
     pub title: String,
     pub doc: Document,
     /// The formatted document behind Markdown source, if `doc` is source
     /// that was being edited.
     pub original: Option<Document>,
+}
+
+/// A recovery file kept under its crash marker until its window has laid
+/// out and drawn successfully. If Quill stops first, the marker makes the
+/// next launch offer to skip it.
+pub struct Opening {
+    marker: PathBuf,
+    path: PathBuf,
+}
+
+/// Release a recovered file from quarantine after its first successful draw.
+pub fn finish(opening: &Opening) -> Result<PathBuf, String> {
+    std::fs::rename(&opening.marker, &opening.path).map_err(|e| {
+        format!(
+            "Could not finish recovery of {}: {e}",
+            opening.path.display()
+        )
+    })?;
+    Ok(opening.path.clone())
+}
+
+/// Discard a recovered window before its first draw completed.
+pub fn discard(opening: Option<Opening>) {
+    if let Some(opening) = opening {
+        let _ = std::fs::remove_file(opening.marker);
+        let _ = std::fs::remove_file(opening.path.clone());
+        let _ = std::fs::remove_file(original_path(&opening.path));
+    }
 }
 
 /// Recovery files whose previous opening did not finish. They stay aside
@@ -162,7 +190,7 @@ fn load_one(path: PathBuf) -> Option<Recovered> {
         return None;
     }
     let loaded = quill_formats::load(&opening);
-    let recovered = match loaded {
+    match loaded {
         Ok(mut doc) => {
             doc.touch();
             let title = title_from_path(&path);
@@ -178,7 +206,10 @@ fn load_one(path: PathBuf) -> Option<Recovered> {
                     }
                 });
             Some(Recovered {
-                path: path.clone(),
+                opening: Opening {
+                    marker: opening.clone(),
+                    path: path.clone(),
+                },
                 title,
                 doc,
                 original,
@@ -188,15 +219,7 @@ fn load_one(path: PathBuf) -> Option<Recovered> {
             eprintln!("quill: could not recover {}: {e}", path.display());
             None
         }
-    };
-    if let Err(e) = std::fs::rename(&opening, &path) {
-        eprintln!(
-            "quill: could not finish recovery {}: {e}",
-            opening.display()
-        );
-        return None;
     }
-    recovered
 }
 
 /// Recovery files left by an earlier process. Damaged files remain on disk
@@ -300,6 +323,11 @@ mod tests {
 
         let recovered = load_one(path.clone()).unwrap();
         assert_eq!(recovered.doc.main.paras[0].text, "Draft");
+        assert!(!path.exists());
+        assert!(opening_path(&path).is_file());
+
+        let restored = finish(&recovered.opening).unwrap();
+        assert_eq!(restored, path);
         assert!(path.is_file());
         assert!(!opening_path(&path).exists());
 
@@ -311,6 +339,27 @@ mod tests {
         );
         retry_interrupted(std::slice::from_ref(&opening));
         assert!(path.is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn discarding_a_quarantined_recovery_removes_its_sidecar() {
+        let dir =
+            std::env::temp_dir().join(format!("quill-recovery-discard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("7-Draft.wrec");
+        let source = quill_core::text::from_plain_text("Source");
+        let original = quill_core::text::from_plain_text("Formatted");
+        save(Some(&path), &source, Some(&original), "Draft", 1).unwrap();
+
+        let recovered = load_one(path.clone()).unwrap();
+        discard(Some(recovered.opening));
+
+        assert!(!path.exists());
+        assert!(!opening_path(&path).exists());
+        assert!(!original_path(&path).exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

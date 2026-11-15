@@ -237,7 +237,7 @@ fn main() {}
         );
         assert!(doc.main.paras[10].text.is_empty());
         assert_eq!(t[11], "fn main() {}");
-        assert!(doc.main.paras[11].pap.shading > 0);
+        assert!(doc.main.paras[11].pap.shading_color.is_some());
         // The table: two rows of two cells and a row end each, then the
         // paragraph a document ends with.
         let table: Vec<_> = doc.main.paras[12..]

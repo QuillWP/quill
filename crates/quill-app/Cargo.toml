@@ -25,7 +25,7 @@ quill-layout.workspace = true
 quill-formats.workspace = true
 winit = { version = "0.30", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
 softbuffer = { version = "0.4.8", default-features = false, features = ["x11", "x11-dlopen", "wayland", "wayland-dlopen"] }
-arboard = { version = "3.6", default-features = false }
+arboard = { version = "3.7", default-features = false }
 ab_glyph_rasterizer = "0.1.10"
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 zune-jpeg = { version = "0.5", default-features = false, features = ["std"] }

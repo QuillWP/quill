@@ -670,6 +670,25 @@ impl DocView {
                 self.finish_edit(Selection::caret(at));
             }
             NewParagraph if self.on_row_mark() => {}
+            // A table that begins the document has no line above it to put
+            // the insertion point on, so Return at the start of its first
+            // cell opens one, as it does in Word.
+            NewParagraph
+                if self.sel.is_empty()
+                    && self.sel.focus == Position::new(0, 0)
+                    && self.doc.main.paras[0].pap.in_table =>
+            {
+                self.doc.begin("New Paragraph", self.sel);
+                let normal = self.doc.styles.get(0);
+                let above = Fragment {
+                    paras: vec![Paragraph::new(normal.pap.clone(), normal.chp)],
+                    ends_with_mark: true,
+                    ..Fragment::default()
+                };
+                self.doc.insert_fragment(MAIN, Position::new(0, 0), &above);
+                self.typing_chp = None;
+                self.finish_edit(Selection::caret(Position::new(0, 0)));
+            }
             NewParagraph if self.on_empty_list_item() => self.end_list_here(),
             NewParagraph if self.on_empty_quote() => self.leave_quote_here(),
             NewParagraph => {

@@ -335,9 +335,7 @@ pub struct CellProps {
     /// columns included.
     pub width: Twips,
     pub borders: Borders,
-    /// Black over the background, in tenths of a percent.
-    pub shading: u16,
-    /// The background color. With `shading`, black is laid over it.
+    /// The background color.
     pub shading_color: Option<Rgb>,
     /// Where the cell's text sits when the row is taller than it.
     pub valign: VAlign,
@@ -456,9 +454,7 @@ pub struct ParaProps {
     pub keep_together: bool,
     pub suppress_line_numbers: bool,
     pub borders: Borders,
-    /// Black over the background, in tenths of a percent (125 = 12.5%), 0 for none.
-    pub shading: u16,
-    /// The background color. With `shading`, black is laid over it.
+    /// The background color.
     pub shading_color: Option<Rgb>,
     /// The paragraph is inside a table cell. Word marks every paragraph of
     /// a cell this way; the cell's last paragraph ends in a cell mark.
@@ -560,7 +556,6 @@ impl Default for ParaProps {
             keep_together: false,
             suppress_line_numbers: false,
             borders: Borders::default(),
-            shading: 0,
             shading_color: None,
             in_table: false,
             nest: 0,
@@ -594,13 +589,9 @@ impl ParaProps {
     }
 }
 
-/// Shading percentages offered by the Border dialog, in tenths of a percent.
-pub const SHADING_STEPS: [u16; 17] = [
-    0, 100, 125, 200, 250, 300, 375, 400, 500, 600, 625, 700, 750, 800, 875, 900, 1000,
-];
-
-/// The color a shading draws: the background (white if none) with black laid
-/// over it at `tenths` of a percent. None when there is neither.
+/// The flat color of a percentage shading from another format: the
+/// background (white if none) with black laid over it at `tenths` of a
+/// percent. None when there is neither.
 pub fn shading_fill(tenths: u16, color: Option<Rgb>) -> Option<Rgb> {
     if tenths == 0 {
         return color;
@@ -627,7 +618,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shading_lays_black_over_the_background() {
+    fn a_percentage_shading_becomes_a_flat_color() {
         assert_eq!(shading_fill(0, None), None);
         assert_eq!(shading_fill(0, Some(Rgb(0x123456))), Some(Rgb(0x123456)));
         // 20% black on white is the old gray.

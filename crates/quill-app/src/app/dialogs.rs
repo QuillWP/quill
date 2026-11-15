@@ -328,7 +328,7 @@ impl WinState {
     }
 
     /// Show color `c` in the box `anchor` and the HTML code beside it.
-    fn show_chosen_color(&mut self, anchor: &'static str, c: quill_core::props::Rgb) {
+    pub(super) fn show_chosen_color(&mut self, anchor: &'static str, c: quill_core::props::Rgb) {
         match self.dialogs.last_mut() {
             Some((Which::Preferences { .. }, d)) => {
                 crate::prefs_dialog::show_color(d, anchor, Some(c));
@@ -336,7 +336,7 @@ impl WinState {
             Some((Which::Border(st), d)) => crate::border_dialog::set_color(st, d, anchor, Some(c)),
             Some((_, d)) => {
                 d.set_swatch(anchor, c.0);
-                d.set_label("color_hex", &crate::palette::hex(c));
+                d.set_label(&format!("{anchor}_hex"), &crate::palette::hex(c));
             }
             None => {}
         }
@@ -413,20 +413,27 @@ impl WinState {
     fn delete_color(&mut self, old: quill_core::props::Rgb, new: quill_core::props::Rgb) {
         self.view.replace_color(old, new);
         crate::palette::drop_edits_of(old);
-        let Some((Which::Character(base) | Which::StyleCharacter(base), d)) =
-            self.dialogs.last_mut()
-        else {
+        match self.dialogs.last_mut() {
+            Some((Which::Character(base) | Which::StyleCharacter(base), _)) => {
+                if base.color == old {
+                    base.color = new;
+                }
+            }
+            Some((Which::CharacterStyleEdit(_) | Which::Hyperlink(_), _)) => {}
+            _ => return,
+        }
+        let Some((_, d)) = self.dialogs.last_mut() else {
             return;
         };
-        if base.color == old {
-            base.color = new;
-        }
-        if d.swatch_rgb("color") == Some(old.0) {
-            d.set_swatch("color", new.0);
-            d.set_label("color_hex", &crate::palette::hex(new));
+        for anchor in ["color", "hover", "visited"] {
+            if d.swatch_rgb(anchor) == Some(old.0) {
+                d.set_swatch(anchor, new.0);
+                d.set_label(&format!("{anchor}_hex"), &crate::palette::hex(new));
+            }
         }
         // Back to the palette, without the color.
-        self.toggle_color_popout("color");
+        let anchor = self.color_pop.as_ref().map_or("color", |(a, _)| *a);
+        self.toggle_color_popout(anchor);
     }
 
     fn open_color_editor(&mut self, start: quill_core::props::Rgb, target: crate::palette::Target) {
@@ -579,10 +586,21 @@ impl WinState {
             return false;
         };
         // The color box and its palette work as they do in Format > Character.
-        if matches!(which, Which::StyleCharacter(_))
+        if matches!(
+            which,
+            Which::StyleCharacter(_) | Which::CharacterStyleEdit(_)
+        ) && matches!(
+            o,
+            Outcome::Button("color" | "edit" | "delete_color" | "color_clear")
+                | Outcome::Swatch { .. }
+        ) {
+            return false;
+        }
+        if matches!(which, Which::Hyperlink(_))
             && matches!(
                 o,
-                Outcome::Button("color" | "edit" | "delete_color") | Outcome::Swatch { .. }
+                Outcome::Button("color" | "hover" | "visited" | "edit" | "delete_color")
+                    | Outcome::Swatch { .. }
             )
         {
             return false;
@@ -657,6 +675,7 @@ impl WinState {
                     ) {
                         Ok(saved) => {
                             self.dialogs.pop();
+                            self.color_pop = None;
                             crate::palette::drop_edits();
                             // Back in the Style dialog, which now lists the
                             // new style and links the style to it.
@@ -667,28 +686,10 @@ impl WinState {
                         Err(why) => self.alert(why, format_dialogs::Alert::Info),
                     }
                 }
-                Outcome::Changed(id) => {
-                    if *id == "color" && format_dialogs::wants_palette(d) {
-                        // The system Colors panel on the Mac; Cancel keeps
-                        // the style's color, or none.
-                        #[cfg(all(target_os = "macos", not(test)))]
-                        if self.on_screen {
-                            let start = format_dialogs::color_named(&d.selected_text("color"));
-                            let color = crate::mac_color_panel::pick(
-                                start.unwrap_or(quill_core::props::Rgb::BLACK),
-                            )
-                            .or(start);
-                            format_dialogs::show_color(d, color);
-                            return true;
-                        }
-                        let (palette, st) = crate::palette::palette(None, &self.view.doc);
-                        self.dialogs.push((Which::Palette(st), palette));
-                    } else {
-                        format_dialogs::character_changed(d, id);
-                    }
-                }
+                Outcome::Changed(id) => format_dialogs::character_changed(d, id),
                 Outcome::Cancel => {
                     crate::palette::drop_edits();
+                    self.color_pop = None;
                     self.dialogs.pop();
                 }
                 _ => {}
@@ -717,22 +718,7 @@ impl WinState {
                 Outcome::Cancel => {
                     self.dialogs.pop();
                 }
-                Outcome::Changed(id) => {
-                    if let fd::Ask::Format { replace, kind } = fd::changed(st, d, &self.view, id) {
-                        let (spec_c, spec_p) = if replace {
-                            (&st.search.rep_chp, &st.search.rep_pap)
-                        } else {
-                            (&st.search.find_chp, &st.search.find_pap)
-                        };
-                        let fd_dialog = match kind {
-                            0 => fd::character_spec(&self.view, &self.font_families, spec_c),
-                            1 => fd::paragraph_spec(&self.view, spec_p),
-                            _ => fd::style_spec(&self.view, spec_p),
-                        };
-                        self.dialogs
-                            .push((Which::FindFormat { replace, kind }, fd_dialog));
-                    }
-                }
+                Outcome::Changed(id) => fd::changed(st, d, &self.view, id),
                 Outcome::Ok | Outcome::Button("findnext") => {
                     fd::update(st, d, &self.view);
                     let s = st.search.clone();
@@ -751,62 +737,6 @@ impl WinState {
                     fd::update(st, d, &self.view);
                     if in_selection {
                         self.alert("End of selection reached.", format_dialogs::Alert::Info);
-                    }
-                }
-                _ => {}
-            },
-            Which::FindFormat { replace, kind } => match o {
-                Outcome::Ok => {
-                    let (replace, kind) = (*replace, *kind);
-                    let n = self.dialogs.len();
-                    let base = match self.dialogs.get(n.wrapping_sub(2)) {
-                        Some((Which::Find(st), _)) => st.search.clone(),
-                        _ => fd::Search::default(),
-                    };
-                    let d = &self.dialogs[n - 1].1;
-                    let (cur_c, cur_p) = if replace {
-                        (base.rep_chp, base.rep_pap)
-                    } else {
-                        (base.find_chp, base.find_pap)
-                    };
-                    let spec = match kind {
-                        0 => fd::read_character_spec(d, &mut self.view).map(|c| (c, cur_p.clone())),
-                        1 => fd::read_paragraph_spec(d).map(|mut p| {
-                            p.style = cur_p.style;
-                            (cur_c.clone(), p)
-                        }),
-                        _ => Some((cur_c.clone(), fd::read_style_spec(d, &cur_p))),
-                    };
-                    let Some((c, p)) = spec else {
-                        return true;
-                    };
-                    self.dialogs.pop();
-                    if let Some((Which::Find(st), d)) = self.dialogs.last_mut() {
-                        if replace {
-                            st.search.rep_chp = c;
-                            st.search.rep_pap = p;
-                        } else {
-                            st.search.find_chp = c;
-                            st.search.find_pap = p;
-                        }
-                        fd::update(st, d, &self.view);
-                    }
-                }
-                Outcome::Cancel => {
-                    self.dialogs.pop();
-                }
-                Outcome::Changed(id) if *kind == 0 => {
-                    if *id == "color" && format_dialogs::wants_palette(d) {
-                        #[cfg(all(target_os = "macos", not(test)))]
-                        if self.on_screen {
-                            let color = crate::mac_color_panel::pick(quill_core::props::Rgb::BLACK);
-                            format_dialogs::show_color(d, color);
-                            return true;
-                        }
-                        let (palette, st) = crate::palette::palette(None, &self.view.doc);
-                        self.dialogs.push((Which::Palette(st), palette));
-                    } else {
-                        format_dialogs::character_changed(d, id);
                     }
                 }
                 _ => {}
@@ -1094,15 +1024,21 @@ impl WinState {
                     if let Some((text, link, color)) = crate::link_dialog::read(d, st) {
                         let target = st.target.clone();
                         self.dialogs.pop();
+                        self.color_pop = None;
+                        crate::palette::drop_edits();
                         self.view.apply_link(&target, &text, link, color);
                     }
                 }
                 Outcome::Button("remove") => {
                     let (start, end) = (st.target.start, st.target.end);
                     self.dialogs.pop();
+                    self.color_pop = None;
+                    crate::palette::drop_edits();
                     self.view.remove_link_from(start, end);
                 }
                 Outcome::Cancel => {
+                    crate::palette::drop_edits();
+                    self.color_pop = None;
                     self.dialogs.pop();
                 }
                 _ => {}
@@ -1397,9 +1333,22 @@ impl WinState {
                 self.refresh_style_list(None);
             }
             Outcome::Button("color")
-                if matches!(which, Which::Character(_) | Which::StyleCharacter(_)) =>
+                if matches!(
+                    which,
+                    Which::Character(_) | Which::StyleCharacter(_) | Which::CharacterStyleEdit(_)
+                ) =>
             {
                 self.toggle_color_popout("color");
+            }
+            Outcome::Button(id @ ("color" | "hover" | "visited"))
+                if matches!(which, Which::Hyperlink(_)) =>
+            {
+                self.toggle_color_popout(id);
+            }
+            Outcome::Button("color_clear") if matches!(which, Which::CharacterStyleEdit(_)) => {
+                d.set_label("color_hex", "");
+                d.popout = None;
+                self.color_pop = None;
             }
             Outcome::Button(id)
                 if matches!(which, Which::Preferences { .. })
@@ -1431,6 +1380,8 @@ impl WinState {
                     which,
                     Which::Character(_)
                         | Which::StyleCharacter(_)
+                        | Which::CharacterStyleEdit(_)
+                        | Which::Hyperlink(_)
                         | Which::Preferences { .. }
                         | Which::Border(_)
                 ) =>
@@ -1442,6 +1393,8 @@ impl WinState {
                     which,
                     Which::Character(_)
                         | Which::StyleCharacter(_)
+                        | Which::CharacterStyleEdit(_)
+                        | Which::Hyperlink(_)
                         | Which::Preferences { .. }
                         | Which::Border(_)
                 ) =>
@@ -1449,7 +1402,13 @@ impl WinState {
                 self.color_popout_edit();
             }
             Outcome::Button("delete_color")
-                if matches!(which, Which::Character(_) | Which::StyleCharacter(_)) =>
+                if matches!(
+                    which,
+                    Which::Character(_)
+                        | Which::StyleCharacter(_)
+                        | Which::CharacterStyleEdit(_)
+                        | Which::Hyperlink(_)
+                ) =>
             {
                 self.color_popout_delete();
             }

@@ -23,7 +23,7 @@ pub struct TableDrag {
 impl DocView {
     /// The table the insertion point is in, and its handle in window
     /// points.
-    pub(super) fn table_handle(&self) -> Option<(usize, usize, Rect)> {
+    pub(crate) fn table_handle(&self) -> Option<(usize, usize, Rect)> {
         if self.outline {
             return None;
         }
@@ -76,6 +76,18 @@ impl DocView {
     /// page has its handle in the header area, and the handle comes first.
     pub(super) fn on_table_handle(&self, wx: f32, wy: f32) -> bool {
         self.table_handle_at(wx, wy).is_some()
+    }
+
+    /// A right-click on the handle: select the whole table, without starting
+    /// a move. Returns true if the point was on the handle. The handle sits
+    /// over the line above the table, so without this the click would be
+    /// taken for one on that line's text.
+    pub fn select_table_at_handle(&mut self, wx: f32, wy: f32) -> bool {
+        if self.table_handle_at(wx, wy).is_none() {
+            return false;
+        }
+        self.select_table();
+        true
     }
 
     /// A click on the handle: select the table and start a move. Returns

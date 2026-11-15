@@ -5,9 +5,8 @@
 use crate::dialog::{Dialog, Kind, units};
 use crate::docview::{Clipboard, DocView};
 use quill_core::find::{
-    self, CharSpec, Direction, FIND_SPECIALS, ParaSpec, Pattern, REPLACE_SPECIALS, Replacement,
+    self, CharSpec, Direction, FIND_SPECIALS, Pattern, REPLACE_SPECIALS, Replacement,
 };
-use quill_core::props::LineSpacing;
 use quill_core::{Position, Selection};
 use std::cell::RefCell;
 
@@ -22,10 +21,6 @@ pub const SELECTION: usize = 3;
 pub struct Search {
     pub find: String,
     pub replace: String,
-    pub find_chp: CharSpec,
-    pub find_pap: ParaSpec,
-    pub rep_chp: CharSpec,
-    pub rep_pap: ParaSpec,
     pub match_case: bool,
     pub whole_word: bool,
     pub dir: usize,
@@ -37,8 +32,6 @@ impl Search {
             &self.find,
             self.match_case,
             self.whole_word && !find::has_specials(&self.find),
-            self.find_chp.clone(),
-            self.find_pap.clone(),
         )
     }
 
@@ -51,7 +44,7 @@ impl Search {
     }
 
     pub fn replacement(&self) -> Replacement {
-        Replacement::new(&self.replace, self.rep_chp.clone(), self.rep_pap.clone())
+        Replacement::new(&self.replace)
     }
 }
 
@@ -76,8 +69,6 @@ pub struct FindState {
     pub found: Option<(Position, Position)>,
 }
 
-const FORMATS: [&str; 4] = ["Clear", "Character…", "Paragraph…", "Style…"];
-
 /// Build the Find (`replace` false) or Replace window.
 pub fn dialog(view: &DocView, replace: bool) -> (Dialog, FindState) {
     let mut search = last();
@@ -96,17 +87,13 @@ pub fn dialog(view: &DocView, replace: bool) -> (Dialog, FindState) {
     let lx = 8.0;
     d.text("Find What:", lx, 7.0);
     d.field("find", &search.find, 102.0, 5.0, 250.0);
-    d.menu_button("fmt_find", "Format", &FORMATS, 23.0, 27.0, 75.0);
     let specials: Vec<&str> = FIND_SPECIALS.iter().map(|(n, _)| *n).collect();
-    d.menu_button("spc_find", "Special", &specials, 23.0, 49.0, 75.0);
-    d.note("desc_find", "", 104.0, 31.0, 250.0);
+    d.menu_button("spc_find", "Special", &specials, 23.0, 27.0, 75.0);
     let (checks_y, search_y) = if replace {
         d.text("Replace With:", 8.0, 150.0);
         d.field("with", &search.replace, 102.0, 148.0, 250.0);
-        d.menu_button("fmt_rep", "Format", &FORMATS, 23.0, 170.0, 75.0);
         let specials: Vec<&str> = REPLACE_SPECIALS.iter().map(|(n, _)| *n).collect();
-        d.menu_button("spc_rep", "Special", &specials, 23.0, 192.0, 75.0);
-        d.note("desc_rep", "", 104.0, 174.0, 250.0);
+        d.menu_button("spc_rep", "Special", &specials, 23.0, 170.0, 75.0);
         d.button("findnext", "Find Next", 369.0, 9.0, 88.0, true);
         d.button("replace", "Replace", 369.0, 152.0, 88.0, false);
         d.button("replaceall", "Replace All", 369.0, 178.0, 88.0, false);
@@ -191,19 +178,6 @@ pub fn update(st: &mut FindState, d: &mut Dialog, view: &DocView) {
     s.match_case = d.is_on("case");
     s.whole_word = d.is_on("whole");
     s.dir = d.selected("dir");
-    let font = |f| view.doc.font_name(f).to_string();
-    let style = |id| view.doc.styles.get(id).display_name();
-    let describe = |c: &CharSpec, p: &ParaSpec| {
-        let a = c.describe(&font);
-        let b = p.describe(&style);
-        match (a.is_empty(), b.is_empty()) {
-            (false, false) => format!("{a}, {b}"),
-            (true, _) => b,
-            (_, true) => a,
-        }
-    };
-    d.set_label("desc_find", &describe(&s.find_chp, &s.find_pap));
-    d.set_label("desc_rep", &describe(&s.rep_chp, &s.rep_pap));
     let can_find = !s.pattern().is_empty();
     d.enable("findnext", can_find);
     d.enable("replaceall", st.replace && can_find);
@@ -213,46 +187,12 @@ pub fn update(st: &mut FindState, d: &mut Dialog, view: &DocView) {
     remember(s);
 }
 
-/// What a Find window event asks the window owner to do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Ask {
-    Nothing,
-    /// Open the format dialog (0 Character, 1 Paragraph, 2 Style) for the
-    /// find side or the replace side.
-    Format {
-        replace: bool,
-        kind: u8,
-    },
-}
-
 /// A control in the Find window changed.
-pub fn changed(st: &mut FindState, d: &mut Dialog, view: &DocView, id: &str) -> Ask {
-    if !st.replace && matches!(id, "fmt_rep" | "spc_rep" | "with") {
-        return Ask::Nothing;
+pub fn changed(st: &mut FindState, d: &mut Dialog, view: &DocView, id: &str) {
+    if !st.replace && matches!(id, "spc_rep" | "with") {
+        return;
     }
-    let mut ask = Ask::Nothing;
     match id {
-        "fmt_find" | "fmt_rep" => {
-            let replace = id == "fmt_rep";
-            match d.selected(id) {
-                0 => {
-                    if replace {
-                        st.search.rep_chp = CharSpec::default();
-                        st.search.rep_pap = ParaSpec::default();
-                    } else {
-                        st.search.find_chp = CharSpec::default();
-                        st.search.find_pap = ParaSpec::default();
-                    }
-                }
-                k @ 1..=3 => {
-                    ask = Ask::Format {
-                        replace,
-                        kind: k as u8 - 1,
-                    }
-                }
-                _ => {}
-            }
-        }
         "spc_find" => {
             if let Some((_, code)) = FIND_SPECIALS.get(d.selected(id)) {
                 d.insert_in_field("find", code);
@@ -266,7 +206,6 @@ pub fn changed(st: &mut FindState, d: &mut Dialog, view: &DocView, id: &str) -> 
         _ => {}
     }
     update(st, d, view);
-    ask
 }
 
 /// How a search went.
@@ -389,8 +328,8 @@ pub fn replace_all(st: &mut FindState, view: &mut DocView, clip: &mut Clipboard)
 
 // ----- the format dialogs -----
 
-/// The Character dialog for a format to find or apply: every control
-/// starts blank or gray, meaning "any".
+/// The Character dialog for a character style: every control starts blank
+/// or gray, meaning the style leaves it to the paragraph.
 pub fn character_spec(
     view: &DocView,
     fonts: &[quill_layout::FontFamilyInfo],
@@ -428,8 +367,24 @@ pub fn character_spec(
         })
         .map_or(0, |i| i + 1);
     d.set_options("underline", u, ui);
-    let (c, ci) = crate::format_dialogs::color_options(spec.color, true);
-    d.set_options("color", c, ci);
+    // A box with the palette beside it, as in Format > Character. The hex
+    // code is blank for "any color", and None puts it back to that.
+    d.items.retain(|item| item.id != "color");
+    d.swatch_button(
+        "color",
+        146.0,
+        74.0,
+        44.0,
+        22.0,
+        spec.color.map_or(0xFFFFFF, |c| c.0),
+    );
+    d.text_as(
+        "color_hex",
+        &spec.color.map_or(String::new(), crate::palette::hex),
+        198.0,
+        78.0,
+    );
+    d.button("color_clear", "None", 252.0, 74.0, 44.0, false);
     for (id, v) in [
         ("bold", spec.bold),
         ("italic", spec.italic),
@@ -470,6 +425,14 @@ pub fn character_spec(
     d
 }
 
+/// The color the box of a Character format dialog shows, or None for any.
+pub fn spec_color(d: &Dialog) -> Option<quill_core::Rgb> {
+    if d.item_label("color_hex").is_empty() {
+        return None;
+    }
+    d.swatch_rgb("color").map(quill_core::Rgb)
+}
+
 pub fn read_character_spec(d: &Dialog, view: &mut DocView) -> Option<CharSpec> {
     let mut s = CharSpec::default();
     let font = d.selected_text("font");
@@ -486,7 +449,7 @@ pub fn read_character_spec(d: &Dialog, view: &mut DocView) -> Option<CharSpec> {
         .selected("underline")
         .checked_sub(1)
         .and_then(|i| crate::format_dialogs::UNDERLINE_KINDS.get(i).copied());
-    s.color = crate::format_dialogs::color_named(&d.selected_text("color"));
+    s.color = spec_color(d);
     s.bold = d.check3_state("bold");
     s.italic = d.check3_state("italic");
     s.outline = d.check3_state("outline");
@@ -516,86 +479,6 @@ pub fn read_character_spec(d: &Dialog, view: &mut DocView) -> Option<CharSpec> {
         _ => None,
     };
     Some(s)
-}
-
-/// The Paragraph dialog for a paragraph format to find or apply.
-pub fn paragraph_spec(view: &DocView, spec: &ParaSpec) -> Dialog {
-    let (mut d, _) = crate::format_dialogs::paragraph(view);
-    let pts = |v: Option<i32>| v.map(units::points).unwrap_or_default();
-    let len = |v: Option<i32>| v.map(units::length).unwrap_or_default();
-    d.set_field("before", &pts(spec.before));
-    d.set_field("after", &pts(spec.after));
-    d.set_field("left", &len(spec.left));
-    d.set_field("right", &len(spec.right));
-    d.set_field("first", &len(spec.first));
-    let mut lines = vec![String::new()];
-    lines.extend(d.options("line"));
-    let (rule, by) = match spec.line {
-        None => (0, String::new()),
-        Some(LineSpacing::Auto) => (1, String::new()),
-        Some(LineSpacing::AtLeast(t)) => (2, units::points(t)),
-        Some(LineSpacing::Exactly(t)) => (3, units::points(t)),
-        Some(LineSpacing::Multiple(m)) => (4, crate::format_dialogs::lines(m)),
-    };
-    d.set_options("line", lines, rule);
-    d.set_field("line_by", &by);
-    d.set_check3("pagebreak", spec.page_break_before);
-    d.set_check3("keepnext", spec.keep_with_next);
-    d.set_check3("keeplines", spec.keep_together);
-    for id in ["apply", "tabs", "border"] {
-        d.enable(id, false);
-    }
-    d.focus("left");
-    d
-}
-
-pub fn read_paragraph_spec(d: &Dialog) -> Option<ParaSpec> {
-    let mut s = ParaSpec::default();
-    let field = |id: &str, unit: &str| -> Option<Option<i32>> {
-        let t = d.field_text(id);
-        if t.trim().is_empty() {
-            return Some(None);
-        }
-        let v = if unit == "pt" {
-            units::parse(&t, "pt")
-        } else {
-            units::parse_length(&t)
-        };
-        v.map(Some)
-    };
-    s.before = field("before", "pt")?;
-    s.after = field("after", "pt")?;
-    s.left = field("left", "in")?;
-    s.right = field("right", "in")?;
-    s.first = field("first", "in")?;
-    // The popup has a blank "any" choice before the Paragraph dialog's.
-    s.line = match d.selected("line") {
-        0 => None,
-        rule => crate::format_dialogs::read_line_rule(d, rule - 1, LineSpacing::Auto)?,
-    };
-    s.page_break_before = d.check3_state("pagebreak");
-    s.keep_with_next = d.check3_state("keepnext");
-    s.keep_together = d.check3_state("keeplines");
-    Some(s)
-}
-
-/// A small dialog to choose the style to find or apply.
-pub fn style_spec(view: &DocView, spec: &ParaSpec) -> Dialog {
-    let mut d = Dialog::new("Style", 300.0, 70.0);
-    let mut names: Vec<String> = vec![String::new()];
-    names.extend(view.doc.styles.styles.iter().map(|s| s.display_name()));
-    let sel = spec.style.map_or(0, |s| s as usize + 1);
-    d.text("Style:", 12.0, 12.0);
-    d.popup_owned("style", names, sel, 64.0, 10.0, 140.0);
-    d.button("ok", "OK", 220.0, 10.0, 68.0, true);
-    d.button("cancel", "Cancel", 220.0, 40.0, 68.0, false);
-    d
-}
-
-pub fn read_style_spec(d: &Dialog, spec: &ParaSpec) -> ParaSpec {
-    let mut s = spec.clone();
-    s.style = d.selected("style").checked_sub(1).map(|i| i as u16);
-    s
 }
 
 // ----- Go To -----

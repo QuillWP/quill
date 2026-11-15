@@ -69,12 +69,6 @@ pub enum Which {
     },
     FontSources(Box<crate::settings::Settings>),
     Find(crate::find_dialog::FindState),
-    /// A format dialog opened from Find or Replace: for the Replace With
-    /// side or not, and Character (0), Paragraph (1) or Style (2).
-    FindFormat {
-        replace: bool,
-        kind: u8,
-    },
     GoTo,
     Grep(crate::advanced_dialog::GrepState),
     /// Regex Search; true while the Replace part is showing.
@@ -356,17 +350,13 @@ pub(crate) const UNDERLINE_KINDS: [Underline; 5] = [
     Underline::Dotted,
 ];
 
-/// Whether the Character dialog's color is a button that pops out the
-/// color palette (the Mac's native dialogs have the pop-out), instead of
-/// a popup whose More Colors… opens the palette in a window.
-pub const COLOR_BUTTON: bool = cfg!(target_os = "macos");
-
-/// Format > Character (⌘D).
+/// Format > Character (⌘D). Its color is a box that pops out the color
+/// palette, on every platform.
 pub fn character(
     view: &DocView,
     font_families: &[quill_layout::FontFamilyInfo],
 ) -> (Dialog, Which) {
-    build_character(view, font_families, COLOR_BUTTON)
+    build_character(view, font_families, true)
 }
 
 /// The Character dialog with its color button, whatever the platform.
@@ -860,7 +850,6 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
         | Which::StyleCharacter(_)
         | Which::StyleParagraph(_)
         | Which::CharacterStyleEdit(_)
-        | Which::FindFormat { .. }
         | Which::GoTo
         | Which::Grep(_)
         | Which::RegexSearch(_)

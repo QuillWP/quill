@@ -852,7 +852,6 @@ impl<'a> Reader<'a> {
         }
         if let Some(v) = e.attr("background-color") {
             p.shading_color = parse_color(v);
-            p.shading = 0;
         }
         if e.attrs.iter().any(|(k, _)| k.starts_with("border")) {
             p.borders = borders(e);
@@ -2308,7 +2307,6 @@ impl<'a> Reader<'a> {
                     cells.push(CellProps {
                         width,
                         borders: cp.map(borders).unwrap_or_default(),
-                        shading: 0,
                         shading_color: cp
                             .and_then(|p| p.attr("background-color"))
                             .and_then(parse_color),

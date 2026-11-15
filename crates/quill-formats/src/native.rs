@@ -447,7 +447,6 @@ fn pap(o: &mut Out, p: &ParaProps) {
         keep_together,
         suppress_line_numbers,
         borders: b,
-        shading,
         shading_color,
         in_table,
         nest,
@@ -500,7 +499,6 @@ fn pap(o: &mut Out, p: &ParaProps) {
     o.flag(12, *keep_together);
     o.flag(13, *suppress_line_numbers);
     o.nest(14, |o| borders(o, b));
-    o.uint(15, *shading as u64);
     if let Some(color) = shading_color {
         o.uint(19, color.0 as u64);
     }
@@ -525,7 +523,6 @@ fn row(o: &mut Out, r: &RowProps) {
         let CellProps {
             width,
             borders: b,
-            shading,
             shading_color,
             valign,
             vmerge,
@@ -533,7 +530,6 @@ fn row(o: &mut Out, r: &RowProps) {
         o.nest(1, |o| {
             o.int(1, *width as i64);
             o.nest(2, |o| borders(o, b));
-            o.uint(3, *shading as u64);
             if let Some(color) = shading_color {
                 o.uint(5, color.0 as u64);
             }
@@ -1157,7 +1153,6 @@ fn read_pap(b: &[u8]) -> Result<ParaProps, Damaged> {
             12 => p.keep_together = flag(f)?,
             13 => p.suppress_line_numbers = flag(f)?,
             14 => p.borders = read_borders(f)?,
-            15 => p.shading = u16_of(f)?,
             19 => p.shading_color = Some(Rgb(u32_of(f)? & 0xFF_FFFF)),
             16 => p.in_table = flag(f)?,
             18 => p.nest = u16_of(f)?.min(quill_core::limits::MAX_TABLE_LEVEL as u16 - 1) as u8,
@@ -1184,7 +1179,6 @@ fn read_row(b: &[u8]) -> Result<RowProps, Damaged> {
                     match tag {
                         1 => c.width = i32_of(f)?,
                         2 => c.borders = read_borders(f)?,
-                        3 => c.shading = u16_of(f)?,
                         5 => c.shading_color = Some(Rgb(u32_of(f)? & 0xFF_FFFF)),
                         4 => {
                             c.valign = match u16_of(f)? {

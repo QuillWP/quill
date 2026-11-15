@@ -25,9 +25,8 @@ const LINES: [(&str, BorderStyle); 6] = [
 #[derive(Clone, Debug)]
 pub struct BorderState {
     /// What the paragraph had, to tell whether anything changed.
-    base: (Borders, u16, Option<Rgb>),
+    base: (Borders, Option<Rgb>),
     pub borders: Borders,
-    pub shading: u16,
     pub shading_color: Option<Rgb>,
     /// Sides ticked in the dialog.
     pub sel: u8,
@@ -76,7 +75,6 @@ pub fn set_color(st: &mut BorderState, d: &mut Dialog, anchor: &str, color: Opti
         }
     } else {
         st.shading_color = color;
-        st.shading = 0;
     }
     show_colors(st, d);
     update_preview(st, d);
@@ -120,7 +118,7 @@ fn sync_controls(st: &BorderState, d: &mut Dialog) {
 /// otherwise the new target shows its own borders and shading.
 pub fn target_changed(st: &mut BorderState, d: &mut Dialog, view: &DocView) {
     let loaded = load_target(st.clone(), view, d.selected("applyto"));
-    let edited = (st.borders, st.shading, st.shading_color) != st.base;
+    let edited = (st.borders, st.shading_color) != st.base;
     if edited {
         st.base = loaded.base;
     } else {
@@ -223,9 +221,8 @@ pub fn border(view: &DocView) -> (Dialog, BorderState) {
     }
     d.focus("space");
     let st = BorderState {
-        base: (b, p.shading, p.shading_color),
+        base: (b, p.shading_color),
         borders: b,
-        shading: p.shading,
         shading_color: p.shading_color,
         sel,
         line,
@@ -260,9 +257,8 @@ fn load_target(mut st: BorderState, view: &DocView, target: usize) -> BorderStat
         let p = quill_core::table::row_props(paras, &ts.rows[0], view.doc.props.text_width());
         let cell = &p.cells[ts.from.min(p.cells.len() - 1)];
         st.borders = cell.borders;
-        st.shading = cell.shading;
         st.shading_color = cell.shading_color;
-        st.base = (cell.borders, cell.shading, cell.shading_color);
+        st.base = (cell.borders, cell.shading_color);
         st.sel = 0;
         for bit in [TOP, BOTTOM, LEFT, RIGHT, BETWEEN] {
             let line = *side(&mut st.borders.clone(), bit);
@@ -289,7 +285,7 @@ pub fn for_cells(st: BorderState, view: &DocView, d: &mut Dialog) -> BorderState
 fn apply_to_cells(
     b: Borders,
     base: Borders,
-    (shading, shading_color): (u16, Option<Rgb>),
+    shading_color: Option<Rgb>,
     borders_changed: bool,
     shading_changed: bool,
     target: usize,
@@ -308,7 +304,6 @@ fn apply_to_cells(
                 p.cells[k].borders = b;
             }
             if shading_changed {
-                p.cells[k].shading = shading;
                 p.cells[k].shading_color = shading_color;
             }
         }
@@ -538,16 +533,15 @@ pub fn apply(st: &BorderState, d: &Dialog, view: &mut DocView) -> bool {
             l.space = if l.is_none() { 0 } else { space.max(0) };
         }
     }
-    let shading = st.shading;
     let shading_color = st.shading_color;
     let borders_changed = b != st.base.0;
-    let shading_changed = (shading, shading_color) != (st.base.1, st.base.2);
+    let shading_changed = shading_color != st.base.1;
     if d.selected("applyto") > 0 && d.is_enabled("applyto") {
         if borders_changed || shading_changed {
             apply_to_cells(
                 b,
                 st.base.0,
-                (shading, shading_color),
+                shading_color,
                 borders_changed,
                 shading_changed,
                 d.selected("applyto"),
@@ -562,7 +556,6 @@ pub fn apply(st: &BorderState, d: &Dialog, view: &mut DocView) -> bool {
                 p.borders = b;
             }
             if shading_changed {
-                p.shading = shading;
                 p.shading_color = shading_color;
             }
         });
@@ -720,15 +713,15 @@ mod tests {
     }
 
     #[test]
-    fn a_background_color_is_plain_and_clears_to_none() {
+    fn a_background_color_replaces_the_old_one_and_clears_to_none() {
         let mut view = DocView::new(Document::new(), "Test".to_string());
-        view.doc.main.paras[0].pap.shading = 200;
+        view.doc.main.paras[0].pap.shading_color = Some(Rgb(0xCCCCCC));
         let (mut d, mut st) = border(&view);
         set_color(&mut st, &mut d, "shading_color", Some(Rgb(0x3366CC)));
         assert_eq!(d.swatch_rgb("shading_color"), Some(0x3366CC));
         assert!(apply(&st, &d, &mut view));
         let p = &view.doc.main.paras[0].pap;
-        assert_eq!((p.shading, p.shading_color), (0, Some(Rgb(0x3366CC))));
+        assert_eq!(p.shading_color, Some(Rgb(0x3366CC)));
         let (mut d, mut st) = border(&view);
         set_color(&mut st, &mut d, "shading_color", None);
         assert!(apply(&st, &d, &mut view));

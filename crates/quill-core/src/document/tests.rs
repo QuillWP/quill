@@ -581,10 +581,9 @@ fn defining_a_style_can_be_undone() {
 }
 
 #[test]
-fn redefining_shading_keeps_direct_fills_and_gray_overrides() {
-    let mut d = doc_with(&["Style", "Direct color", "Direct gray"]);
+fn redefining_shading_keeps_direct_fills() {
+    let mut d = doc_with(&["Style", "Direct color"]);
     d.main.paras[1].pap.shading_color = Some(crate::Rgb(0x123456));
-    d.main.paras[2].pap.shading = 250;
     let mut pap = d.styles.get(0).pap.clone();
     pap.shading_color = Some(crate::Rgb(0xEBF0FA));
     d.begin("Style", Selection::default());
@@ -598,8 +597,6 @@ fn redefining_shading_keeps_direct_fills_and_gray_overrides() {
         d.main.paras[1].pap.shading_color,
         Some(crate::Rgb(0x123456))
     );
-    assert_eq!(d.main.paras[2].pap.shading_color, None);
-    assert_eq!(d.main.paras[2].pap.shading, 250);
     d.undo();
     assert_eq!(d.main.paras[0].pap.shading_color, None);
     d.redo();

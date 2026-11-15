@@ -403,10 +403,6 @@ fn pap(out: &mut String, p: &ParaProps, tables: &Tables) {
     if let Some(color) = p.shading_color {
         let _ = write!(out, "\\cbpat{}", tables.index(color));
     }
-    if p.shading > 0 {
-        // RTF shading is in hundredths of a percent.
-        let _ = write!(out, "\\shading{}", p.shading as u32 * 10);
-    }
     out.push(' ');
 }
 
@@ -698,9 +694,6 @@ fn row_definition(out: &mut String, row: &RowProps, tables: &Tables) {
         if let Some(color) = cell.shading_color {
             let _ = write!(out, "\\clcbpat{}", tables.index(color));
         }
-        if cell.shading > 0 {
-            let _ = write!(out, "\\clshdng{}", cell.shading as u32 * 10);
-        }
         match cell.vmerge {
             VMerge::None => {}
             VMerge::Restart => out.push_str("\\clvmgf"),
@@ -730,13 +723,7 @@ fn row_definition(out: &mut String, row: &RowProps, tables: &Tables) {
         row.gap, row.indent
     );
     for cell in &row.cells {
-        let _ = write!(
-            out,
-            "|{},{},{}",
-            cell.width,
-            cell.shading,
-            u8::from(cell.borders.shadow)
-        );
+        let _ = write!(out, "|{},{}", cell.width, u8::from(cell.borders.shadow));
         for line in [
             &cell.borders.top,
             &cell.borders.bottom,
@@ -746,8 +733,8 @@ fn row_definition(out: &mut String, row: &RowProps, tables: &Tables) {
         ] {
             let _ = write!(out, ",{},{}", border_style(line.style), line.space);
         }
-        // The 14th number, vertical alignment, is left out when Top
-        // unless a 15th, the vertical merge, follows it.
+        // The 13th number, vertical alignment, is left out when Top
+        // unless a 14th, the vertical merge, follows it.
         let valign = match cell.valign {
             quill_core::props::VAlign::Top => 0,
             quill_core::props::VAlign::Center => 1,

@@ -1,188 +1,30 @@
-//! Find and Replace the original way: ^ codes for special characters, ?
-//! for any character, and character or paragraph formats to look for or
-//! to apply.
+//! Find and Replace the original way: ^ codes for special characters and ?
+//! for any character.
 
 use crate::document::{Document, Fragment, StoryId};
 use crate::para::{Mark, chars};
-use crate::props::{
-    Align, CharProps, FontId, LineSpacing, ParaProps, Rgb, Script, StyleId, Twips, Underline,
-};
+use crate::props::{CharProps, FontId, Rgb, Script, Twips, Underline};
 use crate::story::{Position, Story};
 
-macro_rules! spec {
-    ($(#[$m:meta])* $name:ident for $props:ty { $($field:ident: $ty:ty),* $(,)? }) => {
-        $(#[$m])*
-        #[derive(Clone, Debug, Default, PartialEq, Eq)]
-        pub struct $name {
-            $(pub $field: Option<$ty>,)*
-        }
-
-        impl $name {
-            pub fn is_empty(&self) -> bool {
-                true $(&& self.$field.is_none())*
-            }
-
-            pub fn matches(&self, p: &$props) -> bool {
-                true $(&& self.$field.as_ref().is_none_or(|v| *v == p.$field))*
-            }
-
-            pub fn apply(&self, p: &mut $props) {
-                $(if let Some(v) = &self.$field {
-                    p.$field = v.clone();
-                })*
-            }
-        }
-    };
-}
-
-spec!(
-    /// Character formats to look for or apply. Each `Some` is a setting
-    /// that matters; `None` means any.
-    CharSpec for CharProps {
-        font: FontId,
-        size: u16,
-        bold: bool,
-        italic: bool,
-        underline: Underline,
-        strike: bool,
-        outline: bool,
-        shadow: bool,
-        small_caps: bool,
-        all_caps: bool,
-        hidden: bool,
-        color: Rgb,
-        position: Twips,
-        spacing: Twips,
-        script: Script,
-    }
-);
-
-spec!(
-    /// Paragraph formats to look for or apply.
-    ParaSpec for ParaProps {
-        style: StyleId,
-        align: Align,
-        left: Twips,
-        right: Twips,
-        first: Twips,
-        before: Twips,
-        after: Twips,
-        line: LineSpacing,
-        page_break_before: bool,
-        keep_with_next: bool,
-        keep_together: bool,
-    }
-);
-
-impl CharSpec {
-    /// Words for the format, as the original shows them under the Find What field:
-    /// "Bold, Not Italic, Font: Geneva, 12 Point".
-    pub fn describe(&self, font_name: &dyn Fn(FontId) -> String) -> String {
-        let mut out: Vec<String> = Vec::new();
-        if let Some(f) = self.font {
-            out.push(format!("Font: {}", font_name(f)));
-        }
-        if let Some(s) = self.size {
-            let pt = s as f32 / 2.0;
-            out.push(format!("{pt} Point"));
-        }
-        let flags = [
-            (self.bold, "Bold"),
-            (self.italic, "Italic"),
-            (self.strike, "Strikethru"),
-            (self.outline, "Outline"),
-            (self.shadow, "Shadow"),
-            (self.small_caps, "Small Caps"),
-            (self.all_caps, "All Caps"),
-            (self.hidden, "Hidden"),
-        ];
-        for (v, name) in flags {
-            match v {
-                Some(true) => out.push(name.to_string()),
-                Some(false) => out.push(format!("Not {name}")),
-                None => {}
-            }
-        }
-        if let Some(u) = self.underline {
-            out.push(
-                match u {
-                    Underline::None => "Not Underline",
-                    Underline::Single => "Underline",
-                    Underline::Word => "Word Underline",
-                    Underline::Double => "Double Underline",
-                    Underline::Dotted => "Dotted Underline",
-                }
-                .to_string(),
-            );
-        }
-        if let Some(s) = self.script {
-            out.push(
-                match s {
-                    Script::Super => "Superscript",
-                    Script::Sub => "Subscript",
-                    Script::None => "Not Superscript/Subscript",
-                }
-                .to_string(),
-            );
-        }
-        if let Some(p) = self.position {
-            out.push(match p.signum() {
-                1 => format!("Raised {} Point", p as f32 / 20.0),
-                -1 => format!("Lowered {} Point", -p as f32 / 20.0),
-                _ => "Not Raised/Lowered".to_string(),
-            });
-        }
-        if let Some(s) = self.spacing {
-            out.push(
-                match s.signum() {
-                    1 => "Expanded",
-                    -1 => "Condensed",
-                    _ => "Normal Spacing",
-                }
-                .to_string(),
-            );
-        }
-        if self.color.is_some() {
-            out.push("Color".to_string());
-        }
-        out.join(", ")
-    }
-}
-
-impl ParaSpec {
-    pub fn describe(&self, style_name: &dyn Fn(StyleId) -> String) -> String {
-        let mut out: Vec<String> = Vec::new();
-        if let Some(s) = self.style {
-            out.push(format!("Style: {}", style_name(s)));
-        }
-        if let Some(a) = self.align {
-            out.push(
-                match a {
-                    Align::Left => "Flush Left",
-                    Align::Center => "Centered",
-                    Align::Right => "Flush Right",
-                    Align::Justify => "Justified",
-                }
-                .to_string(),
-            );
-        }
-        if self.left.is_some() || self.right.is_some() || self.first.is_some() {
-            out.push("Indent".to_string());
-        }
-        if self.before.is_some() || self.after.is_some() || self.line.is_some() {
-            out.push("Spacing".to_string());
-        }
-        if self.page_break_before == Some(true) {
-            out.push("Page Break Before".to_string());
-        }
-        if self.keep_with_next == Some(true) {
-            out.push("Keep With Next".to_string());
-        }
-        if self.keep_together == Some(true) {
-            out.push("Keep Lines Together".to_string());
-        }
-        out.join(", ")
-    }
+/// Character formats a character style sets. Each `Some` is a setting the
+/// style has; `None` means it leaves that to the paragraph.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CharSpec {
+    pub font: Option<FontId>,
+    pub size: Option<u16>,
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    pub underline: Option<Underline>,
+    pub strike: Option<bool>,
+    pub outline: Option<bool>,
+    pub shadow: Option<bool>,
+    pub small_caps: Option<bool>,
+    pub all_caps: Option<bool>,
+    pub hidden: Option<bool>,
+    pub color: Option<Rgb>,
+    pub position: Option<Twips>,
+    pub spacing: Option<Twips>,
+    pub script: Option<Script>,
 }
 
 /// One step of a search pattern.
@@ -215,8 +57,6 @@ pub struct Pattern {
     atoms: Vec<Atom>,
     pub match_case: bool,
     pub whole_word: bool,
-    pub chp: CharSpec,
-    pub pap: ParaSpec,
     /// Look past text deleted with Track Changes, as when the window
     /// hides it: a match neither starts in it nor counts it, and a word
     /// split by a hidden deletion is found whole.
@@ -283,13 +123,7 @@ pub fn has_specials(text: &str) -> bool {
 }
 
 impl Pattern {
-    pub fn new(
-        text: &str,
-        match_case: bool,
-        whole_word: bool,
-        chp: CharSpec,
-        pap: ParaSpec,
-    ) -> Self {
+    pub fn new(text: &str, match_case: bool, whole_word: bool) -> Self {
         let mut atoms = Vec::new();
         let mut it = text.chars().peekable();
         while let Some(c) = it.next() {
@@ -331,15 +165,13 @@ impl Pattern {
             atoms,
             match_case,
             whole_word,
-            chp,
-            pap,
             skip_deleted: false,
         }
     }
 
-    /// Nothing to look for: no text and no format.
+    /// Nothing to look for: no text.
     pub fn is_empty(&self) -> bool {
-        self.atoms.is_empty() && self.chp.is_empty() && self.pap.is_empty()
+        self.atoms.is_empty()
     }
 }
 
@@ -452,29 +284,13 @@ impl Pattern {
         }
     }
 
-    /// Whether the unit at `pos` has the format looked for.
-    fn format_ok(&self, story: &Story, pos: Position, unit: Unit) -> bool {
-        let p = &story.paras[pos.para];
-        if !self.pap.matches(&p.pap) {
-            return false;
-        }
-        if self.chp.is_empty() {
-            return true;
-        }
-        let chp = match unit {
-            Unit::Char(_) => p.chp_of_char(pos.offset),
-            Unit::Mark(_) => p.mark_chp,
-        };
-        self.chp.matches(&chp)
-    }
-
     /// Where a match starting at `start` ends, if there is one.
     fn match_at(&self, story: &Story, start: Position) -> Option<Position> {
         if self.skip_deleted && deleted_at(story, start) {
             return None;
         }
         if self.atoms.is_empty() {
-            return self.format_run_at(story, start);
+            return None;
         }
         if self.whole_word
             && let Some(before) = self.prev(story, start)
@@ -488,7 +304,7 @@ impl Pattern {
         for &atom in &self.atoms {
             pos = self.skip(story, pos);
             let (unit, next) = unit_at(story, pos)?;
-            if !self.atom_matches(atom, story, pos, unit) || !self.format_ok(story, pos, unit) {
+            if !self.atom_matches(atom, story, pos, unit) {
                 return None;
             }
             pos = next;
@@ -498,7 +314,7 @@ impl Pattern {
                     let Some((u, n)) = unit_at(story, at) else {
                         break;
                     };
-                    if matches!(u, Unit::Char(c) if is_white(c)) && self.format_ok(story, at, u) {
+                    if matches!(u, Unit::Char(c) if is_white(c)) {
                         pos = n;
                     } else {
                         break;
@@ -511,45 +327,6 @@ impl Pattern {
             && is_word_char(c)
         {
             return None;
-        }
-        Some(pos)
-    }
-
-    /// Searching for a format alone finds a stretch of text that has it: a
-    /// run of characters for a character format, a whole paragraph for a
-    /// paragraph format.
-    fn format_run_at(&self, story: &Story, start: Position) -> Option<Position> {
-        if self.chp.is_empty() && self.pap.is_empty() {
-            return None;
-        }
-        if self.chp.is_empty() {
-            if start.offset != 0 || !self.pap.matches(&story.paras[start.para].pap) {
-                return None;
-            }
-            let next = start.para + 1;
-            return Some(if next < story.paras.len() {
-                Position::new(next, 0)
-            } else {
-                Position::new(start.para, story.paras[start.para].len())
-            });
-        }
-        let (unit, mut pos) = unit_at(story, start)?;
-        if !self.format_ok(story, start, unit) {
-            return None;
-        }
-        loop {
-            let at = self.skip(story, pos);
-            let Some((u, next)) = unit_at(story, at) else {
-                break;
-            };
-            let ok = match u {
-                Unit::Char(_) => true,
-                Unit::Mark(m) => m == Mark::Paragraph,
-            };
-            if !ok || !self.format_ok(story, at, u) {
-                break;
-            }
-            pos = next;
         }
         Some(pos)
     }
@@ -586,18 +363,7 @@ pub fn find(
                 if let Some(end) = pat.match_at(story, pos)
                     && end > pos
                 {
-                    // A format run found from inside it starts where the
-                    // run does.
-                    let mut start = pos;
-                    if pat.atoms.is_empty() {
-                        while let Some(p) = prev_pos(story, start) {
-                            match pat.match_at(story, p) {
-                                Some(e) if e == end => start = p,
-                                _ => break,
-                            }
-                        }
-                    }
-                    return Some((start, end));
+                    return Some((pos, end));
                 }
             }
         }
@@ -616,12 +382,10 @@ enum Piece {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Replacement {
     pieces: Vec<Piece>,
-    pub chp: CharSpec,
-    pub pap: ParaSpec,
 }
 
 impl Replacement {
-    pub fn new(text: &str, chp: CharSpec, pap: ParaSpec) -> Self {
+    pub fn new(text: &str) -> Self {
         let mut pieces = Vec::new();
         let mut buf = String::new();
         let mut it = text.chars().peekable();
@@ -667,12 +431,12 @@ impl Replacement {
         if !buf.is_empty() {
             pieces.push(Piece::Text(buf));
         }
-        Replacement { pieces, chp, pap }
+        Replacement { pieces }
     }
 
-    /// Replace With is empty and has no format: matches are deleted.
+    /// Replace With is empty: matches are deleted.
     pub fn deletes(&self) -> bool {
-        self.pieces.is_empty() && self.chp.is_empty() && self.pap.is_empty()
+        self.pieces.is_empty()
     }
 }
 
@@ -714,43 +478,34 @@ pub fn replace(
     clip: Option<&Fragment>,
 ) -> (Position, Position) {
     let (start, end) = (start.min(end), start.max(end));
-    let mut out_end = end;
-    if !rep.pieces.is_empty() || rep.deletes() {
-        let found = doc.story(story).text_of(start, end);
-        let p = &doc.story(story).paras[start.para];
-        let chp: CharProps = if start.offset < p.len() {
-            p.chp_of_char(start.offset)
-        } else {
-            p.chp_at(start.offset)
+    let found = doc.story(story).text_of(start, end);
+    let p = &doc.story(story).paras[start.para];
+    let chp: CharProps = if start.offset < p.len() {
+        p.chp_of_char(start.offset)
+    } else {
+        p.chp_at(start.offset)
+    };
+    let mut at = doc.delete(story, start, end);
+    let mut first_text = true;
+    for piece in &rep.pieces {
+        at = match piece {
+            Piece::Text(t) => {
+                let t = if !match_case && first_text {
+                    match_capitals(&found, t)
+                } else {
+                    t.clone()
+                };
+                first_text = false;
+                doc.insert_text(story, at, &t, chp)
+            }
+            Piece::Para => doc.split_paragraph(story, at),
+            Piece::Clipboard => match clip {
+                Some(f) => doc.insert_fragment(story, at, f),
+                None => at,
+            },
         };
-        let mut at = doc.delete(story, start, end);
-        let mut first_text = true;
-        for piece in &rep.pieces {
-            at = match piece {
-                Piece::Text(t) => {
-                    let t = if !match_case && first_text {
-                        match_capitals(&found, t)
-                    } else {
-                        t.clone()
-                    };
-                    first_text = false;
-                    doc.insert_text(story, at, &t, chp)
-                }
-                Piece::Para => doc.split_paragraph(story, at),
-                Piece::Clipboard => match clip {
-                    Some(f) => doc.insert_fragment(story, at, f),
-                    None => at,
-                },
-            };
-        }
-        out_end = at;
     }
-    if !rep.chp.is_empty() {
-        doc.format_chars(story, start, out_end, |c| rep.chp.apply(c));
-    }
-    if !rep.pap.is_empty() {
-        doc.format_paras(story, start.para, out_end.para, |p| rep.pap.apply(p));
-    }
+    let out_end = at;
     (start, out_end)
 }
 
@@ -821,7 +576,7 @@ mod tests {
     }
 
     fn pat(text: &str) -> Pattern {
-        Pattern::new(text, false, false, CharSpec::default(), ParaSpec::default())
+        Pattern::new(text, false, false)
     }
 
     fn p(para: usize, offset: usize) -> Position {
@@ -845,8 +600,8 @@ mod tests {
 
     #[test]
     fn line_ends_in_find_what_and_replace_with_are_paragraph_marks() {
-        let spec = |text: &str| Replacement::new(text, CharSpec::default(), ParaSpec::default());
-        let x = Pattern::new("x", false, false, CharSpec::default(), ParaSpec::default());
+        let spec = |text: &str| Replacement::new(text);
+        let x = Pattern::new("x", false, false);
         for text in ["a\nb", "a\r\nb", "a\rb", "a\u{2029}b", "a^pb"] {
             let mut d = doc(&["one x two x three"]);
             let len = d.main.paras[0].len();
@@ -882,7 +637,7 @@ mod tests {
         // Find What reads them the same way.
         let d = doc(&["first", "second"]);
         for text in ["t\ns", "t\r\ns", "t\rs", "t\u{2029}s", "t^ps"] {
-            let pat = Pattern::new(text, false, false, CharSpec::default(), ParaSpec::default());
+            let pat = Pattern::new(text, false, false);
             assert_eq!(
                 find(&d.main, &pat, p(0, 0), Direction::Down),
                 Some((p(0, 4), p(1, 1))),
@@ -898,8 +653,7 @@ mod tests {
         d.author = "Ada".into();
         d.delete(StoryId::Main, p(0, 3), p(0, 6));
         let find_in = |d: &Document, text: &str, skip: bool, whole: bool| {
-            let mut pat =
-                Pattern::new(text, false, whole, CharSpec::default(), ParaSpec::default());
+            let mut pat = Pattern::new(text, false, whole);
             pat.skip_deleted = skip;
             find(&d.main, &pat, p(0, 0), Direction::Down)
         };
@@ -916,15 +670,9 @@ mod tests {
         assert_eq!(find_in(&d, "word", false, true), None);
         // Replacing across the hidden text, while tracking, leaves only
         // the replacement once the changes are accepted.
-        let mut pat = Pattern::new(
-            "an word",
-            false,
-            false,
-            CharSpec::default(),
-            ParaSpec::default(),
-        );
+        let mut pat = Pattern::new("an word", false, false);
         pat.skip_deleted = true;
-        let rep = Replacement::new("one", CharSpec::default(), ParaSpec::default());
+        let rep = Replacement::new("one");
         let end = d.main.end();
         assert_eq!(
             replace_all(&mut d, StoryId::Main, &pat, &rep, p(0, 0), end, None),
@@ -974,43 +722,13 @@ mod tests {
     }
 
     #[test]
-    fn finds_a_format() {
-        let mut d = doc(&["plain bold plain"]);
-        d.format_chars(StoryId::Main, p(0, 6), p(0, 10), |c| c.bold = true);
-        let bold = Pattern::new(
-            "",
-            false,
-            false,
-            CharSpec {
-                bold: Some(true),
-                ..Default::default()
-            },
-            ParaSpec::default(),
-        );
-        assert_eq!(
-            find(&d.main, &bold, p(0, 0), Direction::Down),
-            Some((p(0, 6), p(0, 10)))
-        );
-        assert_eq!(
-            find(&d.main, &bold, p(0, 16), Direction::Up),
-            Some((p(0, 6), p(0, 10)))
-        );
-        let mut plain_l = pat("l");
-        plain_l.chp.bold = Some(true);
-        assert_eq!(
-            find(&d.main, &plain_l, p(0, 0), Direction::Down),
-            Some((p(0, 8), p(0, 9)))
-        );
-    }
-
-    #[test]
     fn replaces_keeping_capitals() {
         let mut d = doc(&["Cat and cat and CAT"]);
         let n = replace_all(
             &mut d,
             StoryId::Main,
             &pat("cat"),
-            &Replacement::new("dog", CharSpec::default(), ParaSpec::default()),
+            &Replacement::new("dog"),
             p(0, 0),
             p(0, 19),
             None,
@@ -1027,7 +745,7 @@ mod tests {
             &mut d,
             StoryId::Main,
             &pat(","),
-            &Replacement::new("^p", CharSpec::default(), ParaSpec::default()),
+            &Replacement::new("^p"),
             p(0, 0),
             end,
             None,
@@ -1039,7 +757,7 @@ mod tests {
             &mut d,
             StoryId::Main,
             &pat("^p"),
-            &Replacement::new("^t", CharSpec::default(), ParaSpec::default()),
+            &Replacement::new("^t"),
             p(0, 0),
             p(2, 1),
             None,
@@ -1055,7 +773,7 @@ mod tests {
             &mut d,
             StoryId::Main,
             &pat("x"),
-            &Replacement::new("yy", CharSpec::default(), ParaSpec::default()),
+            &Replacement::new("yy"),
             p(0, 2),
             p(0, 5),
             None,
@@ -1065,35 +783,9 @@ mod tests {
     }
 
     #[test]
-    fn replace_format_only() {
-        let mut d = doc(&["one two"]);
-        let rep = Replacement::new(
-            "",
-            CharSpec {
-                italic: Some(true),
-                ..Default::default()
-            },
-            ParaSpec::default(),
-        );
-        let n = replace_all(
-            &mut d,
-            StoryId::Main,
-            &pat("two"),
-            &rep,
-            p(0, 0),
-            p(0, 7),
-            None,
-        );
-        assert_eq!(n, 1);
-        assert_eq!(d.main.paras[0].text, "one two");
-        assert!(d.main.paras[0].chp_of_char(4).italic);
-        assert!(!d.main.paras[0].chp_of_char(0).italic);
-    }
-
-    #[test]
     fn deleting_matches() {
         let mut d = doc(&["a-b-c"]);
-        let rep = Replacement::new("", CharSpec::default(), ParaSpec::default());
+        let rep = Replacement::new("");
         assert!(rep.deletes());
         let n = replace_all(
             &mut d,
@@ -1118,7 +810,7 @@ mod tests {
             objects: Vec::new(),
             notes: Vec::new(),
         };
-        let rep = Replacement::new("<^c>", CharSpec::default(), ParaSpec::default());
+        let rep = Replacement::new("<^c>");
         replace_all(
             &mut d,
             StoryId::Main,

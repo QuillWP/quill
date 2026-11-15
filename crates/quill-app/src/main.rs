@@ -60,6 +60,8 @@ mod mac_print;
 #[cfg(target_os = "macos")]
 mod mac_save;
 #[cfg(target_os = "macos")]
+mod mac_speech;
+#[cfg(target_os = "macos")]
 mod mac_text_input;
 #[cfg(target_os = "macos")]
 mod mac_widgets;

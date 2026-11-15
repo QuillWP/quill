@@ -11,6 +11,18 @@ use quill_core::tools::{self, Case, Renumber};
 const BACK: usize = 3;
 
 impl DocView {
+    /// The selection for Read Aloud, or the whole main text at a caret.
+    #[cfg(target_os = "macos")]
+    pub fn read_aloud_text(&self) -> String {
+        let whole = (self.doc.main.start(), self.doc.main.end());
+        let (start, end) = if self.sel.is_empty() {
+            whole
+        } else {
+            self.sel.range()
+        };
+        self.doc.copy(MAIN, start, end).plain_text()
+    }
+
     /// The first and last paragraph the selection covers. A selection that
     /// ends at the very start of a paragraph does not include it.
     pub fn selected_paras(&self) -> (usize, usize) {

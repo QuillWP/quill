@@ -160,6 +160,16 @@ impl App {
             }
             (Action::About, _) => about(),
             (Action::Licenses, _) => licenses(),
+            #[cfg(target_os = "macos")]
+            (Action::ReadAloud, Some(id)) => {
+                if let Some(i) = self.index(id) {
+                    self.take_doc(i);
+                    let text = self.windows[i].1.st.main_view().read_aloud_text();
+                    crate::mac_speech::speak(&text);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            (Action::StopReading, _) => crate::mac_speech::stop(),
             (Action::Recent(index), _) => {
                 if let Some(path) = self.recent.get(index).cloned() {
                     self.open_files(el, &[path]);
@@ -208,10 +218,23 @@ impl App {
                 if let Some(fonts) = self.fonts.as_mut() {
                     w.st.view.update_layout(fonts);
                 }
-                w.st.view.scroll_to_caret();
+                if !opens_preferences(&effect) {
+                    w.st.view.scroll_to_caret();
+                }
                 w.window.request_redraw();
                 self.handle_effect(el, id, effect);
             }
         }
     }
+}
+
+/// Settings, Default Font and Toolbar Preferences change nothing in the
+/// document, so opening one must not pull a scrolled view back to the caret.
+pub(super) fn opens_preferences(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Dialog(
+            DialogId::Preferences | DialogId::DefaultFont | DialogId::ToolbarPreferences
+        )
+    )
 }

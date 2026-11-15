@@ -220,7 +220,11 @@ impl App {
             if let Some(fonts) = self.fonts.as_mut() {
                 w.st.view.update_layout(fonts);
             }
-            w.st.view.scroll_to_caret();
+            // Cmd-comma opens Settings from the keyboard; like the menu, it
+            // leaves a scrolled view alone.
+            if !super::commands::opens_preferences(&effect) {
+                w.st.view.scroll_to_caret();
+            }
         }
         w.window.request_redraw();
         self.handle_effect(el, id, effect);

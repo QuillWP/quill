@@ -882,11 +882,10 @@ fn describe_component(
             "Border".into()
         });
     }
-    if (pap.shading, pap.shading_color) != (bp.shading, bp.shading_color) {
+    if pap.shading_color != bp.shading_color {
         parts.push(match pap.shading_color {
             Some(color) => format!("Shading: #{:06X}", color.0),
-            None if pap.shading == 0 => "Shading: None".into(),
-            None => format!("Shading: {}%", pap.shading as f32 / 10.0),
+            None => "Shading: None".into(),
         });
     }
     if !paragraph {

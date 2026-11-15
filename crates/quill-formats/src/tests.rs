@@ -780,7 +780,7 @@ fn docx_keeps_section_and_document_settings() {
     doc.format_paras(StoryId::Main, 0, 0, |p| {
         p.borders.top.style = quill_core::props::BorderStyle::Double;
         p.borders.top.space = 80;
-        p.shading = 200;
+        p.shading_color = Some(quill_core::Rgb(0xCCCCCC));
     });
     let back = super::docx::read(&super::docx::write(&doc, 0)).unwrap();
     assert_eq!(back.section, doc.section);
@@ -788,7 +788,7 @@ fn docx_keeps_section_and_document_settings() {
     let p = &back.main.paras[0].pap;
     assert_eq!(p.borders.top.style, quill_core::props::BorderStyle::Double);
     assert_eq!(p.borders.top.space, 80);
-    assert_eq!(p.shading, 200);
+    assert_eq!(p.shading_color, Some(quill_core::Rgb(0xCCCCCC)));
 }
 
 #[test]
@@ -851,7 +851,7 @@ fn docx_keeps_table_layout() {
     let mut p1 = row_props(&doc.main.paras, &r1, 8640);
     p1.cells[1].width = 3000;
     p1.cells[0].borders.top.style = BorderStyle::Single;
-    p1.cells[0].shading = 200;
+    p1.cells[0].shading_color = Some(quill_core::Rgb(0xCCCCCC));
     p1.height = RowHeight::AtLeast(400);
     p1.indent = 360;
     doc.set_row(StoryId::Main, r1.end, p1.clone());
@@ -872,7 +872,7 @@ fn docx_keeps_table_layout() {
         [2000, 3000, 2000]
     );
     assert_eq!(q1.cells[0].borders.top.style, BorderStyle::Single);
-    assert_eq!(q1.cells[0].shading, 200);
+    assert_eq!(q1.cells[0].shading_color, Some(quill_core::Rgb(0xCCCCCC)));
     assert_eq!(q1.height, RowHeight::AtLeast(400));
     assert_eq!(q1.indent, 360);
     assert_eq!(q1.gap, TABLE_GAP);
@@ -1266,4 +1266,46 @@ fn annotations_survive_docx_and_rtf() {
             "Some text to annotate"
         );
     }
+}
+
+#[test]
+fn a_picture_nothing_uses_any_more_does_not_stop_a_save() {
+    let mut doc = text::from_plain_text("Before after");
+    let chp = doc.main.paras[0].chp_of_char(0);
+    // The first picture is deleted but stays in the object list, as it does
+    // after any delete that Undo could still bring back.
+    let pic = quill_core::Picture::from_bytes(png()).unwrap();
+    doc.insert_picture(
+        quill_core::StoryId::Main,
+        quill_core::Position::new(0, 3),
+        pic,
+        chp,
+    );
+    let o = quill_core::para::chars::OBJECT.len_utf8();
+    doc.delete(
+        quill_core::StoryId::Main,
+        quill_core::Position::new(0, 3),
+        quill_core::Position::new(0, 3 + o),
+    );
+    // A second picture and a footnote after it. Saving leaves the unused
+    // picture out, so the second one is renumbered in the file.
+    let mut data = png();
+    data.extend_from_slice(b" second");
+    let pic = quill_core::Picture::from_bytes(data).unwrap();
+    doc.insert_picture(
+        quill_core::StoryId::Main,
+        quill_core::Position::new(0, 3),
+        pic,
+        chp,
+    );
+    let w = quill_core::para::chars::OBJECT.len_utf8();
+    doc.insert_note(quill_core::Position::new(0, 3 + w), chp, None);
+    assert_eq!(doc.objects.len(), 2);
+    assert!(native_check(&doc).is_none());
+    let path =
+        std::env::temp_dir().join(format!("quill-unused-picture-{}.qwp", std::process::id()));
+    save(&doc, &path, Format::Quill).unwrap();
+    let back = load(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(back.objects.len(), 1);
 }

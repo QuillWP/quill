@@ -159,7 +159,7 @@ fn paragraph_css(p: &ParaProps) -> String {
         if p.keep_with_next { "avoid" } else { "auto" },
         if p.keep_together { "avoid" } else { "auto" }
     );
-    if let Some(color) = quill_core::props::shading_fill(p.shading, p.shading_color) {
+    if let Some(color) = p.shading_color {
         let _ = write!(out, "background-color:#{:06x};", color.0);
     } else {
         out.push_str("background-color:transparent;");
@@ -216,7 +216,7 @@ fn cell_css(cell: &quill_core::props::CellProps) -> String {
             let _ = write!(out, ";border-{edge}:{}", border_css(&line));
         }
     }
-    if let Some(color) = quill_core::props::shading_fill(cell.shading, cell.shading_color) {
+    if let Some(color) = cell.shading_color {
         let _ = write!(out, ";background-color:#{:06x}", color.0);
     }
     out

@@ -40,7 +40,7 @@ fn cell_shading_and_borders_survive_docx_and_rtf() {
         ..Default::default()
     };
     for c in &mut props.cells {
-        c.shading = 500;
+        c.shading_color = Some(quill_core::Rgb(0x808080));
         c.borders.top = line;
     }
     doc.set_row(StoryId::Main, row.end, props);
@@ -49,7 +49,7 @@ fn cell_shading_and_borders_survive_docx_and_rtf() {
     for back in [docx, rtf] {
         let row = quill_core::table::row_at(&back.main.paras, 0).unwrap();
         let p = quill_core::table::row_props(&back.main.paras, &row, 6000);
-        assert_eq!(p.cells[0].shading, 500);
+        assert_eq!(p.cells[0].shading_color, Some(quill_core::Rgb(0x808080)));
         assert_eq!(p.cells[0].borders.top.style, BorderStyle::Thick);
     }
 }
@@ -73,9 +73,8 @@ fn odt_cells_read_background_and_border() {
     let row = quill_core::table::row_at(&d.main.paras, 0).unwrap();
     let p = quill_core::table::row_props(&d.main.paras, &row, 6000);
     assert_eq!(p.cells[0].shading_color, Some(quill_core::Rgb(0xFF0000)));
-    assert_eq!(p.cells[0].shading, 0);
     assert_eq!(p.cells[0].borders.top.style, BorderStyle::Single);
-    assert_eq!(p.cells[1].shading, 0);
+    assert_eq!(p.cells[1].shading_color, None);
     assert_eq!(p.cells[1].borders.top.style, BorderStyle::None);
 }
 
@@ -124,7 +123,7 @@ fn mixed_cell_table() -> Document {
         ..Default::default()
     };
     let c = &mut props.cells[0];
-    c.shading = 500;
+    c.shading_color = Some(quill_core::Rgb(0x808080));
     c.valign = quill_core::props::VAlign::Bottom;
     c.borders.top = thick;
     c.borders.bottom = thick;
@@ -141,15 +140,11 @@ fn odt_export_keeps_cell_borders_shading_and_alignment() {
     let back = odt_read::read(&quill_formats::odt::write(&doc, 0)).unwrap();
     let row = quill_core::table::row_at(&back.main.paras, 0).unwrap();
     let p = quill_core::table::row_props(&back.main.paras, &row, 6000);
-    // ODT has no percentages, so 50% comes back as the gray it looks like.
-    assert_eq!(
-        quill_core::props::shading_fill(p.cells[0].shading, p.cells[0].shading_color),
-        Some(quill_core::Rgb(0x808080))
-    );
+    assert_eq!(p.cells[0].shading_color, Some(quill_core::Rgb(0x808080)));
     assert_eq!(p.cells[0].borders.top.style, BorderStyle::Thick);
     assert_eq!(p.cells[0].borders.left.style, BorderStyle::Thick);
     assert_eq!(p.cells[0].valign, quill_core::props::VAlign::Bottom);
-    assert_eq!(p.cells[1].shading, 0);
+    assert_eq!(p.cells[1].shading_color, None);
     assert!(p.cells[1].borders.is_none());
 }
 

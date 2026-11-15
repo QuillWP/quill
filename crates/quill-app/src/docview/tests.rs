@@ -1,5 +1,17 @@
 use super::*;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn read_aloud_uses_the_selection_or_the_whole_document() {
+    let mut view = DocView::new(
+        quill_core::text::from_plain_text("First line\nSecond line"),
+        "Speech".into(),
+    );
+    assert_eq!(view.read_aloud_text(), "First line\nSecond line");
+    view.set_selection(Selection::new(Position::new(0, 6), Position::new(1, 6)));
+    assert_eq!(view.read_aloud_text(), "line\nSecond");
+}
+
 #[test]
 fn redo_has_its_own_command_and_repeat_is_only_repeat() {
     let mut clip = Clipboard::new();
@@ -1453,4 +1465,54 @@ fn a_row_taller_than_the_page_carries_on_over_the_next() {
     for b in &v.bands {
         assert!(b.end - b.y <= height + 0.5, "{b:?} runs off its page");
     }
+}
+
+#[test]
+fn return_at_the_start_of_a_table_that_begins_the_document_opens_a_line_above_it() {
+    let mut clip = Clipboard::new();
+    let mut doc = Document::new();
+    doc.begin("t", Default::default());
+    doc.insert_table(MAIN, Position::new(0, 0), 2, 2, 4000);
+    doc.commit(Default::default());
+    let mut view = DocView::new(doc, "t".into());
+    view.sel = Selection::caret(Position::new(0, 0));
+    assert!(view.doc.main.paras[0].pap.in_table);
+    let count = view.doc.main.paras.len();
+
+    view.exec(Cmd::NewParagraph, false, &mut clip);
+    assert_eq!(view.doc.main.paras.len(), count + 1);
+    assert!(
+        !view.doc.main.paras[0].pap.in_table,
+        "a plain line now leads"
+    );
+    assert!(view.doc.main.paras[1].pap.in_table, "the table follows it");
+    assert_eq!(view.sel, Selection::caret(Position::new(0, 0)));
+    // Typing goes on that line, not in the table.
+    view.type_text("Title");
+    assert_eq!(view.doc.main.paras[0].text, "Title");
+    assert!(view.doc.main.paras[1].text.is_empty());
+
+    // Undo takes the typing and then the line away.
+    view.exec(Cmd::Undo, false, &mut clip);
+    view.exec(Cmd::Undo, false, &mut clip);
+    assert_eq!(view.doc.main.paras.len(), count);
+    assert!(view.doc.main.paras[0].pap.in_table);
+}
+
+#[test]
+fn return_elsewhere_in_a_first_table_still_splits_the_cell() {
+    let mut clip = Clipboard::new();
+    let mut doc = Document::new();
+    doc.begin("t", Default::default());
+    doc.insert_table(MAIN, Position::new(0, 0), 2, 2, 4000);
+    doc.commit(Default::default());
+    let mut view = DocView::new(doc, "t".into());
+    view.sel = Selection::caret(Position::new(0, 0));
+    view.type_text("ab");
+    view.sel = Selection::caret(Position::new(0, 1));
+    let count = view.doc.main.paras.len();
+    view.exec(Cmd::NewParagraph, false, &mut clip);
+    assert_eq!(view.doc.main.paras.len(), count + 1);
+    assert!(view.doc.main.paras[0].pap.in_table);
+    assert_eq!(view.doc.main.paras[0].text, "a");
 }

@@ -211,10 +211,10 @@ fn each_para(fragment: &mut Fragment, f: &mut impl FnMut(&mut Paragraph)) {
 mod tests {
     use super::*;
     use quill_core::Selection;
+    use quill_core::character_styles::CharacterFormat;
 
     #[test]
     fn character_style_name_conflicts_preserve_both_definitions_and_reuse_pasted_styles() {
-        use quill_core::character_styles::CharacterFormat;
         let mut source = quill_core::text::from_plain_text("Styled");
         let props = CharProps {
             italic: true,
@@ -260,6 +260,44 @@ mod tests {
         target.commit(Selection::default());
         target.undo();
         assert_eq!(target.styles.characters.len(), 1);
+    }
+
+    /// The 2026-11-07 clipboard fuzz run saved this input after a deadly
+    /// signal. Current code handles it; keep the original artifact (copied from the
+    /// ignored fuzz run folder) in the ordinary test suite so that the old failure cannot return unnoticed.
+    #[test]
+    fn saved_clipboard_fuzz_artifact_pastes_and_undoes() {
+        let input = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/clipboard-crash-20261107.rtf.bin"
+        ));
+        let (&choice, body) = input.split_first().unwrap();
+        assert_eq!(choice & 1, 0, "the saved input is RTF");
+        let mut source = quill_formats::rtf::read(body).unwrap();
+        source.keep_in_bounds();
+        let mut rich = RichContent::from_document(source, None);
+        let replace = choice & 2 != 0;
+        rich.resolve_missing_fonts("Georgia", |name| name.len() % 3 != 0, |_, _| Some(replace))
+            .unwrap();
+
+        let mut target = quill_core::text::from_plain_text("Existing text");
+        let props = CharProps {
+            bold: true,
+            ..Default::default()
+        };
+        for name in ["Emphasis", "Hyperlink", "Code"] {
+            target.add_character_style(name, CharacterFormat::new(props, 1 << 2));
+        }
+        target.forget_history();
+        let selection = Selection::caret(Position::new(0, 4));
+        target.begin("Paste", selection);
+        let fragment = rich.prepare(&mut target);
+        target.insert_fragment(StoryId::Main, Position::new(0, 4), &fragment);
+        target.commit(selection);
+        target.undo();
+
+        assert_eq!(target.main.paras[0].text, "Existing text");
+        assert_eq!(target.styles.characters.len(), 3);
     }
 
     #[test]

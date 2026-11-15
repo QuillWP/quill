@@ -598,6 +598,7 @@ impl App {
         let w = &mut self.windows[i].1;
         record_saved_file(w.st.main_view_mut(), &path, chosen);
         crate::recovery::remove(w.recovery.take());
+        crate::recovery::discard(w.recovery_opening.take());
         w.window.request_redraw();
         self.retitle();
         crate::recent::note(&mut self.recent, &path);

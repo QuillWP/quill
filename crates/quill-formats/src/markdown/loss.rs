@@ -2,7 +2,7 @@
 //! warning Quill shows first. A document read from Markdown reports
 //! nothing: it only has what Markdown can carry.
 
-use super::read::{CODE_SHADING, LIST_INDENT, QUOTE_GAP, QUOTE_INDENT};
+use super::read::{CODE_FILL, LIST_INDENT, QUOTE_GAP, QUOTE_INDENT};
 use super::{is_mono, list_label_of};
 use quill_core::Document;
 use quill_core::para::{Mark, chars};
@@ -118,9 +118,10 @@ pub fn losses(doc: &Document, paper: &quill_core::DocumentProps) -> Vec<&'static
                     || row.height != RowHeight::Auto
                     || row.indent != 0
                     || row.align != Align::Left
-                    || row.cells.iter().any(|c| {
-                        c.shading > 0 || c.shading_color.is_some() || c.valign != VAlign::Top
-                    })
+                    || row
+                        .cells
+                        .iter()
+                        .any(|c| c.shading_color.is_some() || c.valign != VAlign::Top)
                 {
                     note(&mut found, TABLE_LAYOUT);
                 }
@@ -165,7 +166,8 @@ pub fn losses(doc: &Document, paper: &quill_core::DocumentProps) -> Vec<&'static
             (p.pap.borders.left.space / QUOTE_GAP).clamp(1, 8)
         };
         let rule = p.text.trim().is_empty() && p.pap.borders.bottom.style != BorderStyle::None;
-        let code = p.pap.shading >= CODE_SHADING && is_mono(doc.font_name(p.chp_at(0).font));
+        let code =
+            p.pap.shading_color == Some(CODE_FILL) && is_mono(doc.font_name(p.chp_at(0).font));
         let b = &p.pap.borders;
         let edges = [b.top, b.right, b.bottom, b.between];
         if b.shadow
@@ -173,8 +175,7 @@ pub fn losses(doc: &Document, paper: &quill_core::DocumentProps) -> Vec<&'static
                 .iter()
                 .enumerate()
                 .any(|(k, e)| e.style != BorderStyle::None && !(rule && k == 2))
-            || p.pap.shading_color.is_some()
-            || (p.pap.shading > 0 && !code)
+            || (p.pap.shading_color.is_some() && !code)
         {
             note(&mut found, BORDERS);
         }

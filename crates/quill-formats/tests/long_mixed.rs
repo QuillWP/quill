@@ -189,7 +189,7 @@ impl Builder {
             if r == 0 {
                 let mut p = row_props(&self.doc.main.paras, &rw, 8640);
                 for cell in &mut p.cells {
-                    cell.shading = 150;
+                    cell.shading_color = Some(quill_core::Rgb(0xD9D9D9));
                     cell.borders.bottom.style = BorderStyle::Single;
                 }
                 self.doc.set_row(StoryId::Main, rw.end, p);

@@ -1730,7 +1730,7 @@ dependencies = [
 
 [[package]]
 name = "quill-fuzz"
-version = "0.22.0"
+version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "miniz_oxide 0.9.1",

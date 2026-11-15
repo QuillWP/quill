@@ -609,6 +609,8 @@ impl WinState {
             Action::None | Action::Window(_) => {}
             Action::About => return Effect::About,
             Action::Licenses => return Effect::Licenses,
+            #[cfg(target_os = "macos")]
+            Action::ReadAloud | Action::StopReading => {}
             Action::Recent(index) => return Effect::OpenRecent(index),
             Action::RemoveRecent(index) => return Effect::RemoveRecent(index),
             Action::ClearRecent => return Effect::ClearRecent,
@@ -1266,6 +1268,13 @@ impl WinState {
         (Effect::None, None)
     }
 
+    /// Whether a window point (in the pointer's own units) is inside the
+    /// window.
+    fn point_in_window(&self, x: f32, y: f32) -> bool {
+        let (cx, cy) = (x / self.ui, y / self.ui);
+        cx >= 0.0 && cy >= 0.0 && cx < self.width && cy < self.height
+    }
+
     /// Whether a window point is on the grow box in the bottom-right corner.
     fn in_grow_box(&self, x: f32, y: f32) -> bool {
         let (cx, cy) = (x / self.ui, y / self.ui);
@@ -1420,6 +1429,8 @@ struct DocWindow {
     port: Port,
     /// Atomic native-format autosave for the document currently held here.
     recovery: Option<PathBuf>,
+    /// A recovered document stays quarantined until its first successful draw.
+    recovery_opening: Option<crate::recovery::Opening>,
     #[cfg(target_os = "macos")]
     scrollbars: Option<crate::mac_widgets::MacScrollbars>,
 }
@@ -1789,6 +1800,7 @@ impl App {
         };
         hand_over(&mut a.st, &mut a.port, &mut b.st, &mut b.port);
         std::mem::swap(&mut a.recovery, &mut b.recovery);
+        std::mem::swap(&mut a.recovery_opening, &mut b.recovery_opening);
         a.holds = false;
         b.holds = true;
     }
@@ -1910,6 +1922,7 @@ impl App {
         for (_, w) in &self.windows {
             if let Some(p) = &w.st.main_view().path
                 && w.recovery.is_none()
+                && w.recovery_opening.is_none()
                 && !paths.contains(p)
             {
                 paths.push(p.clone());
@@ -1988,6 +2001,7 @@ impl App {
                     return false;
                 }
                 crate::recovery::remove(self.windows[i].1.recovery.take());
+                crate::recovery::discard(self.windows[i].1.recovery_opening.take());
                 self.remember_frame(i);
                 self.windows.retain(|(w, _)| *w != id);
                 true
@@ -2110,6 +2124,7 @@ impl App {
                 holds: false,
                 port: Port::default(),
                 recovery: None,
+                recovery_opening: None,
                 #[cfg(target_os = "macos")]
                 scrollbars,
             },
@@ -2273,7 +2288,21 @@ impl App {
         w.st.ui = ui_scale(scale);
         let mut c = Canvas::new(&mut buffer, size.width, size.height, scale);
         w.st.paint(&mut c, fonts, &mut self.cache, &env, w.focused);
-        let _ = buffer.present();
+        if buffer.present().is_err() {
+            return;
+        }
+        // Parsing alone is not enough to trust a recovered document: layout
+        // and drawing also consume its contents. Only now may it return to
+        // the automatic recovery queue.
+        if let Some(opening) = w.recovery_opening.as_ref() {
+            match crate::recovery::finish(opening) {
+                Ok(path) => {
+                    w.recovery = Some(path);
+                    w.recovery_opening = None;
+                }
+                Err(e) => eprintln!("quill: {e}"),
+            }
+        }
         // An input method shows its choices by the insertion point.
         if w.focused {
             let (x, y, h) = w.st.view.caret_in_window();
@@ -2573,7 +2602,7 @@ impl ApplicationHandler<UserEvent> for App {
             for r in crate::recovery::load_all() {
                 self.new_window(el, r.doc, Some(format!("{}{RECOVERED}", r.title)));
                 if let Some((_, window)) = self.windows.last_mut() {
-                    window.recovery = Some(r.path);
+                    window.recovery_opening = Some(r.opening);
                     if let Some(original) = r.original {
                         window.st.main_view_mut().resume_markdown_source(original);
                     }
@@ -2802,7 +2831,11 @@ impl ApplicationHandler<UserEvent> for App {
                 let autosave = crate::settings::with(|s| s.autosave_secs) > 0;
                 let mut serial = self.recovery_serial;
                 for (_, w) in &mut self.windows {
-                    if autosave && (w.group == 0 || w.holds) && w.st.main_view().doc.is_modified() {
+                    if autosave
+                        && (w.group == 0 || w.holds)
+                        && w.recovery_opening.is_none()
+                        && w.st.main_view().doc.is_modified()
+                    {
                         serial = serial.wrapping_add(1);
                         let (doc, original) = w.st.main_view().recovery_documents();
                         match crate::recovery::save(
@@ -2940,7 +2973,14 @@ impl ApplicationHandler<UserEvent> for App {
                     w.st.dialog_mouse = false;
                 }
                 w.focused = f;
-                if !f {
+                // A menu closes when the window really loses focus. On
+                // Linux the window reports a loss and a gain around every
+                // mouse press, so a menu was closed just before the click
+                // on its item arrived and the item did nothing. There, a
+                // loss with the pointer still inside the window is not one.
+                let (px, py) = w.cursor;
+                let blip = cfg!(target_os = "linux") && w.st.point_in_window(px, py);
+                if !f && !blip {
                     w.st.menu = None;
                 }
                 w.window.request_redraw();

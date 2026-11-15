@@ -135,30 +135,37 @@ impl Palette {
     }
 }
 
-/// The rows the tab shows. Paragraph styles come first: "No Style", Normal
-/// and the rest sorted by name. Then the character styles: "No Style" and
-/// the rest sorted by name.
+/// The rows the tab shows. Each tab starts with its fixed rows: for
+/// paragraph styles "No Style", Clear Formatting and Normal, for character
+/// styles "No Style" and Clear Formatting. The named styles follow, sorted
+/// by name. The All tab has only the paragraph fixed rows, and the two kinds
+/// of style share one list after them, so they are sorted together.
 pub fn entries(doc: &Document, tab: Tab) -> Vec<Entry> {
     let mut rows = Vec::new();
+    let mut named: Vec<(String, Entry)> = Vec::new();
     if tab != Tab::Character {
-        let mut ids: Vec<StyleId> = (1..doc.styles.styles.len() as StyleId).collect();
-        ids.sort_by_key(|&id| doc.styles.get(id).display_name().to_lowercase());
         rows.push(Entry::NoParagraph);
         rows.push(Entry::ClearParagraph);
         rows.push(Entry::Paragraph(0));
-        rows.extend(ids.into_iter().map(Entry::Paragraph));
+        named.extend((1..doc.styles.styles.len() as StyleId).map(|id| {
+            let e = Entry::Paragraph(id);
+            (name(doc, e).to_lowercase(), e)
+        }));
     }
     if tab != Tab::Paragraph {
-        let mut ids: Vec<u16> = (1..=doc.styles.characters.len() as u16).collect();
-        ids.sort_by_key(|&id| {
-            doc.styles
-                .character(id)
-                .map_or(String::new(), |s| s.name.to_lowercase())
-        });
-        rows.push(Entry::Character(0));
-        rows.push(Entry::ClearCharacter);
-        rows.extend(ids.into_iter().map(Entry::Character));
+        if tab == Tab::Character {
+            rows.push(Entry::Character(0));
+            rows.push(Entry::ClearCharacter);
+        }
+        named.extend((1..=doc.styles.characters.len() as u16).map(|id| {
+            let e = Entry::Character(id);
+            (name(doc, e).to_lowercase(), e)
+        }));
     }
+    // A stable sort keeps a paragraph style ahead of a character style
+    // with the same name.
+    named.sort_by(|a, b| a.0.cmp(&b.0));
+    rows.extend(named.into_iter().map(|(_, e)| e));
     rows
 }
 
@@ -576,10 +583,21 @@ mod tests {
                 .iter()
                 .all(|e| matches!(e, Entry::Character(_) | Entry::ClearCharacter))
         );
-        assert_eq!(all.len(), paragraph.len() + character.len());
-        // All is the paragraph styles followed by the character styles.
-        assert_eq!(all[..paragraph.len()], paragraph[..]);
-        assert_eq!(all[paragraph.len()..], character[..]);
+        // All has one "No Style" and one Clear Formatting, the paragraph ones.
+        assert_eq!(all.len(), paragraph.len() + character.len() - 2);
+        assert!(!all.contains(&Entry::Character(0)));
+        assert!(!all.contains(&Entry::ClearCharacter));
+        // All sorts both kinds of style together after the fixed rows.
+        let names: Vec<String> = all.iter().map(|&e| name(&doc, e)).collect();
+        let sorted = &names[3..];
+        let mut want = sorted.to_vec();
+        want.sort_by_key(|n| n.to_lowercase());
+        assert_eq!(sorted, &want[..]);
+        assert!(sorted.iter().any(|n| n == "Accent"));
+        assert!(sorted.iter().any(|n| n == "Heading 1"));
+        let accent = sorted.iter().position(|n| n == "Accent").unwrap();
+        let heading = sorted.iter().position(|n| n == "Heading 1").unwrap();
+        assert!(accent < heading);
         // Normal and No Style lead their groups.
         assert_eq!(paragraph[0], Entry::NoParagraph);
         assert_eq!(paragraph[1], Entry::ClearParagraph);
