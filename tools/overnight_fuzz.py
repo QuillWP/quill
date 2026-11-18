@@ -16,7 +16,7 @@ import time
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = ['character_styles', 'native', 'clipboard', 'docx', 'rtf', 'html', 'odt', 'markdown', 'zip', 'xml', 'images', 'settings', 'glossary', 'merge_data', 'editing']
+TARGETS = ['character_styles', 'native', 'clipboard', 'docx', 'rtf', 'html', 'odt', 'markdown', 'zip', 'xml', 'images', 'settings', 'merge_data', 'editing']
 # Share of the time for the targets that read whole documents; the rest split a quarter.
 DOCUMENT_TARGETS = TARGETS[:8]
 LIMIT = 262144

@@ -47,6 +47,30 @@ impl RichContent {
         missing
     }
 
+    /// The private system fonts (names that start with a dot) an external
+    /// selection uses. They paste as they are, since they are the Mac's own,
+    /// but other systems do not have them, so the person is told.
+    pub fn private_fonts(&self) -> Vec<String> {
+        if !self.external {
+            return Vec::new();
+        }
+        let mut used = BTreeSet::new();
+        let mut fragment = self.fragment.clone();
+        each_para(&mut fragment, &mut |p| {
+            used.extend(p.runs.iter().filter(|r| r.len > 0).map(|r| r.chp.font));
+        });
+        let mut out: Vec<String> = Vec::new();
+        for id in used {
+            if let Some(name) = self.fonts.get(id as usize)
+                && name.starts_with('.')
+                && !out.contains(name)
+            {
+                out.push(name.clone());
+            }
+        }
+        out
+    }
+
     /// Ask before changing the selection. None cancels the entire paste;
     /// false keeps the font names, and true replaces only the missing ones.
     pub fn resolve_missing_fonts(
@@ -388,6 +412,36 @@ mod tests {
             assert_eq!(target.font_name(chp.font), "Garamond");
             assert!(chp.bold);
         }
+    }
+
+    #[test]
+    fn private_system_fonts_are_listed_for_the_paste_warning_and_kept() {
+        let bytes = br"{\rtf1\ansi{\fonttbl{\f0 .SFNS-Regular;}{\f1 Times;}}\f0 One\f1  two}";
+        let doc = quill_formats::rtf::read(bytes).unwrap();
+        let mut rich = RichContent::from_document(doc, None);
+        assert_eq!(rich.private_fonts(), [".SFNS-Regular"]);
+        // They are not "missing": no question about replacing them.
+        let asked = rich
+            .resolve_missing_fonts(
+                "Georgia",
+                |name| name.starts_with('.') || name == "Times",
+                |_, _| panic!("a private font is not missing"),
+            )
+            .unwrap();
+        assert!(asked.is_empty());
+        let mut target = Document::new();
+        let fragment = rich.prepare(&mut target);
+        assert_eq!(
+            target.font_name(fragment.paras[0].chp_of_char(0).font),
+            ".SFNS-Regular"
+        );
+        // Text copied inside Quill is never asked about.
+        let doc = quill_formats::rtf::read(bytes).unwrap();
+        let own = RichContent::new(
+            &doc,
+            doc.copy(StoryId::Main, Position::new(0, 0), Position::new(0, 3)),
+        );
+        assert!(own.private_fonts().is_empty());
     }
 
     #[test]

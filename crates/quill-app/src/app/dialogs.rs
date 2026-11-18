@@ -81,7 +81,6 @@ impl WinState {
                 | DialogId::Grep
                 | DialogId::RegexSearch
                 | DialogId::Sed
-                | DialogId::Glossary
                 | DialogId::ShowClipboard
                 | DialogId::Spelling
                 | DialogId::MergeHelper
@@ -89,7 +88,6 @@ impl WinState {
                 | DialogId::Thesaurus
                 | DialogId::Preferences
                 | DialogId::DefaultFont
-                | DialogId::ToolbarPreferences
                 | DialogId::ReviewChanges
         );
         if modeless {
@@ -135,10 +133,7 @@ impl WinState {
                 Which::RegexSearch(false),
             ),
             DialogId::Sed => (crate::advanced_dialog::sed(&self.view), Which::Sed),
-            DialogId::Glossary => {
-                let (d, st) = crate::glossary::dialog(&self.view);
-                (d, Which::Glossary(st))
-            }
+            DialogId::FontSize => crate::format_dialogs::font_size(&self.view),
             DialogId::WordCount => {
                 let (d, counts) = crate::tool_dialogs::word_count(&self.view);
                 let checks = crate::tool_dialogs::count_checks(&d);
@@ -234,18 +229,6 @@ impl WinState {
                     draft: Box::new(crate::settings::get()),
                 },
             ),
-            DialogId::ToolbarPreferences => (
-                crate::prefs_dialog::preferences(
-                    crate::prefs_dialog::TOOLBAR_PANEL,
-                    env.font_families,
-                ),
-                Which::Preferences {
-                    panel: crate::prefs_dialog::TOOLBAR_PANEL,
-                    families: env.font_families.to_vec(),
-                    original: Box::new(crate::settings::get()),
-                    draft: Box::new(crate::settings::get()),
-                },
-            ),
             DialogId::CharacterStyles => (
                 crate::character_style_dialog::dialog(&self.view),
                 Which::CharacterStyles,
@@ -299,7 +282,6 @@ impl WinState {
             }
         }
         let prefs = matches!(which, Which::Preferences { .. });
-        let delete = has_delete(which);
         let start = if prefs {
             crate::prefs_dialog::box_color(d, anchor)
         } else if let Which::Border(st) = which {
@@ -311,20 +293,16 @@ impl WinState {
             Some(quill_core::props::Rgb(rgb))
         };
         let st = crate::palette::PaletteState::new(start, &self.view.doc);
-        // Preferences' colors are for every document, so Delete is only
-        // for a document's own.
-        d.popout = Some(crate::palette::popout(&st, anchor, delete));
+        d.popout = Some(crate::palette::popout(&st, anchor));
         self.color_pop = Some((anchor, st));
     }
 
     /// Show the pop-out again after its state changed.
     fn refresh_color_popout(&mut self) {
-        let (Some((which, d)), Some((anchor, st))) = (self.dialogs.last_mut(), &self.color_pop)
-        else {
+        let (Some((_, d)), Some((anchor, st))) = (self.dialogs.last_mut(), &self.color_pop) else {
             return;
         };
-        let delete = has_delete(which);
-        d.popout = Some(crate::palette::popout(st, anchor, delete));
+        d.popout = Some(crate::palette::popout(st, anchor));
     }
 
     /// Show color `c` in the box `anchor` and the HTML code beside it.
@@ -373,19 +351,24 @@ impl WinState {
         self.open_color_editor(start, target);
     }
 
-    /// The pop-out's Delete: take one of the document's own colors out of
-    /// the custom row. Text in it needs another color first, so ask.
-    fn color_popout_delete(&mut self) {
-        let Some((_, st)) = &mut self.color_pop else {
-            return;
-        };
-        let Some(c) = crate::palette::deletable(st) else {
-            return;
-        };
+    /// Delete custom color `c`, chosen in any color palette. A color
+    /// Preferences saves goes from Preferences alone, and documents keep it.
+    /// A color the document's text uses asks what to put in its place first,
+    /// and Cancel changes nothing. Any other just leaves the palette.
+    pub(super) fn delete_palette_color(
+        &mut self,
+        c: quill_core::props::Rgb,
+        anchor: &'static str,
+    ) -> Deleted {
+        if crate::palette::is_saved(c) {
+            match self.dialogs.last_mut() {
+                Some((Which::Preferences { .. }, d)) => crate::prefs_dialog::remove_color(d, c),
+                _ => crate::settings::update(|s| s.named_colors.retain(|(rgb, _)| *rgb != c.0)),
+            }
+            return Deleted::Gone;
+        }
         if !crate::palette::uses(&self.view.doc, c) {
-            crate::palette::forget(st, c);
-            self.refresh_color_popout();
-            return;
+            return Deleted::Gone;
         }
         if let Some((_, d)) = self.dialogs.last_mut() {
             d.popout = None;
@@ -404,36 +387,120 @@ impl WinState {
                 ("cancel", "Cancel"),
             ],
         );
-        self.dialogs
-            .push((Which::Alert(format_dialogs::Alert::DeleteColor(c)), d));
+        self.dialogs.push((
+            Which::Alert(format_dialogs::Alert::DeleteColor(c, anchor)),
+            d,
+        ));
+        Deleted::Asked
     }
 
-    /// Delete color `old`: text in it takes `new`, as one step to undo,
-    /// and the Character dialog shows `new` where it showed `old`.
-    fn delete_color(&mut self, old: quill_core::props::Rgb, new: quill_core::props::Rgb) {
-        self.view.replace_color(old, new);
-        crate::palette::drop_edits_of(old);
-        match self.dialogs.last_mut() {
-            Some((Which::Character(base) | Which::StyleCharacter(base), _)) => {
-                if base.color == old {
-                    base.color = new;
-                }
-            }
-            Some((Which::CharacterStyleEdit(_) | Which::Hyperlink(_), _)) => {}
-            _ => return,
+    /// Delete in the standalone Color dialog: the same path as the pop-out's.
+    fn delete_in_palette_dialog(&mut self, c: quill_core::props::Rgb) {
+        if self.delete_palette_color(c, "color") == Deleted::Asked {
+            return;
         }
-        let Some((_, d)) = self.dialogs.last_mut() else {
+        if let Some((Which::Palette(ps), d)) = self.dialogs.last_mut() {
+            crate::palette::forgotten(ps, d, c, &self.view.doc);
+        }
+    }
+
+    /// The pop-out's Delete: the color chosen in its custom row.
+    fn color_popout_delete(&mut self) {
+        let Some((anchor, st)) = &self.color_pop else {
             return;
         };
+        let anchor = *anchor;
+        let Some(c) = crate::palette::deletable(st) else {
+            return;
+        };
+        if self.delete_palette_color(c, anchor) == Deleted::Asked {
+            return;
+        }
+        let Some((_, st)) = &mut self.color_pop else {
+            return;
+        };
+        crate::palette::forget(st, c, &self.view.doc);
+        let now = st.current;
+        self.refresh_color_popout();
+        // The box showed the color just deleted: it shows the one chosen now.
+        if self
+            .dialogs
+            .last()
+            .is_some_and(|(_, d)| d.swatch_rgb(anchor) == Some(c.0))
+        {
+            self.show_chosen_color(anchor, now);
+        }
+    }
+
+    /// Delete color `old` the document uses: text in it takes `new`, as one
+    /// step to undo, and the dialog shows `new` where it showed `old`.
+    fn delete_color(
+        &mut self,
+        old: quill_core::props::Rgb,
+        new: quill_core::props::Rgb,
+        anchor: &'static str,
+    ) {
+        self.view.replace_color(old, new, "Delete Color");
+        self.color_changed_everywhere(old, new);
+        let doc = &self.view.doc;
+        match self.dialogs.last_mut() {
+            Some((Which::Palette(ps), d)) => crate::palette::forgotten(ps, d, old, doc),
+            Some((Which::Preferences { .. } | Which::Border(_), _)) => {
+                self.toggle_color_popout(anchor);
+            }
+            Some((Which::Character(_) | Which::StyleCharacter(_), _))
+            | Some((Which::CharacterStyleEdit(_) | Which::Hyperlink(_), _)) => {
+                // Back to the palette, without the color.
+                self.toggle_color_popout(anchor);
+            }
+            _ => {}
+        }
+    }
+
+    /// Color `old` became `new` in the document: what the open dialog
+    /// compares against and shows follows.
+    fn color_changed_everywhere(
+        &mut self,
+        old: quill_core::props::Rgb,
+        new: quill_core::props::Rgb,
+    ) {
+        crate::palette::drop_edits_of(old);
+        let Some((which, d)) = self.dialogs.last_mut() else {
+            return;
+        };
+        if let Which::Character(base) | Which::StyleCharacter(base) = which
+            && base.color == old
+        {
+            base.color = new;
+        }
         for anchor in ["color", "hover", "visited"] {
             if d.swatch_rgb(anchor) == Some(old.0) {
                 d.set_swatch(anchor, new.0);
                 d.set_label(&format!("{anchor}_hex"), &crate::palette::hex(new));
             }
         }
-        // Back to the palette, without the color.
-        let anchor = self.color_pop.as_ref().map_or("color", |(a, _)| *a);
-        self.toggle_color_popout(anchor);
+    }
+
+    /// Modify color `old` into `new` wherever it is used: in Preferences'
+    /// saved colors, which belong to every document, or in this document.
+    fn modify_color(&mut self, old: quill_core::props::Rgb, new: quill_core::props::Rgb) {
+        if crate::palette::is_saved(old) {
+            match self.dialogs.last_mut() {
+                Some((Which::Preferences { .. }, d)) => {
+                    crate::prefs_dialog::replace_color(d, old, new);
+                }
+                _ => crate::settings::update(|s| {
+                    for (rgb, _) in &mut s.named_colors {
+                        if *rgb == old.0 {
+                            *rgb = new.0;
+                        }
+                    }
+                }),
+            }
+        } else if crate::palette::uses(&self.view.doc, old) {
+            self.view.replace_color(old, new, "Change Color");
+            self.color_changed_everywhere(old, new);
+        }
     }
 
     fn open_color_editor(&mut self, start: quill_core::props::Rgb, target: crate::palette::Target) {
@@ -467,9 +534,18 @@ impl WinState {
             self.view.set_color(color);
             return;
         }
-        if let crate::palette::Target::Instead(old) = target {
-            self.delete_color(old, color);
+        if let crate::palette::Target::Instead(old, anchor) = target {
+            self.delete_color(old, color, anchor);
             return;
+        }
+        // Modify: the color changes wherever it is used.
+        let mut changed_in_text = false;
+        if let crate::palette::Target::Replace(_, old) = target
+            && old != color
+        {
+            changed_in_text =
+                crate::palette::is_saved(old) || crate::palette::uses(&self.view.doc, old);
+            self.modify_color(old, color);
         }
         let anchor = self.color_pop.take().map(|(a, _)| a);
         match self.dialogs.last_mut() {
@@ -490,7 +566,9 @@ impl WinState {
             // From the pop-out beside a color: it becomes the
             // dialog's, and is remembered if the dialog's OK is.
             Some((_, cd)) if cd.swatch_rgb("color").is_some() => {
-                crate::palette::hold_edit(target, color);
+                if !changed_in_text {
+                    crate::palette::hold_edit(target, color);
+                }
                 cd.set_swatch("color", color.0);
                 cd.set_label("color_hex", &crate::palette::hex(color));
             }
@@ -754,16 +832,16 @@ impl WinState {
                             };
                             self.after_search(r, &s);
                         }
-                        format_dialogs::Alert::DeleteColor(c) => {
-                            self.delete_color(c, quill_core::props::Rgb::BLACK);
+                        format_dialogs::Alert::DeleteColor(c, anchor) => {
+                            self.delete_color(c, quill_core::props::Rgb::BLACK, anchor);
                         }
                         format_dialogs::Alert::Info => {}
                     }
                 }
                 Outcome::Button("choose") => {
-                    if let format_dialogs::Alert::DeleteColor(c) = *alert {
+                    if let format_dialogs::Alert::DeleteColor(c, anchor) = *alert {
                         self.dialogs.pop();
-                        let target = crate::palette::Target::Instead(c);
+                        let target = crate::palette::Target::Instead(c, anchor);
                         self.edit_color(quill_core::props::Rgb::BLACK, target);
                     }
                 }
@@ -833,20 +911,6 @@ impl WinState {
                 }
                 _ => {}
             },
-            Which::Glossary(st) => {
-                let close = match o {
-                    Outcome::Cancel => true,
-                    Outcome::Changed(id) => {
-                        crate::glossary::changed(st, d, &self.view, id);
-                        false
-                    }
-                    Outcome::Button(id) => crate::glossary::button(st, d, &mut self.view, id),
-                    _ => false,
-                };
-                if close {
-                    self.dialogs.pop();
-                }
-            }
             Which::Spelling(_) | Which::Hyphenation(_) | Which::Thesaurus(_) => {
                 use crate::lang_dialogs::{self as lang, Action};
                 let view = &mut self.view;
@@ -1153,6 +1217,11 @@ impl WinState {
                     let (start, target) = crate::palette::edit_of(st, None);
                     self.edit_color(start, target);
                 }
+                Outcome::Button("delete_color") => {
+                    if let Some(c) = crate::palette::deletable(st) {
+                        self.delete_in_palette_dialog(c);
+                    }
+                }
                 Outcome::Ok | Outcome::Cancel => {
                     let (chosen, start) = if *o == Outcome::Ok {
                         (Some(crate::palette::finish(st)), st.start)
@@ -1375,41 +1444,13 @@ impl WinState {
                 d.popout = None;
                 self.color_pop = None;
             }
-            Outcome::Swatch { id, double }
-                if matches!(
-                    which,
-                    Which::Character(_)
-                        | Which::StyleCharacter(_)
-                        | Which::CharacterStyleEdit(_)
-                        | Which::Hyperlink(_)
-                        | Which::Preferences { .. }
-                        | Which::Border(_)
-                ) =>
-            {
+            Outcome::Swatch { id, double } if pops_color(which) => {
                 self.color_popout_box(id, double);
             }
-            Outcome::Button("edit")
-                if matches!(
-                    which,
-                    Which::Character(_)
-                        | Which::StyleCharacter(_)
-                        | Which::CharacterStyleEdit(_)
-                        | Which::Hyperlink(_)
-                        | Which::Preferences { .. }
-                        | Which::Border(_)
-                ) =>
-            {
+            Outcome::Button("edit") if pops_color(which) => {
                 self.color_popout_edit();
             }
-            Outcome::Button("delete_color")
-                if matches!(
-                    which,
-                    Which::Character(_)
-                        | Which::StyleCharacter(_)
-                        | Which::CharacterStyleEdit(_)
-                        | Which::Hyperlink(_)
-                ) =>
-            {
+            Outcome::Button("delete_color") if pops_color(which) => {
                 self.color_popout_delete();
             }
             Outcome::Changed("color")
@@ -1515,9 +1556,9 @@ impl WinState {
                     let base = st.pap.clone();
                     let mut editor = format_dialogs::paragraph_properties(&base);
                     editor.title = format!("Paragraph Style: {}", d.field_text("name"));
-                    editor
-                        .items
-                        .retain(|item| !matches!(item.id, "apply" | "tabs" | "border" | "frame"));
+                    editor.items.retain(|item| {
+                        !matches!(item.id, "apply" | "dropcap" | "tabs" | "border" | "frame")
+                    });
                     self.dialogs.push((Which::StyleParagraph(base), editor));
                 }
                 Which::ParagraphStyles(st) if matches!(id, "new" | "edit") => {
@@ -1546,6 +1587,10 @@ impl WinState {
                 Which::Paragraph(_) if id == "tabs" => {
                     let (d, which) = format_dialogs::tabs(&self.view, None);
                     self.dialogs.push((which, d));
+                }
+                Which::Paragraph(_) if id == "dropcap" => {
+                    let d = crate::frame_dialog::drop_cap(&self.view, &self.font_names);
+                    self.dialogs.push((Which::DropCap, d));
                 }
                 Which::InsertTable(_) if id == "format" => {
                     // Format…: insert the table, then go on to Table Cells.
@@ -1602,8 +1647,24 @@ impl WinState {
     }
 }
 
-/// Whether the color pop-out of this dialog offers Delete: only where the
-/// colors are the document's own, not Preferences' or a border's.
-fn has_delete(which: &Which) -> bool {
-    !matches!(which, Which::Preferences { .. } | Which::Border(_))
+/// Whether this dialog has a color box that opens the color pop-out.
+fn pops_color(which: &Which) -> bool {
+    matches!(
+        which,
+        Which::Character(_)
+            | Which::StyleCharacter(_)
+            | Which::CharacterStyleEdit(_)
+            | Which::Hyperlink(_)
+            | Which::Preferences { .. }
+            | Which::Border(_)
+    )
+}
+
+/// What deleting a color from a palette did.
+#[derive(PartialEq, Eq)]
+pub(super) enum Deleted {
+    /// It is out of the palette.
+    Gone,
+    /// The document's text uses it, so a question about its replacement is up.
+    Asked,
 }

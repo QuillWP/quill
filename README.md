@@ -5,34 +5,35 @@
 <h1 align="center">Quill</h1>
 
 <p align="center">
-  A capable word processor for the Mac in a small package.<br>
+  <strong>Word compatibility in a much smaller package.</strong><br>
+  A capable word processor for the Mac that opens and saves DOCX. The Apple
+  Silicon version is less than 8 MB.<br>
   Styles, pictures, tables, long-document tools and modern file formats.
 </p>
 
 <p align="center"><a href="https://quillwp.com">quillwp.com</a></p>
 
-**Status: alpha · version 0.24.0.** Alpha testers wanted.
+**Status: alpha · version 0.25.0.** Alpha testers wanted.
 **[Download a build](https://github.com/QuillWP/quill/releases)** from the releases page.
 
-![Quill showing an annual financial review with a full-width title banner and a row of four key figures](docs/images/normal-view.png)
+**Word compatibility is a work in progress.** Quill opens and saves DOCX, and
+the goal is for documents to go to Word and back with nothing lost. It is not
+100% there yet: some documents will look different in Word than in Quill, and
+a few features do not survive the round trip. Quill warns when a format cannot
+keep everything. Keep a copy of anything important, and please report files
+that come out wrong.
 
-*Quill on macOS in Normal view: a report with a full-width title banner and a row of headline figures built from a table.*
+## New in 0.25.0
 
-## Small on purpose
+- Round-trip indexes between Quill and Word
+- Better round-trip tables of contents, listing headings and marked entries together
+- Dictation support on the Mac
+- Making the index again no longer deletes text written after it
+- Further cleanup and refinement of the toolbar and menus
+- Paragraph and character counts in the status bar
+- Autosave now runs in the background and warns you if it can't save
 
-Everything in the app, measured from the release build for Apple Silicon Macs:
-
-| Part | Size |
-|---|---:|
-| The program itself | 5.3 MB |
-| Thesaurus data | 1.4 MB |
-| Icons and About artwork | 0.8 MB |
-| Licenses, notices and readme | 0.2 MB |
-| **Whole app** | **7.7 MB** |
-| **Download (disk image)** | **5.2 MB** |
-
-Quill is written from scratch in Rust, draws its own pages and uses native Mac
-menus and dialogs. It uses the fonts already installed on your Mac.
+The full list is in [VERSION-HISTORY.md](VERSION-HISTORY.md).
 
 ## What it does
 
@@ -57,41 +58,40 @@ menus and dialogs. It uses the fonts already installed on your Mac.
 - **Your choice of format.** Open and save `.qwp`, DOCX, RTF, ODT, HTML,
   Markdown and plain text, and export PDF. Quill warns when a format cannot
   keep everything.
+- **Indexes and contents that Word can update.** Index and table of contents
+  entries save in DOCX as Word's own fields, so a document keeps working in
+  Word and comes back with its entries.
 
 ## See Quill at work
 
-**Layout and pictures**
+**Normal view and tables**
 
-![Quill showing a magazine feature with a drop cap, a centered title and a picture with a caption set into the text](docs/images/elegant-handling-of-images.png)
-
-*A magazine-style feature in Page Layout view: a drop cap, a title block with rules, and a captioned picture with text wrapped around it.*
-
-**Tables and charts**
-
-![Quill showing a consolidated income statement as a formatted table, with a bar chart below it](docs/images/table-formatting.png)
-
-*A financial table with shaded header and total rows, indented line items, right-aligned figures and heavier rules between groups, with a bar chart beneath it. The table handle at the top left selects the whole table.*
+| | |
+|---|---|
+| ![Quill showing a table of contents with dotted leaders above a section break, then a title page with a moon illustration](docs/images/normal-view.jpeg) | ![Quill showing a consolidated income statement as a formatted table, with the Style Sheets pane open beside it](docs/images/table-formatting.jpeg) |
+| *Normal view: a table of contents with dot leaders and page numbers, a section break, and a title page with a picture and caption.* | *A financial table with a shaded header and total row, indented line items, right-aligned figures and heavier rules between groups. A chart follows below it.* |
 
 **Light and dark**
 
 | | |
 |---|---|
-| ![Quill in light mode showing a document titled Apache License with a three-column contents table](docs/images/light-mode.png) | ![The same Apache License document in Quill's dark mode](docs/images/dark-mode.png) |
-| *Light mode: a two-column document with a centered title, ruled headings and a three-column contents table.* | *The same document in dark mode. The toolbars, ruler and page follow the system appearance, and the document's colors are adjusted to stay readable.* |
+| ![Quill in light mode showing a title page with a drop cap, a picture and a caption](docs/images/light-mode.jpeg) | ![The same title page in Quill's dark mode](docs/images/dark-mode.jpeg) |
+| *Light mode: a centered title, a captioned picture, a chapter heading and a drop cap in Page Layout view.* | *The same document in dark mode. The toolbars, ruler and page follow the system appearance, and the document's colors are adjusted to stay readable.* |
 
 **Long documents and styles**
 
 | | |
 |---|---|
-| ![Quill showing a book's contents page with chapter titles, dotted leaders and page numbers](docs/images/table-of-contents.png) | ![Quill's Style Sheets pane listing paragraph and character styles, with Heading 2 selected](docs/images/stylesheets.png) |
+| ![Quill showing a Contents page with chapter titles, dotted leaders and page numbers](docs/images/table-of-contents.jpeg) | ![Quill's Style Sheets pane listing paragraph and character styles, with Normal selected](docs/images/stylesheets.jpeg) |
 | *A table of contents built from chapter headings, with dot leaders and page numbers that update with the document.* | *The Style Sheets pane lists every paragraph and character style. Create, edit, copy or delete styles, and apply one to the current paragraph with a click.* |
 
 ## Built to protect your work
 
 Quill has multi-level undo, document recovery, atomic saving and read-back
 validation: before it replaces a file, it checks that it can open what it just
-wrote. Import reports and format warnings explain anything that could not be
-kept.
+wrote. Recovery copies are written in the background, and Quill warns you if
+one cannot be saved. Import reports and format warnings explain anything that
+could not be kept. Links open only for web and mail addresses.
 
 Quill is still alpha software. Keep backups of important documents. The native
 `.qwp` format may change during the alpha.
@@ -132,7 +132,10 @@ maintainer before release.
 
 ### Installing an alpha build
 
-Quill needs macOS 11 Big Sur or later on an Apple Silicon Mac (M1 or newer).
+Quill needs macOS 11 Big Sur or later. Downloads are built for Apple Silicon
+Macs (M1 or newer) and for Intel Macs. The Intel builds are made on an Apple
+Silicon Mac and have not been tested on Intel hardware yet, so treat them as
+experimental and please report problems.
 
 1. Download the newest disk image from the
    [releases page](https://github.com/QuillWP/quill/releases), open it and drag

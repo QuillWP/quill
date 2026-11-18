@@ -2,6 +2,27 @@
 
 use super::*;
 
+/// Plain user text that cannot smuggle Quill's object, field, note or
+/// annotation sentinels into an ordinary character run.
+fn service_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|&c| {
+            (!c.is_control() || matches!(c, '\n' | '\t'))
+                && !matches!(
+                    c,
+                    chars::OBJECT
+                        | chars::FIELD_PAGE
+                        | chars::FIELD_DATE
+                        | chars::FIELD_TIME
+                        | chars::FOOTNOTE
+                        | chars::ANNOTATION
+                )
+        })
+        .collect()
+}
+
 impl DocView {
     // ----- keyboard -----
 
@@ -96,18 +117,22 @@ impl DocView {
     /// Whether the document has room for `extra` more within Quill's size
     /// limit. If not, the status line says so.
     pub(super) fn room_for(&mut self, extra: quill_core::limits::Size) -> bool {
+        self.room_for_action(extra, "paste")
+    }
+
+    fn room_for_action(&mut self, extra: quill_core::limits::Size, what: &str) -> bool {
         let now = self.doc.size();
         let after = quill_core::limits::Size {
-            paragraphs: now.paragraphs + extra.paragraphs,
-            characters: now.characters + extra.characters,
-            runs: now.runs + extra.runs,
-            pictures: now.pictures + extra.pictures,
-            headers: now.headers + extra.headers,
+            paragraphs: now.paragraphs.saturating_add(extra.paragraphs),
+            characters: now.characters.saturating_add(extra.characters),
+            runs: now.runs.saturating_add(extra.runs),
+            pictures: now.pictures.saturating_add(extra.pictures),
+            headers: now.headers.saturating_add(extra.headers),
         };
         match after.too_large() {
             Some(why) => {
                 self.status = Some(format!(
-                    "Quill didn't paste: the document would be too large ({why})."
+                    "Quill didn't {what}: the document would be too large ({why})."
                 ));
                 false
             }
@@ -483,16 +508,15 @@ impl DocView {
             MakeTocEditable => self.make_toc_editable(),
             StyleDialog => return Effect::Dialog(DialogId::Style),
             CharacterStylesDialog => return Effect::Dialog(DialogId::CharacterStyles),
+            FontSizeDialog => return Effect::Dialog(DialogId::FontSize),
             Preferences => return Effect::Dialog(DialogId::Preferences),
             DefaultFont => return Effect::Dialog(DialogId::DefaultFont),
-            ToolbarMenu => return Effect::Dialog(DialogId::ToolbarPreferences),
             Find => return Effect::Dialog(DialogId::Find),
             Replace => return Effect::Dialog(DialogId::Replace),
             GoTo => return Effect::Dialog(DialogId::GoTo),
             Grep => return Effect::Dialog(DialogId::Grep),
             RegexSearch => return Effect::Dialog(DialogId::RegexSearch),
             Sed => return Effect::Dialog(DialogId::Sed),
-            Glossary => return Effect::Dialog(DialogId::Glossary),
             WordCount => return Effect::Dialog(DialogId::WordCount),
             ChangeCase if !self.sel.is_empty() => return Effect::Dialog(DialogId::ChangeCase),
             Renumber => return Effect::Dialog(DialogId::Renumber),
@@ -553,7 +577,6 @@ impl DocView {
                 self.page_view = true;
             }
             GoBack => self.go_back(),
-            InsertGlossaryEntry => crate::glossary::expand(self),
             InsertDate => {
                 let t = crate::clock::now().date_normal();
                 self.type_text_raw(&t);
@@ -824,12 +847,26 @@ impl DocView {
                     let chp = self.doc.main.paras[s.para].chp_at(s.offset);
                     self.doc.font_name(chp.font).to_string()
                 };
+                // The person may ask to choose replacements: the text goes in
+                // with its font names, then Replace Missing Fonts opens.
+                let mut choose_fonts = false;
+                let mut warned: Vec<String> = Vec::new();
                 let dropped = match &mut content {
                     Clip::Rich(rich) => {
+                        let private = rich.private_fonts();
+                        if !private.is_empty()
+                            && !crate::replace_fonts::confirm_private_paste(&private)
+                        {
+                            return Effect::None;
+                        }
                         let Some(dropped) = rich.resolve_missing_fonts(
                             &font_here,
-                            crate::font_names::is_installed,
-                            crate::replace_fonts::confirm_paste,
+                            |name| name.starts_with('.') || crate::font_names::is_installed(name),
+                            |missing, font| {
+                                choose_fonts = crate::replace_fonts::confirm_paste(missing, font)?;
+                                warned = missing.to_vec();
+                                Some(false)
+                            },
                         ) else {
                             return Effect::None;
                         };
@@ -859,7 +896,12 @@ impl DocView {
                     self.finish_edit(Selection::caret(at));
                     self.undo_if_too_large("paste");
                     self.note_dropped_fonts(&dropped, &font_here);
-                    return Effect::None;
+                    self.pasted_missing = warned;
+                    return if choose_fonts {
+                        Effect::ReplaceFonts
+                    } else {
+                        Effect::None
+                    };
                 }
                 let at = self.delete_selection();
                 let end = match content {
@@ -877,6 +919,10 @@ impl DocView {
                 self.finish_edit(Selection::caret(end));
                 self.undo_if_too_large("paste");
                 self.note_dropped_fonts(&dropped, &font_here);
+                if choose_fonts {
+                    self.pasted_missing = warned;
+                    return Effect::ReplaceFonts;
+                }
             }
             PasteSpecial => return Effect::Dialog(DialogId::PasteSpecial),
             PasteText => self.paste_as(crate::paste_special::Form::Unformatted, clip),
@@ -987,6 +1033,28 @@ impl DocView {
         at
     }
 
+    /// Text from a Mac text service such as Dictation or Emoji & Symbols.
+    /// Unlike a key press it may contain a whole phrase and paragraph
+    /// breaks, and it is untrusted input from outside Quill.
+    pub(super) fn insert_service_text(&mut self, text: &str) {
+        let text = service_text(text);
+        if text.is_empty()
+            || !self.room_for_action(quill_core::limits::Size::of_text(&text), "insert text")
+        {
+            return;
+        }
+        self.doc.break_typing();
+        self.doc.begin("Insert Text", self.sel);
+        let at = self.delete_selection();
+        let chp = self
+            .typing_chp
+            .unwrap_or_else(|| self.doc.main.paras[at.para].chp_at(at.offset));
+        let end = self.doc.insert_plain(MAIN, at, &text, chp);
+        self.caret_formats.clear();
+        self.finish_edit(Selection::caret(end));
+        self.undo_if_too_large("insert text");
+    }
+
     pub(super) fn repeat_last(&mut self, clip: &mut Clipboard) {
         match self.repeat.clone() {
             Some(Repeatable::Text(t)) => {
@@ -1080,10 +1148,15 @@ impl DocView {
         self.finish_edit(sel);
     }
 
-    /// Delete Color: text and styles in color `from` take `to`, as one
-    /// undo step.
-    pub fn replace_color(&mut self, from: quill_core::Rgb, to: quill_core::Rgb) {
-        self.doc.begin("Delete Color", self.sel);
+    /// Delete Color or Change Color: text and styles in color `from` take
+    /// `to`, as one undo step named `label`.
+    pub fn replace_color(
+        &mut self,
+        from: quill_core::Rgb,
+        to: quill_core::Rgb,
+        label: &'static str,
+    ) {
+        self.doc.begin(label, self.sel);
         self.doc.replace_color(from, to);
         self.typing_chp = None;
         let sel = self.sel;

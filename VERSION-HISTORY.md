@@ -1,11 +1,88 @@
 # Version history
 
-What changed at each tagged version. Each tag is one squashed commit, so this
-file is the only place the per-version story is kept in readable form. It was
-rebuilt from the tagged commit messages and the diff between each pair of tags.
-Add an entry for every new tag as part of the release process.
+I'm developing in a separate private repo and tag and squash each version when
+I add a new release version, just to keep things readable.
 
-Versions 0.1.0 to 0.14.0 were all tagged on 2026-11-05.
+Versions 0.1.0 to 0.14.0 all share the same commit date, 2026-11-05, because
+that is when the public repository was created.
+
+## 0.25.0 - 2026-11-18
+
+Word-compatible index and contents entries in .docx, a quieter and more modern
+interface, a round of menu cleanup, color palettes that all work alike, and Helvetica
+as the default font.
+
+**Note 1:** Windows and Linux builds are not being created or tested. They may or
+may not compile. If you choose to try, please open issues as you find them.
+
+**Note 2:** I am going to start including builds for Mac Intel processors. However,
+I do not have an Intel Mac and will not be able to hands on test before release.
+
+**Indexes and contents**
+
+- Index entries and table of contents both survive round-trips to DOCX format.
+- Able to manually create table of contents entries (Insert > TOC Entry) just as
+  Word's Mark Table of Contents Entry does.
+  The Table of Contents dialog has separate Headings and TOC Entries boxes, so a
+  contents can list both, in text order, as Word's TOC \o with \f does.
+- Fine-tuned the index feature, and fixed a data loss bug where making the index
+  again deleted text written after it.
+
+**Colors**
+
+- The color palette has larger swatches, and editing or creating a new swatch opens the system Colors panel.
+- All the color pickers (the Character, character style and Hyperlink dialogs,
+  Preferences > Colors, Border, the toolbar's Font Color and the Color dialog)
+  use the same pop-out and have Delete.
+- Delete takes a custom color out of the palette. A color the text uses asks for a replacement, with Cancel;
+  a color saved in Preferences is removed from Preferences only, and documents keep it.
+- Editing a custom color changes it wherever it is used, as one Undo
+  step named Change Color, or in Preferences for a saved color.
+
+**Fonts**
+
+- Opening a file or pasting text with a missing font displays a warning with opportunity to keep
+  or replace the missing font.
+- Highlight and replace missing fonts in a document.
+- Text pasted in one of the Mac's private system fonts keeps that font, after a
+  warning that the font will not be available on other platforms. Show Private
+  System Fonts in Preferences > Fonts, off by default, lists those fonts in the
+  font menus.
+
+**Interface**
+
+- Toolbar and menu items cleaned up.
+- The Classic design and the toolbar settings are gone, leaving Airy as the only
+  design.
+- The toolbar font and size boxes can be typed into, and Font > Other asks for a
+  size.
+- Style Sheets moved to the Window menu.
+- The ruler's indent lanes changed.
+- The About window was reshaped.
+- Edit > Glossary was removed.
+
+**Writing and layout**
+
+- The status bar shows paragraph and character counts.
+- Drop caps are sized and placed from their visible outline, so they line up
+  with the first body line. Paragraph offers a Drop Cap... button.
+
+**Mac**
+
+- Window > Size To and Move To set the window's exact size and position
+  in pixels.
+- Edit > Start Dictation uses macOS Dictation to type where the
+  insertion point is, with the language and microphone you set in macOS.
+
+**Safety**
+
+- Links open only for http, https and mailto addresses. ftp and tel links no
+  longer open.
+- Autosave writes its recovery copy in the background, so typing in a large
+  document does not stall.
+- If a recovery copy cannot be written, Quill warns
+  once, listing likely causes, with a box to stop the warning for the rest of
+  the session. Preferences > Advanced sets when Quill warns.
 
 ## 0.24.0 - 2026-11-15
 

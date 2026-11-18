@@ -130,19 +130,29 @@ pub fn draw_scroll(
 pub const TRACK: u32 = 0xF2F2F2;
 pub const EDGE: u32 = 0xD0D0D0;
 
-/// The bar under the text: page number box, style name box, then the
-/// horizontal scroll bar, and the grow box in the corner. A `message` takes
-/// the place of the boxes and scroll bar, so its explanation stays visible.
-pub fn draw_status(
-    c: &mut Canvas,
-    label: &mut Label,
-    r: Rect,
-    page: &str,
-    style: &str,
-    message: Option<&str>,
-) -> Rect {
-    let page_w = 90.0;
-    let style_w = 120.0;
+/// The bar under the text: document counters, style name, then the horizontal
+/// scroll bar and grow box. A `message` takes their place so its explanation
+/// stays visible.
+pub struct Status<'a> {
+    pub page: &'a str,
+    pub style: &'a str,
+    pub paragraphs: &'a str,
+    pub characters: &'a str,
+    pub message: Option<&'a str>,
+}
+
+pub fn count_label(count: usize, noun: &str) -> String {
+    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+}
+
+pub fn draw_status(c: &mut Canvas, label: &mut Label, r: Rect, status: Status<'_>) -> Rect {
+    let Status {
+        page,
+        style,
+        paragraphs,
+        characters,
+        message,
+    } = status;
     c.fill(r, TRACK);
     let h = c.hair();
     c.fill(Rect::new(r.x, r.y, r.w, h), EDGE);
@@ -158,28 +168,26 @@ pub fn draw_status(
         message.unwrap_or(page),
         ink,
     );
-    if message.is_none() {
-        c.fill(Rect::new(r.x + page_w, r.y + 3.0, h, r.h - 6.0), EDGE);
-        label.draw(
-            c,
-            quill_layout::fonts::UI_FONT,
-            10.0,
-            false,
-            r.x + page_w + 6.0,
-            base,
-            style,
-            ink,
-        );
-        c.fill(
-            Rect::new(r.x + page_w + style_w, r.y + 3.0, h, r.h - 6.0),
-            EDGE,
-        );
-    }
     if message.is_some() {
-        Rect::new(r.right(), r.y, 0.0, BAR)
-    } else {
-        Rect::new(r.x + page_w + style_w, r.y, r.w - page_w - style_w, BAR)
+        return Rect::new(r.right(), r.y, 0.0, BAR);
     }
+
+    let font = quill_layout::fonts::UI_FONT;
+    let size = 10.0;
+    let width = |label: &mut Label, text: &str| label.width(font, size, false, text) + 12.0;
+    let mut x = r.x + width(label, page);
+    // The counters have priority over the style at narrow window widths.
+    for text in [paragraphs, characters, style] {
+        let w = width(label, text);
+        if x + w + 72.0 > r.right() {
+            continue;
+        }
+        c.fill(Rect::new(x, r.y + 3.0, h, r.h - 6.0), EDGE);
+        label.draw(c, font, size, false, x + 6.0, base, text, ink);
+        x += w;
+    }
+    c.fill(Rect::new(x, r.y + 3.0, h, r.h - 6.0), EDGE);
+    Rect::new(x, r.y, (r.right() - x).max(0.0), BAR)
 }
 
 /// A tooltip with `text`, below and right of the pointer at (`x`, `y`),
@@ -250,6 +258,13 @@ pub fn draw_grow_box(c: &mut Canvas, r: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn count_labels_use_singular_for_one() {
+        assert_eq!(count_label(0, "paragraph"), "0 paragraphs");
+        assert_eq!(count_label(1, "paragraph"), "1 paragraph");
+        assert_eq!(count_label(2, "character"), "2 characters");
+    }
 
     #[test]
     fn vertical_thumb_moves_between_arrow_buttons_and_clamps() {

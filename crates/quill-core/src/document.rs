@@ -602,11 +602,23 @@ fn keep_content(base: CharProps, old: &CharProps) -> CharProps {
     }
 }
 
+/// The font new documents start in: one every copy of the system has, so a
+/// document opens the same on the machine it came from and on another.
+pub fn default_font() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Helvetica"
+    } else if cfg!(windows) {
+        "Arial"
+    } else {
+        "Liberation Sans"
+    }
+}
+
 impl Document {
-    /// A new, empty document: one Normal paragraph in New York 12 pt, as
-    /// File > New makes in the original.
+    /// A new, empty document: one Normal paragraph in the system's default
+    /// document font (see `default_font`), 12 pt.
     pub fn new() -> Self {
-        Document::with_default_font("New York", 24)
+        Document::with_default_font(default_font(), 24)
     }
 
     pub fn with_default_font(font: &str, size: u16) -> Self {
@@ -843,49 +855,6 @@ impl Document {
             }
         }
         self.set_story(id, story);
-    }
-
-    /// A fragment from another document (a glossary entry) with its fonts
-    /// and styles, given by name, matched to this document's. Fonts it
-    /// lacks are added; styles it lacks become Normal.
-    pub fn import_fragment_styled(
-        &mut self,
-        frag: &Fragment,
-        fonts: &[String],
-        styles: &[String],
-        characters: &[crate::character_styles::CharacterStyle],
-    ) -> Fragment {
-        let mut character_map = vec![0];
-        for s in characters {
-            character_map.push(self.import_character_style(s, fonts, true));
-        }
-        let mut out = frag.clone();
-        for p in out
-            .paras
-            .iter_mut()
-            .chain(out.notes.iter_mut().flat_map(|note| &mut note.paras))
-        {
-            let mut map = |c: &mut CharProps| {
-                c.character_style = character_map
-                    .get(c.character_style as usize)
-                    .copied()
-                    .unwrap_or(0);
-                if c.character_style == 0 {
-                    c.direct_format = 0;
-                }
-                if let Some(name) = fonts.get(c.font as usize) {
-                    c.font = intern(&mut self.fonts, name);
-                }
-            };
-            let len = p.len();
-            p.format_range(0, len, &mut map);
-            map(&mut p.mark_chp);
-            p.pap.style = styles
-                .get(p.pap.style as usize)
-                .and_then(|n| self.styles.find(n))
-                .unwrap_or(0);
-        }
-        out
     }
 
     /// Whether a header or footer has nothing in it.
@@ -2299,7 +2268,7 @@ impl Document {
 
     /// Save the last section's settings in the open undo step, before
     /// changing them.
-    fn record_section(&mut self) {
+    pub(crate) fn record_section(&mut self) {
         if self.history.open.is_none() {
             self.begin("Section", Selection::default());
         }

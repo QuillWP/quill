@@ -95,35 +95,6 @@ impl Appearance {
     }
 }
 
-/// The shape and spacing of Quill's own window chrome. Color appearance is
-/// separate, so either style can follow the system's light or dark setting.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum InterfaceStyle {
-    #[default]
-    AiryClassic,
-    Classic,
-}
-
-impl InterfaceStyle {
-    pub const ALL: [InterfaceStyle; 2] = [InterfaceStyle::AiryClassic, InterfaceStyle::Classic];
-
-    /// The name Preferences shows.
-    pub fn label(self) -> &'static str {
-        match self {
-            InterfaceStyle::AiryClassic => "Airy Classic",
-            InterfaceStyle::Classic => "Classic",
-        }
-    }
-
-    /// The name the settings file uses.
-    fn key(self) -> &'static str {
-        match self {
-            InterfaceStyle::AiryClassic => "airy_classic",
-            InterfaceStyle::Classic => "classic",
-        }
-    }
-}
-
 /// Whether Quill opens again the documents that were open when it last quit
 /// (Preferences > Open And Save).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -152,6 +123,43 @@ impl Reopen {
             Reopen::Always => "always",
             Reopen::Never => "never",
             Reopen::Prompt => "prompt",
+        }
+    }
+}
+
+/// How Quill tells the person that a recovery copy could not be saved
+/// (Preferences > Advanced).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AutosaveAlert {
+    /// A warning box the first time, then the status line.
+    #[default]
+    WarningAndStatus,
+    StatusBar,
+    Nothing,
+}
+
+impl AutosaveAlert {
+    pub const ALL: [AutosaveAlert; 3] = [
+        AutosaveAlert::WarningAndStatus,
+        AutosaveAlert::StatusBar,
+        AutosaveAlert::Nothing,
+    ];
+
+    /// The name Preferences shows.
+    pub fn label(self) -> &'static str {
+        match self {
+            AutosaveAlert::WarningAndStatus => "Warning and Status Bar",
+            AutosaveAlert::StatusBar => "Status Bar",
+            AutosaveAlert::Nothing => "None",
+        }
+    }
+
+    /// The word the settings file holds.
+    pub fn key(self) -> &'static str {
+        match self {
+            AutosaveAlert::WarningAndStatus => "warning",
+            AutosaveAlert::StatusBar => "status",
+            AutosaveAlert::Nothing => "none",
         }
     }
 }
@@ -251,8 +259,6 @@ pub struct Settings {
     pub default_view: DefaultView,
     /// Light, dark, or as the system is.
     pub appearance: Appearance,
-    /// The window chrome's visual design, independent of light or dark mode.
-    pub interface_style: InterfaceStyle,
     pub open_with_ruler: bool,
     pub open_with_formatting_toolbar: bool,
     pub open_with_paragraph_toolbar: bool,
@@ -267,6 +273,8 @@ pub struct Settings {
     pub font_folder_levels: u8,
     /// Seconds between recovery saves; 0 turns them off.
     pub autosave_secs: u32,
+    /// What to do when a recovery copy cannot be saved.
+    pub autosave_failures: AutosaveAlert,
     // Open and Save
     pub interpret_rtf: bool,
     pub make_backup: bool,
@@ -298,21 +306,6 @@ pub struct Settings {
     /// Interface size as a percentage of the platform's usual size, for
     /// trying out sizes by editing the settings file.
     pub interface_scale: u16,
-    /// The top toolbar's button pitch in points.
-    pub toolbar_spacing: u16,
-    /// Extra points after each formatting toolbar and ruler control.
-    pub formatting_toolbar_spacing: u16,
-    /// Text size in points in the font, size and style boxes.
-    pub toolbar_picker_font_size: u16,
-    /// Blank points before the first button of the toolbars and the
-    /// ruler's button row, and above and below their buttons.
-    pub bar_padding_horiz: u16,
-    pub bar_padding_vert: u16,
-    /// Background of the toolbars and the ruler, as 0xRRGGBB.
-    pub bar_background: u32,
-    /// The flat lines between the bars and along their edges, and the
-    /// outlines of the bars' white boxes (font, size and style).
-    pub line_color: u32,
     /// The ruler's measuring scale: its paper, and its markings and numbers.
     pub ruler_background: u32,
     pub ruler_foreground: u32,
@@ -320,8 +313,6 @@ pub struct Settings {
     pub view_toolbar: bool,
     /// The tab-type buttons at the end of the paragraph toolbar.
     pub paragraph_toolbar_tabs: bool,
-    /// 0 top (horizontal), 1 left, 2 right (vertical).
-    pub toolbar_position: u8,
     /// The Style Sheets palette: shown, docked at the right (not floating),
     /// and its tab (0 All, 1 Paragraph, 2 Character).
     pub show_styles_palette: bool,
@@ -336,6 +327,8 @@ pub struct Settings {
     /// .docx and RTF have no place for it, and choosing should not make the
     /// document need saving.
     pub accepted_fonts: Vec<(PathBuf, Vec<String>)>,
+    /// List the system's private fonts in the font menus.
+    pub show_private_fonts: bool,
     /// View > Highlight Missing Fonts.
     pub highlight_missing_fonts: bool,
     /// Say where to deal with missing fonts after going on without them.
@@ -404,27 +397,20 @@ impl Default for Settings {
             document_zoom: 150.0,
             window_frame: None,
             interface_scale: 100,
-            toolbar_spacing: 24,
-            formatting_toolbar_spacing: 3,
-            toolbar_picker_font_size: 12,
-            bar_padding_horiz: 6,
-            bar_padding_vert: 4,
-            bar_background: 0xDDDDDD,
-            line_color: 0x888888,
             ruler_background: 0xFFFFFF,
             ruler_foreground: 0x000000,
-            toolbar_position: 0,
             show_styles_palette: false,
             styles_palette_docked: true,
             styles_palette_tab: 0,
             toolbar_buttons: Vec::new(),
             named_colors: Vec::new(),
             accepted_fonts: Vec::new(),
+            show_private_fonts: false,
             highlight_missing_fonts: false,
             missing_font_reminder: true,
             markdown_source_font: "Courier New".into(),
             markdown_source_size: 20,
-            markdown_display_font: "New York".into(),
+            markdown_display_font: quill_core::default_font().into(),
             markdown_display_size: 24,
             smart_quotes: true,
             auto_links: true,
@@ -447,7 +433,6 @@ impl Default for Settings {
             text_boundaries: false,
             default_view: DefaultView::Normal,
             appearance: Appearance::Auto,
-            interface_style: InterfaceStyle::AiryClassic,
             open_with_ruler: true,
             open_with_formatting_toolbar: true,
             open_with_paragraph_toolbar: true,
@@ -457,13 +442,14 @@ impl Default for Settings {
             font_folders: Vec::new(),
             font_folder_levels: DEFAULT_FONT_LEVELS,
             autosave_secs: DEFAULT_AUTOSAVE_SECS,
+            autosave_failures: AutosaveAlert::default(),
             interpret_rtf: true,
             make_backup: false,
             foreign_as_quill: true,
             reopen: Reopen::Prompt,
             last_session: Vec::new(),
             quit_cleanly: true,
-            font: "Georgia".into(),
+            font: quill_core::default_font().into(),
             font_bold: false,
             font_italic: false,
             size: 24,
@@ -544,11 +530,6 @@ impl Settings {
             self.default_view.key().to_string(),
         );
         put(&mut out, "appearance", self.appearance.key().to_string());
-        put(
-            &mut out,
-            "interface_style",
-            self.interface_style.key().to_string(),
-        );
         put(&mut out, "open_with_ruler", b(self.open_with_ruler));
         put(
             &mut out,
@@ -567,6 +548,11 @@ impl Settings {
         put(&mut out, "autosave_secs", self.autosave_secs.to_string());
         put(
             &mut out,
+            "autosave_failures",
+            self.autosave_failures.key().into(),
+        );
+        put(
+            &mut out,
             "font_folder_levels",
             self.font_folder_levels.to_string(),
         );
@@ -581,9 +567,7 @@ impl Settings {
         section(
             &mut out,
             "Interface",
-            Some(
-                "Sizes are percentages. Classic spacing and padding are in points. Quit Quill before editing.",
-            ),
+            Some("Sizes are percentages. Quit Quill before editing."),
         );
         put(&mut out, "document_zoom", self.document_zoom.to_string());
         if let Some([x, y, w, h]) = self.window_frame {
@@ -594,40 +578,8 @@ impl Settings {
             "interface_scale",
             self.interface_scale.to_string(),
         );
-        put(
-            &mut out,
-            "toolbar_spacing",
-            self.toolbar_spacing.to_string(),
-        );
-        put(
-            &mut out,
-            "formatting_toolbar_spacing",
-            self.formatting_toolbar_spacing.to_string(),
-        );
-        put(
-            &mut out,
-            "toolbar_picker_font_size",
-            self.toolbar_picker_font_size.to_string(),
-        );
-        put(
-            &mut out,
-            "bar_padding_horiz",
-            self.bar_padding_horiz.to_string(),
-        );
-        put(
-            &mut out,
-            "bar_padding_vert",
-            self.bar_padding_vert.to_string(),
-        );
-
-        section(
-            &mut out,
-            "Colors",
-            Some("HTML codes like #DDDDDD. Classic bars are the toolbars and the ruler."),
-        );
+        section(&mut out, "Colors", Some("HTML codes like #DDDDDD."));
         let hex = |c: u32| format!("#{c:06X}");
-        put(&mut out, "bar_background", hex(self.bar_background));
-        put(&mut out, "line_color", hex(self.line_color));
         put(&mut out, "ruler_background", hex(self.ruler_background));
         put(&mut out, "ruler_foreground", hex(self.ruler_foreground));
 
@@ -672,21 +624,12 @@ impl Settings {
             put(&mut out, "custom_dictionary", escape_path(path));
         }
 
-        section(
-            &mut out,
-            "Toolbar",
-            Some("Preferences > Toolbar; position 0 top, 1 left, 2 right"),
-        );
+        section(&mut out, "Toolbar", Some("Preferences > Toolbar"));
         put(&mut out, "view_toolbar", b(self.view_toolbar));
         put(
             &mut out,
             "paragraph_toolbar_tabs",
             b(self.paragraph_toolbar_tabs),
-        );
-        put(
-            &mut out,
-            "toolbar_position",
-            self.toolbar_position.to_string(),
         );
         put(&mut out, "show_styles_palette", b(self.show_styles_palette));
         put(
@@ -718,6 +661,7 @@ impl Settings {
             let line = format!("{}\t{}", escape_path(path), fonts.join("\t"));
             put(&mut out, "accepted_fonts", line);
         }
+        put(&mut out, "show_private_fonts", b(self.show_private_fonts));
         put(
             &mut out,
             "highlight_missing_fonts",
@@ -898,29 +842,12 @@ impl Settings {
                     };
                 }
                 "interface_scale" => s.interface_scale = v.parse().unwrap_or(100u16).clamp(50, 300),
-                "toolbar_spacing" => s.toolbar_spacing = v.parse().unwrap_or(24u16).clamp(16, 48),
-                "formatting_toolbar_spacing" => {
-                    s.formatting_toolbar_spacing = v.parse().unwrap_or(3u16).min(20)
-                }
-                "bar_background" => s.bar_background = html_color(v).unwrap_or(s.bar_background),
                 "ruler_background" => {
                     s.ruler_background = html_color(v).unwrap_or(s.ruler_background)
                 }
                 "ruler_foreground" => {
                     s.ruler_foreground = html_color(v).unwrap_or(s.ruler_foreground)
                 }
-                "toolbar_picker_font_size" => {
-                    s.toolbar_picker_font_size =
-                        v.parse().unwrap_or(s.toolbar_picker_font_size).clamp(6, 36)
-                }
-                "bar_padding_horiz" => {
-                    s.bar_padding_horiz = v.parse().unwrap_or(s.bar_padding_horiz).min(40)
-                }
-                "bar_padding_vert" => {
-                    s.bar_padding_vert = v.parse().unwrap_or(s.bar_padding_vert).min(20)
-                }
-                "line_color" => s.line_color = html_color(v).unwrap_or(s.line_color),
-                "toolbar_position" => s.toolbar_position = v.parse().unwrap_or(0u8).min(2),
                 "show_styles_palette" => s.show_styles_palette = flag,
                 "styles_palette_docked" => s.styles_palette_docked = flag,
                 "styles_palette_tab" => s.styles_palette_tab = v.parse().unwrap_or(0u8).min(2),
@@ -948,6 +875,7 @@ impl Settings {
                         }
                     }
                 }
+                "show_private_fonts" => s.show_private_fonts = flag,
                 "highlight_missing_fonts" => s.highlight_missing_fonts = flag,
                 "missing_font_reminder" => s.missing_font_reminder = flag,
                 "markdown_source_font" if !v.is_empty() => s.markdown_source_font = v.into(),
@@ -1019,12 +947,6 @@ impl Settings {
                         .find(|a| a.key() == v)
                         .unwrap_or_default()
                 }
-                "interface_style" => {
-                    s.interface_style = InterfaceStyle::ALL
-                        .into_iter()
-                        .find(|style| style.key() == v)
-                        .unwrap_or_default()
-                }
                 "open_with_ruler" => s.open_with_ruler = flag,
                 "open_with_paragraph_toolbar" => s.open_with_paragraph_toolbar = flag,
                 "open_with_formatting_toolbar" => s.open_with_formatting_toolbar = flag,
@@ -1032,6 +954,12 @@ impl Settings {
                 "recent_count" => s.recent_count = v.parse().unwrap_or(10usize).clamp(1, 50),
                 "autosave_secs" => {
                     s.autosave_secs = v.parse().unwrap_or(DEFAULT_AUTOSAVE_SECS).min(3600)
+                }
+                "autosave_failures" => {
+                    s.autosave_failures = AutosaveAlert::ALL
+                        .into_iter()
+                        .find(|a| a.key() == v)
+                        .unwrap_or_default()
                 }
                 "font_folder_levels" => {
                     s.font_folder_levels = v
@@ -1244,10 +1172,9 @@ fn path() -> Option<PathBuf> {
     Some(base.join(format!("{folder}/settings")))
 }
 
-/// Another file kept beside the settings (the glossary), when files are
-/// being written at all. On the Mac `mac` is the file's name after the
-/// profile ("Glossary" becomes "Quill Glossary"); the other systems keep
-/// the profile in the folder name instead.
+/// Another file kept beside the settings, when files are being written at
+/// all. On the Mac `mac` is the file's name after the profile; the other
+/// systems keep the profile in the folder name instead.
 pub fn sibling(mac: &str, windows: &str, other: &str) -> Option<PathBuf> {
     if !PERSIST.load(Ordering::Relaxed) {
         return None;
@@ -1453,27 +1380,15 @@ mod tests {
 
     #[test]
     fn interface_sizes_read_back_and_stay_in_range() {
-        let s = Settings::from_text("interface_scale = 90\ntoolbar_spacing = 22\n");
-        assert_eq!((s.interface_scale, s.toolbar_spacing), (90, 22));
+        let s = Settings::from_text("interface_scale = 90\n");
+        assert_eq!(s.interface_scale, 90);
         assert!(
             !Settings::from_text("open_with_formatting_toolbar = 0\n").open_with_formatting_toolbar
         );
         let back = Settings::from_text(&s.to_text());
-        assert_eq!((back.interface_scale, back.toolbar_spacing), (90, 22));
-        let wild = Settings::from_text("interface_scale = 5\ntoolbar_spacing = x\n");
-        assert_eq!((wild.interface_scale, wild.toolbar_spacing), (50, 24));
-    }
-
-    #[test]
-    fn bar_colors_read_html_codes() {
-        let s = Settings::from_text("bar_background = #E8E8E8\nline_color = a0a0a0\n");
-        assert_eq!((s.bar_background, s.line_color), (0xE8E8E8, 0xA0A0A0));
-        assert!(
-            s.to_text()
-                .contains("bar_background = #E8E8E8\nline_color = #A0A0A0\n")
-        );
-        let bad = Settings::from_text("bar_background = gray\nline_color = #12345\n");
-        assert_eq!((bad.bar_background, bad.line_color), (0xDDDDDD, 0x888888));
+        assert_eq!(back.interface_scale, 90);
+        let wild = Settings::from_text("interface_scale = 5\n");
+        assert_eq!(wild.interface_scale, 50);
     }
 
     #[test]
@@ -1725,25 +1640,6 @@ mod tests {
         }
         let s = Settings::from_text("appearance = purple\n");
         assert_eq!(s.appearance, Appearance::Auto);
-    }
-
-    #[test]
-    fn interface_style_reads_back_and_defaults_to_airy_classic() {
-        assert_eq!(
-            Settings::default().interface_style,
-            InterfaceStyle::AiryClassic
-        );
-        for style in InterfaceStyle::ALL {
-            let s = Settings {
-                interface_style: style,
-                ..Settings::default()
-            };
-            assert_eq!(Settings::from_text(&s.to_text()).interface_style, style);
-        }
-        assert_eq!(
-            Settings::from_text("interface_style = unknown\n").interface_style,
-            InterfaceStyle::AiryClassic
-        );
     }
 
     #[test]

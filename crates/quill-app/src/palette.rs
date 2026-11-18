@@ -35,9 +35,13 @@ pub const STANDARD: [Rgb; 16] = [
 /// How many custom colors are kept.
 pub const SLOTS: usize = 16;
 
-/// A box's size and the distance between the starts of two, in points.
-const BOX: f32 = 20.0;
-const PITCH: f32 = 22.0;
+/// The palette uses two airy rows of eight colors instead of one long strip.
+const BOX: f32 = 24.0;
+const GAP: f32 = 6.0;
+const PITCH: f32 = BOX + GAP;
+const COLS: usize = 8;
+const GRID_W: f32 = COLS as f32 * BOX + (COLS - 1) as f32 * GAP;
+const GRID_H: f32 = BOX + PITCH;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(450);
 
@@ -139,16 +143,17 @@ pub enum Click {
 pub fn palette(start: Option<Rgb>, doc: &Document) -> (Dialog, PaletteState) {
     let st = PaletteState::new(start, doc);
     let current = st.current;
-    let row = PITCH * SLOTS as f32 - (PITCH - BOX);
-    let mut d = Dialog::new("Color", row + 28.0, 222.0);
+    let mut d = Dialog::new("Color", 340.0, 300.0);
     d.text("Standard colors:", 14.0, 12.0);
-    d.custom("standard", 14.0, 30.0, row, BOX);
-    d.text("Custom colors (double-click one to edit it):", 14.0, 62.0);
-    d.custom("custom", 14.0, 80.0, row, BOX);
-    d.swatch("preview", 14.0, 118.0, 44.0, 44.0, current.0);
-    d.text("HTML:", 72.0, 124.0);
-    d.field("hex", &hex(current), 112.0, 120.0, 84.0);
-    d.button("edit", "Edit…", 210.0, 118.0, 80.0, false);
+    d.custom("standard", 14.0, 30.0, GRID_W, GRID_H);
+    d.text("Recent and document colors:", 14.0, 96.0);
+    d.custom("custom", 14.0, 114.0, GRID_W, GRID_H);
+    d.swatch("preview", 14.0, 184.0, 44.0, 44.0, current.0);
+    d.text("HTML:", 72.0, 190.0);
+    d.field("hex", &hex(current), 112.0, 186.0, 84.0);
+    d.button("edit", "More Colors…", 210.0, 184.0, 116.0, false);
+    d.button("delete_color", "Delete", 210.0, 216.0, 116.0, false);
+    d.enable("delete_color", deletable(&st).is_some());
     d.action_buttons(&[("cancel", "Cancel", 74.0, false), ("ok", "OK", 74.0, true)]);
     (d, st)
 }
@@ -162,7 +167,12 @@ pub fn draw(st: &PaletteState, id: &str, r: Rect, c: &mut Canvas) {
         } else {
             Slot::Custom(i)
         };
-        let b = Rect::new(r.x + i as f32 * PITCH, r.y, BOX, BOX);
+        let b = Rect::new(
+            r.x + (i % COLS) as f32 * PITCH,
+            r.y + (i / COLS) as f32 * PITCH,
+            BOX,
+            BOX,
+        );
         match st.color_at(slot) {
             Some(rgb) => {
                 c.fill(b, rgb.0);
@@ -181,15 +191,25 @@ pub fn draw(st: &PaletteState, id: &str, r: Rect, c: &mut Canvas) {
 fn sync(st: &PaletteState, d: &mut Dialog) {
     d.set_swatch("preview", st.current.0);
     d.set_field("hex", &hex(st.current));
+    d.enable("delete_color", deletable(st).is_some());
 }
 
 /// A click at (`x`, `y`) in the "standard" or "custom" row.
 pub fn clicked(st: &mut PaletteState, d: &mut Dialog, id: &str, x: f32, y: f32) -> Click {
-    let i = (x / PITCH).floor();
-    if x < 0.0 || y < 0.0 || y > BOX || i < 0.0 || x - i * PITCH > BOX || i as usize >= SLOTS {
+    let col = (x / PITCH).floor();
+    let row = (y / PITCH).floor();
+    if x < 0.0
+        || y < 0.0
+        || col < 0.0
+        || row < 0.0
+        || x - col * PITCH > BOX
+        || y - row * PITCH > BOX
+        || col as usize >= COLS
+        || row as usize >= SLOTS / COLS
+    {
         return Click::None;
     }
-    let i = i as usize;
+    let i = row as usize * COLS + col as usize;
     let slot = if id == "standard" {
         Slot::Standard(i)
     } else {
@@ -198,8 +218,8 @@ pub fn clicked(st: &mut PaletteState, d: &mut Dialog, id: &str, x: f32, y: f32) 
     st.selected = Some(slot);
     if let Some(c) = st.color_at(slot) {
         st.current = c;
-        sync(st, d);
     }
+    sync(st, d);
     let now = Instant::now();
     let double = st
         .last_click
@@ -221,18 +241,20 @@ pub fn changed(st: &mut PaletteState, d: &mut Dialog, id: &str) {
         st.current = c;
         st.selected = st.slot_of(c);
         d.set_swatch("preview", c.0);
+        d.enable("delete_color", deletable(st).is_some());
     }
 }
 
 /// Where an edited color goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
-    /// Over this custom color.
-    Replace(usize),
+    /// Over this custom color, which was `Rgb` and changes wherever it is used.
+    Replace(usize, Rgb),
     /// Added to the custom colors.
     Add,
-    /// In place of this color, deleted from the document.
-    Instead(Rgb),
+    /// In place of this color, deleted from the document. The name is the
+    /// color box the palette came out of.
+    Instead(Rgb, &'static str),
     /// Applied to the selected text, from the toolbar's palette.
     Text,
 }
@@ -241,7 +263,9 @@ pub enum Target {
 /// where the result goes.
 pub fn edit_of(st: &PaletteState, slot: Option<Slot>) -> (Rgb, Target) {
     match slot.or(st.selected) {
-        Some(Slot::Custom(i)) if i < st.custom.len() => (st.custom[i], Target::Replace(i)),
+        Some(Slot::Custom(i)) if i < st.custom.len() => {
+            (st.custom[i], Target::Replace(i, st.custom[i]))
+        }
         Some(Slot::Standard(i)) => (STANDARD[i], Target::Add),
         _ => (st.current, Target::Add),
     }
@@ -250,7 +274,7 @@ pub fn edit_of(st: &PaletteState, slot: Option<Slot>) -> (Rgb, Target) {
 /// An edited color came back from the editor.
 pub fn edited(st: &mut PaletteState, d: &mut Dialog, target: Target, new: Rgb) {
     match target {
-        Target::Replace(i) if i < st.custom.len() => {
+        Target::Replace(i, _) if i < st.custom.len() => {
             st.custom[i] = new;
             st.selected = Some(Slot::Custom(i));
         }
@@ -287,13 +311,28 @@ const CUS_IDS: [&str; SLOTS] = [
 ];
 
 /// The pop-out beside a color control: the standard colors, the custom
-/// ones under them, and an Edit… button, the color now chosen marked.
-/// `delete` adds a Delete button for the document's own colors.
-pub fn popout(st: &PaletteState, anchor: &'static str, delete: bool) -> Popout {
-    const PAD: f32 = 8.0;
-    let row = PITCH * SLOTS as f32 - (PITCH - BOX);
+/// ones under them, and a More Colors… button, the color now chosen marked.
+/// A Delete button takes the custom color chosen out of the palette. Every
+/// color palette in Quill is this one pop-out, so they all behave alike.
+pub fn popout(st: &PaletteState, anchor: &'static str) -> Popout {
+    const PAD: f32 = 12.0;
     let mut items = Vec::new();
-    for (k, y) in [(0, PAD), (1, PAD + BOX + 8.0)] {
+    for (id, label, y) in [
+        ("standard_label", "Standard colors", PAD),
+        ("custom_label", "Recent and document colors", PAD + 84.0),
+    ] {
+        items.push(PopItem {
+            id,
+            rect: crate::canvas::Rect::new(PAD, y, GRID_W, 18.0),
+            rgb: None,
+            selected: false,
+            label,
+            framed: false,
+            tip: None,
+            enabled: false,
+        });
+    }
+    for (k, y) in [(0, PAD + 22.0), (1, PAD + 106.0)] {
         for i in 0..SLOTS {
             let (id, slot) = if k == 0 {
                 (STD_IDS[i], Slot::Standard(i))
@@ -302,40 +341,60 @@ pub fn popout(st: &PaletteState, anchor: &'static str, delete: bool) -> Popout {
             };
             items.push(PopItem {
                 id,
-                rect: crate::canvas::Rect::new(PAD + i as f32 * PITCH, y, BOX, BOX),
+                rect: crate::canvas::Rect::new(
+                    PAD + (i % COLS) as f32 * PITCH,
+                    y + (i / COLS) as f32 * PITCH,
+                    BOX,
+                    BOX,
+                ),
                 rgb: st.color_at(slot).map(|c| c.0),
                 selected: st.selected == Some(slot),
                 label: "",
+                framed: false,
                 tip: st.color_at(slot).map(tip),
                 enabled: true,
             });
         }
     }
-    let y = PAD + 2.0 * BOX + 8.0 + 8.0;
+    let y = PAD + 174.0;
     items.push(PopItem {
         id: "edit",
-        rect: crate::canvas::Rect::new(PAD, y, 84.0, 22.0),
+        rect: crate::canvas::Rect::new(PAD, y, 116.0, 24.0),
         rgb: None,
         selected: false,
-        label: "Edit Color…",
+        label: "More Colors…",
+        framed: true,
         tip: None,
         enabled: true,
     });
-    if delete {
-        items.push(PopItem {
-            id: "delete_color",
-            rect: crate::canvas::Rect::new(PAD + 92.0, y, 64.0, 22.0),
-            rgb: None,
-            selected: false,
-            label: "Delete",
-            tip: Some("Delete a color this document uses".to_string()),
-            enabled: deletable(st).is_some(),
-        });
-    }
+    items.push(PopItem {
+        id: "delete_color",
+        rect: crate::canvas::Rect::new(PAD + 124.0, y, 72.0, 24.0),
+        rgb: None,
+        selected: false,
+        label: "Delete",
+        framed: true,
+        tip: Some("Delete the custom color chosen".to_string()),
+        enabled: deletable(st).is_some(),
+    });
     Popout {
         anchor,
-        size: (row + 2.0 * PAD, y + 22.0 + PAD),
+        size: (GRID_W + 2.0 * PAD, y + 24.0 + PAD),
         items,
+    }
+}
+
+/// What a press on item `id` of a pop-out means to the dialog it is in: a
+/// box, or the Edit or Delete button. None for anything else. The Mac, Windows
+/// and Linux front ends all turn their controls into outcomes with this, so
+/// a button added to the pop-out works on every one of them.
+pub fn pop_outcome(id: &'static str, double: bool) -> Option<crate::dialog::Outcome> {
+    use crate::dialog::Outcome;
+    match id {
+        "edit" => Some(Outcome::Button("edit")),
+        "delete_color" => Some(Outcome::Button("delete_color")),
+        _ if slot_of_id(id).is_some() => Some(Outcome::Swatch { id, double }),
+        _ => None,
     }
 }
 
@@ -403,15 +462,18 @@ pub fn tip(c: Rgb) -> String {
         .unwrap_or_else(|| hex(c))
 }
 
-/// The color Delete would remove: a custom one chosen in the pop-out that
-/// is the document's own, not one saved in Preferences for every document.
+/// The color Delete would remove: the custom one chosen. The standard
+/// colors stay.
 pub fn deletable(st: &PaletteState) -> Option<Rgb> {
     let Some(Slot::Custom(i)) = st.selected else {
         return None;
     };
-    let c = *st.custom.get(i)?;
-    let saved = crate::settings::with(|s| s.named_colors.iter().any(|(rgb, _)| *rgb == c.0));
-    (!saved).then_some(c)
+    st.custom.get(i).copied()
+}
+
+/// Whether Preferences saves `c` as one of its colors for every document.
+pub fn is_saved(c: Rgb) -> bool {
+    crate::settings::with(|s| s.named_colors.iter().any(|(rgb, _)| *rgb == c.0))
 }
 
 /// Whether any text in `doc` is in color `c`.
@@ -425,13 +487,30 @@ pub fn uses(doc: &Document, c: Rgb) -> bool {
 
 /// Take color `c` out of the custom row, and out of the edits waiting
 /// for their dialog's OK.
-pub fn forget(st: &mut PaletteState, c: Rgb) {
-    st.custom.retain(|x| *x != c);
+///
+/// The row is built again from what Preferences saves and what `doc` uses,
+/// so a color that was both stays in the row as the document's own after
+/// Preferences lets go of it.
+pub fn forget(st: &mut PaletteState, c: Rgb, doc: &Document) {
     drop_edits_of(c);
-    if st.current == c {
+    let mut custom = custom_colors(doc);
+    PENDING.with_borrow(|pending| {
+        for &(target, new) in pending {
+            place_edit(&mut custom, target, new);
+        }
+    });
+    st.custom = custom;
+    if st.slot_of(st.current).is_none() {
         st.current = Rgb::BLACK;
     }
     st.selected = st.slot_of(st.current);
+}
+
+/// The standalone Color dialog after color `old` is gone: its row is built
+/// again and the dialog shows the color chosen now.
+pub fn forgotten(st: &mut PaletteState, d: &mut Dialog, old: Rgb, doc: &Document) {
+    forget(st, old, doc);
+    sync(st, d);
 }
 
 /// The name saved for a color in Preferences, if it has one.
@@ -463,7 +542,7 @@ pub fn drop_edits_of(c: Rgb) {
 /// Put an edited color where the edit said.
 fn place_edit(custom: &mut Vec<Rgb>, target: Target, new: Rgb) {
     match target {
-        Target::Replace(i) if i < custom.len() => custom[i] = new,
+        Target::Replace(i, _) if i < custom.len() => custom[i] = new,
         _ => {
             custom.retain(|c| *c != new);
             custom.insert(0, new);
@@ -641,7 +720,10 @@ mod tests {
         assert_eq!(d.field_text("hex"), "#123456");
         // Editing a custom box changes it in place.
         let (start, target) = edit_of(&st, Some(Slot::Custom(0)));
-        assert_eq!((start, target), (Rgb(0x123456), Target::Replace(0)));
+        assert_eq!(
+            (start, target),
+            (Rgb(0x123456), Target::Replace(0, Rgb(0x123456)))
+        );
         edited(&mut st, &mut d, target, Rgb(0x654321));
         assert_eq!(st.custom, vec![Rgb(0x654321)]);
         // The HTML code picks a color too, and OK remembers one that is

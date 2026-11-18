@@ -45,7 +45,7 @@ impl Edit {
 
 impl WinState {
     pub(super) fn zoom_box(&self) -> Option<Rect> {
-        let (top, height) = if self.show_toolbar && self.toolbar_position() == 0 {
+        let (top, height) = if self.show_toolbar {
             (self.toolbar_top(), toolbar::thickness(false))
         } else if self.show_formatting_toolbar {
             (
@@ -509,7 +509,7 @@ mod tests {
             },
         );
         assert_eq!(cmd, Some(Cmd::PrintPreview));
-        crate::settings::update(|s| s.toolbar_buttons = vec![(0, 23, "PrintPreview".into())]);
+        crate::settings::update(|s| s.toolbar_buttons = vec![(0, 20, "PrintPreview".into())]);
         assert_eq!(toolbar::command(0), Some(Cmd::PrintPreview));
         assert_eq!(view.exec(Cmd::Print, false, &mut clip), Effect::Print);
         assert_eq!(view.exec(Cmd::SavePdf, false, &mut clip), Effect::SavePdf);

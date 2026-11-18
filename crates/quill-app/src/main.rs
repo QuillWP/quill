@@ -26,8 +26,6 @@ mod file_dialog;
 mod find_dialog;
 mod font_names;
 mod frame_dialog;
-mod glossary;
-mod glossary_file;
 mod icon;
 mod image;
 mod lang_dialogs;
@@ -65,6 +63,8 @@ mod mac_speech;
 mod mac_text_input;
 #[cfg(target_os = "macos")]
 mod mac_widgets;
+#[cfg(target_os = "macos")]
+mod mac_window_geometry;
 mod menu;
 mod merge_dialogs;
 #[cfg(target_os = "macos")]

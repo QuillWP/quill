@@ -208,17 +208,7 @@ pub fn preferences_with(
             );
             d.check("ruler", "With Ruler On", 16.0, 211.0, s.open_with_ruler);
             d.group("Interface", 11.0, 246.0, 420.0, 80.0);
-            d.text("Style:", 16.0, 269.0);
-            let names: Vec<&str> = settings::InterfaceStyle::ALL
-                .iter()
-                .map(|style| style.label())
-                .collect();
-            let at = settings::InterfaceStyle::ALL
-                .iter()
-                .position(|style| *style == s.interface_style)
-                .unwrap_or(0);
-            d.popup("interface_style", &names, at, 62.0, 266.0, 140.0);
-            d.text("Appearance:", 216.0, 269.0);
+            d.text("Appearance:", 16.0, 269.0);
             let names: Vec<&str> = settings::Appearance::ALL
                 .iter()
                 .map(|a| a.label())
@@ -227,7 +217,7 @@ pub fn preferences_with(
                 .iter()
                 .position(|a| *a == s.appearance)
                 .unwrap_or(0);
-            d.popup("appearance", &names, at, 290.0, 266.0, 80.0);
+            d.popup("appearance", &names, at, 90.0, 266.0, 112.0);
             d.text("Interface Size:", 16.0, 300.0);
             let names: Vec<String> = INTERFACE_SIZES.iter().map(|z| format!("{z}%")).collect();
             let at = INTERFACE_SIZES
@@ -339,12 +329,7 @@ pub fn preferences_with(
                 59.0,
                 s.paragraph_toolbar_tabs,
             );
-            d.group("Toolbar Position", 8.0, 90.0, 327.0, 86.0);
-            let at = s.toolbar_position;
-            d.radio("tbtop", "Top (Horizontal)", 20.0, 113.0, 1, at == 0);
-            d.radio("tbleft", "Left (Vertical)", 20.0, 134.0, 1, at == 1);
-            d.radio("tbright", "Right (Vertical)", 20.0, 155.0, 1, at == 2);
-            d.button("customize", "Customize…", 9.0, 195.0, 110.0, false);
+            d.button("customize", "Customize…", 9.0, 90.0, 110.0, false);
         }
         COLORS_PANEL => {
             d.text(
@@ -382,6 +367,16 @@ pub fn preferences_with(
                 109.0,
                 s.smart_quotes,
             );
+            d.text("If a recovery copy can't be saved, show:", 11.0, 143.0);
+            let names: Vec<&str> = settings::AutosaveAlert::ALL
+                .iter()
+                .map(|a| a.label())
+                .collect();
+            let at = settings::AutosaveAlert::ALL
+                .iter()
+                .position(|a| *a == s.autosave_failures)
+                .unwrap_or(0);
+            d.popup("autosave_alert", &names, at, 230.0, 140.0, 190.0);
             d.text("Documents in Open Recent (1-50):", 11.0, 83.0);
             d.field(
                 "recent_count",
@@ -465,6 +460,13 @@ pub fn preferences_with(
                 218.0,
                 225.0,
                 false,
+            );
+            d.check(
+                "private_fonts",
+                "Show Private System Fonts",
+                250.0,
+                221.0,
+                s.show_private_fonts,
             );
             // Fonts for Markdown: the plain text of Source view, and the
             // formatted document made from a Markdown file.
@@ -854,10 +856,6 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
                 .get(d.selected("appearance"))
                 .copied()
                 .unwrap_or_default();
-            s.interface_style = settings::InterfaceStyle::ALL
-                .get(d.selected("interface_style"))
-                .copied()
-                .unwrap_or_default();
             if id == "ui_size" {
                 s.interface_scale = INTERFACE_SIZES[d.selected("ui_size").min(4)];
             }
@@ -880,16 +878,8 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
                 .unwrap_or_default();
         }
         TOOLBAR_PANEL => {
-            let at = match d.radio_on(1) {
-                "tbleft" => 1,
-                "tbright" => 2,
-                _ => 0,
-            };
-            {
-                s.view_toolbar = on("viewtb");
-                s.paragraph_toolbar_tabs = on("tabbuttons");
-                s.toolbar_position = at;
-            }
+            s.view_toolbar = on("viewtb");
+            s.paragraph_toolbar_tabs = on("tabbuttons");
         }
         SPELLING_PANEL => {
             s.always_suggest = on("suggest");
@@ -915,6 +905,11 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
             {
                 s.autosave_secs = secs;
             }
+            if id == "autosave_alert"
+                && let Some(&how) = settings::AutosaveAlert::ALL.get(d.selected("autosave_alert"))
+            {
+                s.autosave_failures = how;
+            }
             if let Ok(count) = d.field_text("recent_count").trim().parse::<usize>()
                 && (1..=50).contains(&count)
             {
@@ -924,6 +919,7 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
         _ => {
             let font = d.selected_text("font");
             let size: Option<f32> = d.field_text("size").trim().parse().ok();
+            s.show_private_fonts = on("private_fonts");
             {
                 if !font.is_empty() {
                     s.font = font;
@@ -1008,6 +1004,25 @@ pub fn show_color(d: &mut Dialog, id: &str, color: Option<quill_core::props::Rgb
     d.set_label(COLOR_IDS[row], &text);
 }
 
+/// Take color `c` out of every row of Colors that shows it.
+pub fn remove_color(d: &mut Dialog, c: quill_core::props::Rgb) {
+    for row in 0..settings::MAX_NAMED_COLORS {
+        if crate::palette::parse_hex(d.item_label(COLOR_IDS[row])) == Some(c) {
+            show_color(d, COLOR_BOXES[row], None);
+            d.set_field(COLOR_NAMES[row], "");
+        }
+    }
+}
+
+/// Every row of Colors that shows `old` shows `new`, keeping its name.
+pub fn replace_color(d: &mut Dialog, old: quill_core::props::Rgb, new: quill_core::props::Rgb) {
+    for row in 0..settings::MAX_NAMED_COLORS {
+        if crate::palette::parse_hex(d.item_label(COLOR_IDS[row])) == Some(old) {
+            show_color(d, COLOR_BOXES[row], Some(new));
+        }
+    }
+}
+
 /// A row's Clear button: no color and no name.
 pub fn clear_color(d: &mut Dialog, id: &str) -> bool {
     let Some(row) = COLOR_CLEAR.iter().position(|b| *b == id) else {
@@ -1040,7 +1055,6 @@ pub fn save(original: &mut settings::Settings, draft: &settings::Settings) {
             table_gridlines,
             default_view,
             appearance,
-            interface_style,
             open_with_ruler,
             open_with_formatting_toolbar,
             open_with_paragraph_toolbar,
@@ -1051,7 +1065,6 @@ pub fn save(original: &mut settings::Settings, draft: &settings::Settings) {
             reopen,
             view_toolbar,
             paragraph_toolbar_tabs,
-            toolbar_position,
             always_suggest,
             spelling_as_you_type,
             words_to_system,
@@ -1063,11 +1076,13 @@ pub fn save(original: &mut settings::Settings, draft: &settings::Settings) {
             smart_quotes,
             interface_scale,
             autosave_secs,
+            autosave_failures,
             recent_count,
             font,
             font_bold,
             font_italic,
             size,
+            show_private_fonts,
             markdown_source_font,
             markdown_source_size,
             markdown_display_font,
@@ -1148,8 +1163,26 @@ mod tests {
     }
 
     #[test]
+    fn show_private_fonts_is_off_until_chosen_and_is_saved() {
+        settings::update(|s| *s = settings::Settings::default());
+        let mut original = settings::get();
+        let mut draft = original.clone();
+        assert!(!draft.show_private_fonts);
+        let mut d = preferences_with(DEFAULT_FONT_PANEL, &[family("Arial")], &draft);
+        assert!(!d.is_on("private_fonts"));
+        d.set_on("private_fonts", true);
+        changed_in(DEFAULT_FONT_PANEL, &mut d, "private_fonts", &mut draft);
+        save(&mut original, &draft);
+        assert!(settings::get().show_private_fonts);
+        let back = settings::Settings::from_text(&settings::get().to_text());
+        assert!(back.show_private_fonts);
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
     fn saving_keeps_every_choice_the_font_panel_makes() {
         settings::update(|s| *s = settings::Settings::default());
+        settings::update(|s| s.font = "Georgia".into());
         let families = [family("Arial"), family("Georgia")];
         let mut original = settings::get();
         let mut draft = original.clone();
@@ -1203,6 +1236,7 @@ mod tests {
     #[test]
     fn the_default_fonts_bold_and_italic_choices_are_kept_and_used() {
         settings::update(|s| *s = settings::Settings::default());
+        settings::update(|s| s.font = "Georgia".into());
         let mut arial = family("Arial");
         arial.variants.push(quill_layout::FontVariant {
             bold: true,
@@ -1294,6 +1328,31 @@ mod tests {
                 item.id
             );
         }
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
+    fn the_autosave_failure_setting_is_chosen_in_advanced_and_saved() {
+        settings::update(|s| *s = settings::Settings::default());
+        assert_eq!(
+            settings::get().autosave_failures,
+            settings::AutosaveAlert::WarningAndStatus
+        );
+        let mut d = preferences(ADVANCED_PANEL, &[]);
+        d.set_selected("autosave_alert", 2);
+        changed(ADVANCED_PANEL, &mut d, "autosave_alert");
+        assert_eq!(
+            settings::get().autosave_failures,
+            settings::AutosaveAlert::Nothing
+        );
+        let text = settings::get().to_text();
+        assert!(text.contains("autosave_failures = none"));
+        let back = settings::Settings::from_text(&text);
+        assert_eq!(back.autosave_failures, settings::AutosaveAlert::Nothing);
+        assert_eq!(
+            settings::Settings::from_text("autosave_failures = bogus\n").autosave_failures,
+            settings::AutosaveAlert::WarningAndStatus
+        );
         settings::update(|s| *s = settings::Settings::default());
     }
 
@@ -1411,23 +1470,6 @@ mod tests {
         assert_eq!(settings::get().appearance, settings::Appearance::Dark);
         let d = preferences(1, &[]);
         assert_eq!(d.selected("appearance"), 2);
-        settings::update(|s| *s = settings::Settings::default());
-    }
-
-    #[test]
-    fn interface_style_is_independent_of_color_appearance() {
-        settings::update(|s| *s = settings::Settings::default());
-        let mut d = preferences(1, &[]);
-        assert_eq!(d.selected_text("interface_style"), "Airy Classic");
-        d.set_selected("interface_style", 1);
-        changed(1, &mut d, "interface_style");
-        assert_eq!(
-            settings::get().interface_style,
-            settings::InterfaceStyle::Classic
-        );
-        assert_eq!(settings::get().appearance, settings::Appearance::Auto);
-        let d = preferences(1, &[]);
-        assert_eq!(d.selected_text("interface_style"), "Classic");
         settings::update(|s| *s = settings::Settings::default());
     }
 

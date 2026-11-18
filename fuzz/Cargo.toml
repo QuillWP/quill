@@ -68,13 +68,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "glossary"
-path = "fuzz_targets/glossary.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "merge_data"
 path = "fuzz_targets/merge_data.rs"
 test = false

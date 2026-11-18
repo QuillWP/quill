@@ -65,7 +65,7 @@ pub const INK: u32 = 0x3A3A3A;
 
 fn tone(c: &str, face: u32) -> Option<u32> {
     let code = *c.as_bytes().first()?;
-    if crate::bars::airy() && matches!(code, b'B' | b'R' | b'G' | b'Y') {
+    if matches!(code, b'B' | b'R' | b'G' | b'Y') {
         return Some(INK);
     }
     Some(match code {
@@ -486,11 +486,11 @@ pub fn render(spec: &str, w: u32, h: u32, n: f32, face: u32) -> Image<'_> {
 /// for the next time it is asked for.
 pub fn cached(spec: &'static str, w: u32, h: u32, n: f32) -> Rc<Image<'static>> {
     thread_local! {
-        static CACHE: RefCell<HashMap<(usize, u32, bool), Rc<Image<'static>>>> =
+        static CACHE: RefCell<HashMap<(usize, u32), Rc<Image<'static>>>> =
             RefCell::new(HashMap::new());
     }
     // A spec is a static string, so its address names it.
-    let key = (spec.as_ptr() as usize, n.to_bits(), crate::bars::airy());
+    let key = (spec.as_ptr() as usize, n.to_bits());
     CACHE.with(|c| {
         c.borrow_mut()
             .entry(key)

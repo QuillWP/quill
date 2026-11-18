@@ -11,7 +11,7 @@ cargo +nightly fuzz run docx
 ```
 
 The targets cover ZIP containers, XML, DOCX, ODT, RTF, HTML, native .qwp files,
-image identification and decoding, settings, glossary files, print-merge data and
+image identification and decoding, settings, print-merge data and
 Markdown, plus `editing`, `character_styles` and `clipboard`, described below.
 
 ## Overnight campaign

@@ -67,6 +67,7 @@ impl DocView {
 
     pub(super) fn layout_pass(&mut self, fonts: &mut Fonts) {
         let n = self.doc.main.paras.len();
+        let mut main_changed = false;
         for ch in self.doc.take_changes() {
             if ch.story == StoryId::Notes {
                 self.notes_dirty = true;
@@ -76,6 +77,7 @@ impl DocView {
                 self.hf_dirty = true;
                 continue;
             }
+            main_changed = true;
             // Paragraph indices and spelling ranges may have changed. Reuse word
             // verdicts, but never paint ranges from before an edit or Undo.
             self.spelling.invalidate();
@@ -98,6 +100,9 @@ impl DocView {
             if let Some(next) = self.layouts.get_mut(first + ch.inserted) {
                 *next = None;
             }
+        }
+        if main_changed {
+            self.status_count = quill_core::text::word_count(&self.doc);
         }
         self.collapsed.resize(n, false);
         if let Some((first, flags)) = self.collapse_after.take() {
@@ -492,7 +497,7 @@ impl DocView {
 
     /// Work out where every paragraph sits: one under another, and table
     /// cells side by side with each row as tall as its tallest cell.
-    pub(super) fn place(&mut self) {
+    pub(super) fn place(&mut self, fonts: &Fonts) {
         let paras = &self.doc.main.paras;
         let n = paras.len();
         // A paragraph's height, less the empty line after a closing page
@@ -569,9 +574,9 @@ impl DocView {
             // after them flows round it.
             if frames_on
                 && row.is_none()
-                && let Some(f) = self.place_frame(i, y)
+                && let Some(f) = self.place_frame(i, y, fonts)
             {
-                let mut fy = f.y;
+                let mut fy = f.y + self.drop_cap_ink_offset(&f, fonts);
                 for p in f.first..=f.last {
                     tops[p] = fy;
                     xs[p] = f.x;

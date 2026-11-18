@@ -43,6 +43,7 @@ mod dialogs;
 mod effects;
 mod files;
 mod fonts;
+mod format_edit;
 mod input;
 mod markdown;
 mod menu_track;
@@ -148,6 +149,7 @@ pub struct WinState {
     /// system's when that is Auto): the interface and the page go dark.
     pub dark: bool,
     zoom_edit: Option<zoom::Edit>,
+    format_edit: Option<format_edit::Edit>,
     review_filter: revisions::Filter,
     review_closed: bool,
     review_width: Option<f32>,
@@ -347,6 +349,7 @@ impl WinState {
             document_zoom: zoom,
             dark: false,
             zoom_edit: None,
+            format_edit: None,
             review_filter: revisions::Filter::All,
             review_closed: false,
             review_width: None,
@@ -602,6 +605,31 @@ impl WinState {
                 _ => {}
             }
         }
+        if self.format_edit.is_some() {
+            match action {
+                Action::Cmd(Cmd::SelectAll) => {
+                    self.format_edit_key(DKey::SelectAll, None);
+                    return Effect::None;
+                }
+                Action::Cmd(Cmd::Copy | Cmd::Cut) => {
+                    if let Some(text) = self.format_edit_selection() {
+                        clip.put_text(&text);
+                        if action == Action::Cmd(Cmd::Cut) {
+                            self.format_edit_key(DKey::Backspace, None);
+                        }
+                    }
+                    return Effect::None;
+                }
+                Action::Cmd(Cmd::Paste | Cmd::PasteText) => {
+                    if let Some(text) = clip.plain_text() {
+                        self.format_edit_text(&text);
+                    }
+                    return Effect::None;
+                }
+                _ if !self.commit_format_edit() => return Effect::None,
+                _ => {}
+            }
+        }
         if self.main_view().in_markdown_source() && action.changes_format() {
             return Effect::None;
         }
@@ -610,7 +638,7 @@ impl WinState {
             Action::About => return Effect::About,
             Action::Licenses => return Effect::Licenses,
             #[cfg(target_os = "macos")]
-            Action::ReadAloud | Action::StopReading => {}
+            Action::ReadAloud | Action::StopReading | Action::SizeWindow | Action::MoveWindow => {}
             Action::Recent(index) => return Effect::OpenRecent(index),
             Action::RemoveRecent(index) => return Effect::RemoveRecent(index),
             Action::ClearRecent => return Effect::ClearRecent,
@@ -661,14 +689,6 @@ impl WinState {
                 s.highlight_missing_fonts = !s.highlight_missing_fonts;
             }),
             Action::ToggleFullScreen => return Effect::FullScreen,
-            Action::ToolbarPosition(at) => crate::settings::update(|s| {
-                s.toolbar_position = at;
-                s.view_toolbar = true;
-            }),
-            Action::CustomizeToolbar => {
-                let (d, st) = crate::customize::dialog();
-                self.dialogs.push((Which::Customize(st), d));
-            }
         }
         Effect::None
     }
@@ -745,6 +765,9 @@ impl WinState {
         if self.zoom_edit.is_some() && !self.commit_zoom() {
             return Effect::None;
         }
+        if self.format_edit.is_some() && !self.commit_format_edit() {
+            return Effect::None;
+        }
         if !self.native_scrollbars && self.horizontal_bar().contains(cx, cy) {
             let v = self.main_view();
             let max = v.max_scroll_x();
@@ -779,14 +802,6 @@ impl WinState {
                 self.open_toolbar_overflow(label);
                 return Effect::None;
             }
-            // The Toolbar Menu button drops its menu rather than waiting
-            // for the release.
-            if let Some(i) = press
-                && toolbar::command(i) == Some(Cmd::ToolbarMenu)
-            {
-                self.open_toolbar_menu(i, label);
-                return Effect::None;
-            }
             self.toolbar_press = press;
             return Effect::None;
         }
@@ -799,7 +814,7 @@ impl WinState {
                     self.open_bar_overflow(false, label, env);
                     return Effect::None;
                 }
-                return self.bar_click(hit, label, env, clip);
+                return self.bar_click(hit, cx, label, env, clip);
             }
             return Effect::None;
         }
@@ -811,7 +826,7 @@ impl WinState {
                     self.open_bar_overflow(true, label, env);
                     return Effect::None;
                 }
-                return self.bar_click(hit, label, env, clip);
+                return self.bar_click(hit, cx, label, env, clip);
             }
             return Effect::None;
         }
@@ -992,6 +1007,7 @@ impl WinState {
     fn bar_click(
         &mut self,
         hit: Hit,
+        x: f32,
         label: &mut Label,
         env: &Env,
         clip: &mut Clipboard,
@@ -1001,7 +1017,25 @@ impl WinState {
             return Effect::None;
         }
         match hit {
-            Hit::FontPopup | Hit::SizePopup | Hit::ColorPopup | Hit::StylePopup => {
+            Hit::FontPopup | Hit::SizePopup => {
+                let rect = bars::popup_rect(
+                    hit,
+                    self.formatting_toolbar_top(),
+                    self.paragraph_toolbar_top(),
+                );
+                if x < rect.right() - 17.0 {
+                    let kind = if hit == Hit::FontPopup {
+                        format_edit::Kind::Font
+                    } else {
+                        format_edit::Kind::Size
+                    };
+                    self.begin_format_edit(kind, env.font_families);
+                } else {
+                    self.open_popup(hit, label, env);
+                }
+                Effect::None
+            }
+            Hit::ColorPopup | Hit::StylePopup => {
                 self.open_popup(hit, label, env);
                 Effect::None
             }
@@ -1025,7 +1059,7 @@ impl WinState {
             Hit::Subscript => Cmd::Subscript,
             Hit::Tool(name) => match bars::tool_command(name) {
                 Some(cmd) => cmd,
-                // Graphs are not built yet.
+                // A reserved or customized slot can have no command.
                 None => return Effect::None,
             },
             Hit::Align(quill_core::Align::Left) => Cmd::AlignLeft,
@@ -1062,8 +1096,8 @@ impl WinState {
             | Hit::StylePopup
             | Hit::FormattingOverflow
             | Hit::ParagraphOverflow => return Effect::None,
-            // The table and page scales are not built yet.
-            _ => return Effect::None,
+            // Normal Scale marks the only ruler mode and needs no action.
+            Hit::Scale => return Effect::None,
         };
         self.view.exec(cmd, false, clip)
     }
@@ -1467,8 +1501,60 @@ struct DocWindow {
     recovery: Option<PathBuf>,
     /// A recovered document stays quarantined until its first successful draw.
     recovery_opening: Option<crate::recovery::Opening>,
+    /// The last autosave failed and the person was told, so the next
+    /// failure stays quiet until one succeeds.
+    autosave_warned: bool,
     #[cfg(target_os = "macos")]
     scrollbars: Option<crate::mac_widgets::MacScrollbars>,
+}
+
+impl DocWindow {
+    /// Tell the person a recovery copy could not be written, as their
+    /// Preferences > Advanced setting says, and only once until a save
+    /// works again. `hidden` is the session's "don't show this warning
+    /// again" answer.
+    fn autosave_failed(&mut self, hidden: &mut bool, error: &str) {
+        eprintln!("quill: autosave failed: {error}");
+        if self.autosave_warned {
+            return;
+        }
+        self.autosave_warned = true;
+        let how = crate::settings::with(|s| s.autosave_failures);
+        if how == crate::settings::AutosaveAlert::Nothing {
+            return;
+        }
+        if how == crate::settings::AutosaveAlert::WarningAndStatus && !*hidden {
+            self.window.request_redraw();
+            let detail = format!(
+                "{error}\n\nThe disk may be full, the drive may have been disconnected or be \
+                 read-only, or Quill may not be allowed to write to its recovery folder. \
+                 Your document is not lost, but edits since you last saved it could be if \
+                 Quill stops unexpectedly. Saving the document now, or to another place, \
+                 keeps your work safe.\n\nQuill will keep trying, and the status line shows \
+                 this problem until a recovery copy is saved."
+            );
+            const MESSAGE: &str = "Quill could not save a recovery copy of this document.";
+            #[cfg(target_os = "macos")]
+            if crate::mac_alert::warn_with_checkbox(
+                MESSAGE,
+                &detail,
+                "Don't show this warning again this session",
+            ) {
+                *hidden = true;
+            }
+            // Only the Mac's alert has the checkbox, so elsewhere the
+            // warning shows once for the session.
+            #[cfg(not(target_os = "macos"))]
+            {
+                crate::alerts::warn(MESSAGE, &detail);
+                *hidden = true;
+            }
+        }
+        self.st.view.status = Some(format!(
+            "Quill could not save a recovery copy of this document. {error}"
+        ));
+        self.window.request_redraw();
+    }
 }
 
 /// Move a shared document from window state `a` to `b`. `a` keeps its
@@ -1504,7 +1590,7 @@ pub enum UserEvent {
     /// Text the Mac sent without a key press (Emoji & Symbols, dictation),
     /// to type into the window in front.
     #[cfg(target_os = "macos")]
-    InsertText(String),
+    InsertText { window: WindowId, text: String },
     /// A background PDF job completed another page.
     PrintProgress {
         window: WindowId,
@@ -1596,6 +1682,8 @@ pub struct App {
     font_catalog: Option<Catalog>,
     fonts: Option<Fonts>,
     font_names: Vec<String>,
+    /// Whether the font lists now include the private system fonts.
+    private_fonts_shown: bool,
     font_families: Vec<FontFamilyInfo>,
     cache: GlyphCache,
     clipboard: Option<Clipboard>,
@@ -1606,6 +1694,9 @@ pub struct App {
     pending: Vec<PathBuf>,
     recent: Vec<PathBuf>,
     last_recovery: Instant,
+    /// The person ticked "don't show this warning again" for autosave
+    /// failures. Lasts until Quill quits.
+    autosave_warning_hidden: bool,
     recovery_serial: u64,
     recovered: bool,
     /// Whether the last session's documents have been offered at startup.
@@ -1648,12 +1739,14 @@ impl App {
             font_catalog: None,
             fonts: None,
             font_names: Vec::new(),
+            private_fonts_shown: false,
             font_families: Vec::new(),
             cache: GlyphCache::new(),
             clipboard: None,
             untitled: 0,
             groups: 0,
             last_recovery: Instant::now(),
+            autosave_warning_hidden: false,
             recovery_serial: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_millis() as u64),
@@ -1676,11 +1769,29 @@ impl App {
         }
     }
 
+    /// Preferences > Fonts turned Show Private System Fonts on or off: list
+    /// the fonts again so the menus follow.
+    fn refresh_private_fonts(&mut self) {
+        let private = crate::settings::with(|s| s.show_private_fonts);
+        if private == self.private_fonts_shown {
+            return;
+        }
+        self.private_fonts_shown = private;
+        if let Some(fonts) = self.fonts.as_mut() {
+            fonts.set_show_private(private);
+            self.font_names = fonts.family_names().iter().map(|s| s.to_string()).collect();
+            self.font_families = fonts.family_info();
+        }
+    }
+
     /// Make `catalog` the fonts every document draws with.
     fn use_catalog(&mut self, catalog: Catalog) {
         crate::font_names::set(&catalog);
         crate::prefs_dialog::set_sources_cut_short(catalog.sources_cut_short());
-        let fonts = Fonts::new(catalog.clone());
+        let mut fonts = Fonts::new(catalog.clone());
+        let private = crate::settings::with(|s| s.show_private_fonts);
+        fonts.set_show_private(private);
+        self.private_fonts_shown = private;
         self.font_names = fonts.family_names().iter().map(|s| s.to_string()).collect();
         self.font_families = fonts.family_info();
         self.font_catalog = Some(catalog);
@@ -1738,6 +1849,26 @@ impl App {
                 pane.other.invalidate_layout();
             }
             w.window.request_redraw();
+        }
+    }
+
+    /// Take the finished autosave batch, telling the person about a failure.
+    fn collect_autosaves(&mut self) {
+        let Some(outcome) = crate::recovery::finished() else {
+            return;
+        };
+        for (path, done) in outcome {
+            let Some((_, w)) = self
+                .windows
+                .iter_mut()
+                .find(|(_, w)| w.recovery.as_deref() == Some(path.as_path()))
+            else {
+                continue;
+            };
+            match done {
+                Ok(()) => w.autosave_warned = false,
+                Err(e) => w.autosave_failed(&mut self.autosave_warning_hidden, &e),
+            }
         }
     }
 
@@ -2022,6 +2153,8 @@ impl App {
                 // Hand the document to a window that stays open.
                 self.take_doc(k);
                 self.remember_frame(i);
+                #[cfg(target_os = "macos")]
+                crate::mac_text_input::unregister(id);
                 self.windows.retain(|(w, _)| *w != id);
                 let left = self.windows.iter().filter(|(_, w)| w.group == g).count();
                 if left == 1
@@ -2039,6 +2172,8 @@ impl App {
                 crate::recovery::remove(self.windows[i].1.recovery.take());
                 crate::recovery::discard(self.windows[i].1.recovery_opening.take());
                 self.remember_frame(i);
+                #[cfg(target_os = "macos")]
+                crate::mac_text_input::unregister(id);
                 self.windows.retain(|(w, _)| *w != id);
                 true
             }
@@ -2125,7 +2260,7 @@ impl App {
         // system's emoji panel) send their text to the window.
         window.set_ime_allowed(true);
         #[cfg(target_os = "macos")]
-        crate::mac_text_input::install(&self.proxy);
+        crate::mac_text_input::install(&self.proxy, &window);
         let id = window.id();
         let mut st = WinState::new(DocView::new(doc, title));
         #[cfg(target_os = "linux")]
@@ -2161,6 +2296,7 @@ impl App {
                 port: Port::default(),
                 recovery: None,
                 recovery_opening: None,
+                autosave_warned: false,
                 #[cfg(target_os = "macos")]
                 scrollbars,
             },
@@ -2700,15 +2836,8 @@ impl ApplicationHandler<UserEvent> for App {
             #[cfg(target_os = "macos")]
             UserEvent::Quit => self.menu_action(el, Action::Cmd(Cmd::Quit)),
             #[cfg(target_os = "macos")]
-            UserEvent::InsertText(text) => {
-                if let Some(id) = self
-                    .windows
-                    .iter()
-                    .find(|(_, w)| w.focused)
-                    .map(|(id, _)| *id)
-                {
-                    self.insert_text(el, id, &text, false);
-                }
+            UserEvent::InsertText { window, text } => {
+                self.insert_text(el, window, &text, false);
             }
             UserEvent::PrintProgress {
                 window,
@@ -2795,17 +2924,13 @@ impl ApplicationHandler<UserEvent> for App {
                 {
                     // A box or button of the color palette is not an item of
                     // the dialog.
-                    let popped = dialog.popout.is_some()
-                        && (id.starts_with("std")
-                            || id.starts_with("cus")
-                            || id == "edit"
-                            || id == "delete_color");
-                    let outcome = if popped {
-                        if id == "edit" || id == "delete_color" {
-                            crate::dialog::Outcome::Button(id)
-                        } else {
-                            crate::dialog::Outcome::Swatch { id, double: false }
-                        }
+                    let popped = if dialog.popout.is_some() {
+                        crate::palette::pop_outcome(id, false)
+                    } else {
+                        None
+                    };
+                    let outcome = if let Some(outcome) = popped {
+                        outcome
                     } else {
                         native.apply_to_model(dialog, id);
                         crate::win_dialog::NativeDialog::outcome(dialog, id)
@@ -2854,6 +2979,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn new_events(&mut self, _el: &ActiveEventLoop, cause: StartCause) {
         crate::events::busy();
+        self.refresh_private_fonts();
         crate::ev_all!("event loop wakes: {cause:?}");
         self.refresh_font_folders();
         if let StartCause::ResumeTimeReached { .. } = cause {
@@ -2862,10 +2988,11 @@ impl ApplicationHandler<UserEvent> for App {
             if self.editor_wake.is_some_and(|deadline| now < deadline) {
                 return;
             }
+            self.collect_autosaves();
             if now >= self.next_recovery() {
-                self.last_recovery = now;
                 let autosave = crate::settings::with(|s| s.autosave_secs) > 0;
                 let mut serial = self.recovery_serial;
+                let mut jobs = Vec::new();
                 for (_, w) in &mut self.windows {
                     if autosave
                         && (w.group == 0 || w.holds)
@@ -2873,20 +3000,28 @@ impl ApplicationHandler<UserEvent> for App {
                         && w.st.main_view().doc.is_modified()
                     {
                         serial = serial.wrapping_add(1);
-                        let (doc, original) = w.st.main_view().recovery_documents();
-                        match crate::recovery::save(
-                            w.recovery.as_deref(),
-                            &doc,
-                            original,
-                            &w.st.main_view().title,
-                            serial,
-                        ) {
-                            Ok(path) => w.recovery = Some(path),
-                            Err(e) => eprintln!("quill: autosave failed: {e}"),
+                        let view = w.st.main_view();
+                        match crate::recovery::slot(w.recovery.as_deref(), &view.title, serial) {
+                            Ok(path) => {
+                                let (doc, original) = view.recovery_documents();
+                                jobs.push(crate::recovery::Job {
+                                    path: path.clone(),
+                                    doc: doc.into_owned(),
+                                    original: original.cloned(),
+                                });
+                                w.recovery = Some(path);
+                            }
+                            Err(e) => {
+                                w.autosave_failed(&mut self.autosave_warning_hidden, &e);
+                            }
                         }
                     }
                 }
                 self.recovery_serial = serial;
+                // A batch still being written means this one waits a tick.
+                if jobs.is_empty() || crate::recovery::start(jobs) {
+                    self.last_recovery = now;
+                }
             }
             for (_, w) in &mut self.windows {
                 if w.st.tick() || w.focused {

@@ -199,7 +199,7 @@ pub fn follow(url: &str) -> bool {
     let url = if scheme.is_empty() && url.contains('.') && !url.contains(' ') {
         // "example.com" with no scheme, as people often type.
         format!("https://{url}")
-    } else if ["http", "https", "mailto", "ftp", "tel"].contains(&scheme.as_str()) {
+    } else if ["http", "https", "mailto"].contains(&scheme.as_str()) {
         url.to_string()
     } else {
         return false;
@@ -242,6 +242,19 @@ mod tests {
 
     fn view(text: &str) -> DocView {
         DocView::new(quill_core::text::from_plain_text(text), "Links".into())
+    }
+
+    #[test]
+    fn only_web_and_mail_links_are_followed() {
+        for url in [
+            "ftp://example.com/file",
+            "tel:+15551234",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "C:\\Windows\\notepad.exe",
+        ] {
+            assert!(!follow(url), "{url}");
+        }
     }
 
     #[test]

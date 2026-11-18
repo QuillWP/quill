@@ -685,6 +685,7 @@ fn document_props(o: &mut Out, p: &DocumentProps) {
             o.flag(2, t.page_numbers);
             o.uint(3, t.from as u64);
             o.uint(4, t.to as u64);
+            o.flag(5, t.entries);
         });
     }
     if let Some(view) = view {
@@ -1323,6 +1324,7 @@ fn read_document_props(b: &[u8]) -> Result<DocumentProps, Damaged> {
                         2 => t.page_numbers = flag(g)?,
                         3 => t.from = (uint(g)?.clamp(1, 9)) as u8,
                         4 => t.to = (uint(g)?.clamp(1, 9)) as u8,
+                        5 => t.entries = flag(g)?,
                         _ => {}
                     }
                 }

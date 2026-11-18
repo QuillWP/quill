@@ -26,7 +26,7 @@ static INSTALLED: RwLock<Option<Installed>> = RwLock::new(None);
 pub fn set(catalog: &quill_layout::Catalog) {
     *INSTALLED.write().unwrap_or_else(|e| e.into_inner()) = Some(Installed {
         postscript: catalog.postscript_names(),
-        families: catalog.family_keys(),
+        families: catalog.usable_names(),
     });
 }
 

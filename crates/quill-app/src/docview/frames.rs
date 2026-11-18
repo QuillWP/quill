@@ -6,6 +6,7 @@
 use super::*;
 use quill_core::props::{Frame, FrameH, FrameRel, FrameV};
 use quill_layout::Clear;
+use quill_layout::layout::{Kind, ParaLayout};
 
 /// A frame placed in the column: paragraphs `first..=last`, at `x`, `y`
 /// (points from the left margin and down the column), `w` by `h`.
@@ -36,6 +37,64 @@ impl FrameBox {
     }
 }
 
+/// Top of the first visible glyph, measured from its paragraph's top.
+fn first_ink_top(layout: &ParaLayout, para: &Paragraph, fonts: &Fonts) -> Option<f32> {
+    let line = layout.lines.first()?;
+    let glyph = layout
+        .line_glyphs(line)
+        .iter()
+        .find(|glyph| glyph.kind == Kind::Text)?;
+    let style = layout.styles.get(glyph.style as usize)?;
+    let size =
+        super::drawing::glyph_size(&style.chp, &para.text, glyph.offset as usize, style.size);
+    let bounds = fonts.ink_bounds(glyph.face, glyph.id, size)?;
+    Some(line.top + line.baseline - style.raise - bounds.top)
+}
+
+/// Visible vertical extent of a paragraph, measured from its top.
+fn ink_vertical(layout: &ParaLayout, para: &Paragraph, fonts: &Fonts) -> Option<(f32, f32)> {
+    layout
+        .lines
+        .iter()
+        .flat_map(|line| {
+            layout.line_glyphs(line).iter().filter_map(move |glyph| {
+                (glyph.kind == Kind::Text).then_some(())?;
+                let style = layout.styles.get(glyph.style as usize)?;
+                let size = super::drawing::glyph_size(
+                    &style.chp,
+                    &para.text,
+                    glyph.offset as usize,
+                    style.size,
+                );
+                let bounds = fonts.ink_bounds(glyph.face, glyph.id, size)?;
+                let baseline = line.top + line.baseline - style.raise;
+                Some((baseline - bounds.top, baseline - bounds.bottom))
+            })
+        })
+        .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+}
+
+/// Visible right edge of every glyph in a paragraph, from its frame origin.
+fn ink_right(layout: &ParaLayout, para: &Paragraph, fonts: &Fonts) -> Option<f32> {
+    layout
+        .lines
+        .iter()
+        .flat_map(|line| layout.line_glyphs(line))
+        .filter(|glyph| glyph.kind == Kind::Text)
+        .filter_map(|glyph| {
+            let style = layout.styles.get(glyph.style as usize)?;
+            let size = super::drawing::glyph_size(
+                &style.chp,
+                &para.text,
+                glyph.offset as usize,
+                style.size,
+            );
+            let bounds = fonts.ink_bounds(glyph.face, glyph.id, size)?;
+            Some(glyph.x + bounds.right)
+        })
+        .reduce(f32::max)
+}
+
 /// How far down a frame sits, in points from the top margin, given the
 /// height of the text area and the page.
 fn frame_top(f: &Frame, h: f32, text_h: f32, page_h: f32, top_margin: f32) -> f32 {
@@ -56,6 +115,84 @@ fn frame_top(f: &Frame, h: f32, text_h: f32, page_h: f32, top_margin: f32) -> f3
 }
 
 impl DocView {
+    /// Lay out a drop capital large enough for its visible outline to run
+    /// from the first body line's ink top to the last baseline it spans.
+    fn fit_drop_cap_layouts(
+        &mut self,
+        fonts: &mut Fonts,
+        opts: &LayoutOptions,
+        name: &impl Fn(u16) -> String,
+    ) {
+        let paras = &self.doc.main.paras;
+        for i in 0..paras.len().saturating_sub(1) {
+            let Some(frame) = paras[i].pap.frame.filter(|f| f.drop_lines > 0) else {
+                continue;
+            };
+            let Some(body) = self.layouts.get(i + 1).and_then(Option::as_ref) else {
+                continue;
+            };
+            let Some(body_top) = first_ink_top(body, &paras[i + 1], fonts) else {
+                continue;
+            };
+            let count = usize::from(frame.drop_lines);
+            let used = count.min(body.lines.len());
+            let Some(last) = body.lines.get(used.saturating_sub(1)) else {
+                continue;
+            };
+            let target_bottom =
+                last.top + last.baseline + last.height * count.saturating_sub(used) as f32;
+            let target_height = target_bottom - body_top;
+            if target_height <= 0.0 {
+                continue;
+            }
+
+            let base_opts = LayoutOptions {
+                width: self.widths[i],
+                wrap: Vec::new(),
+                ..opts.clone()
+            };
+            let joined = Joins::around(paras, i);
+            let base = layout_paragraph_joined(&paras[i], name, fonts, &base_opts, joined);
+            let Some((top, bottom)) = ink_vertical(&base, &paras[i], fonts) else {
+                continue;
+            };
+            let ink_height = bottom - top;
+            if ink_height <= 0.0 {
+                continue;
+            }
+            let scale = (target_height / ink_height).clamp(0.25, 8.0);
+            let mut cap = paras[i].clone();
+            cap.format_range(0, cap.len(), &mut |chp| {
+                chp.size = ((chp.size as f32 * scale).round() as u16).clamp(2, 3276);
+            });
+            cap.mark_chp.size = ((cap.mark_chp.size as f32 * scale).round() as u16).clamp(2, 3276);
+            self.layouts[i] = Some(layout_paragraph_joined(
+                &cap, name, fonts, &base_opts, joined,
+            ));
+        }
+    }
+
+    /// Move a drop cap's text within its exclusion frame so the actual ink,
+    /// not the font's em box, starts with the first body line.
+    pub(super) fn drop_cap_ink_offset(&self, f: &FrameBox, fonts: &Fonts) -> f32 {
+        if !f.drop || f.last + 1 >= self.layouts.len() {
+            return 0.0;
+        }
+        let Some(cap) = self.layouts[f.first].as_ref() else {
+            return 0.0;
+        };
+        let Some(body) = self.layouts[f.last + 1].as_ref() else {
+            return 0.0;
+        };
+        match (
+            first_ink_top(cap, &self.doc.main.paras[f.first], fonts),
+            first_ink_top(body, &self.doc.main.paras[f.last + 1], fonts),
+        ) {
+            (Some(cap), Some(body)) => (body - cap).clamp(-f.h, f.h),
+            _ => 0.0,
+        }
+    }
+
     /// Whether frames are placed on the page (not shown in the text).
     pub(super) fn frames_on(&self) -> bool {
         self.page_view || self.headers_wanted || self.printing
@@ -77,7 +214,7 @@ impl DocView {
     /// Place the frame that starts at paragraph `i`, with the text column
     /// at `y`. None if `i` is not framed. The document's last paragraph is
     /// never taken out of the text, so there is always somewhere to type.
-    pub(super) fn place_frame(&self, i: usize, y: f32) -> Option<FrameBox> {
+    pub(super) fn place_frame(&self, i: usize, y: f32, fonts: &Fonts) -> Option<FrameBox> {
         let paras = &self.doc.main.paras;
         let f = paras[i].pap.frame?;
         if i + 1 >= paras.len() || paras[i].pap.in_table {
@@ -113,13 +250,20 @@ impl DocView {
         let column = pt(props.text_width());
         // Auto width: as wide as the widest line, so a picture or a drop
         // cap gets a frame its own size.
-        let w = match f.width {
-            Some(t) => pt(t),
-            None => (i..=last)
-                .filter_map(layout)
-                .flat_map(|l| l.lines.iter().map(|ln| ln.end_x))
-                .fold(0.0f32, f32::max)
-                .clamp(1.0, column),
+        let w = if f.drop_lines > 0 {
+            layout(i)
+                .and_then(|layout| ink_right(layout, &paras[i], fonts))
+                .unwrap_or_else(|| f.width.map_or(1.0, pt))
+                .clamp(1.0, column)
+        } else {
+            match f.width {
+                Some(t) => pt(t),
+                None => (i..=last)
+                    .filter_map(layout)
+                    .flat_map(|l| l.lines.iter().map(|ln| ln.end_x))
+                    .fold(0.0f32, f32::max)
+                    .clamp(1.0, column),
+            }
         };
         let page = if self.pages.is_empty() {
             0
@@ -208,8 +352,9 @@ impl DocView {
     pub(super) fn place_and_wrap(&mut self, fonts: &mut Fonts, opts: &LayoutOptions) {
         let fonts_table = self.doc.fonts.clone();
         let name = |id: u16| fonts_table.get(id as usize).cloned().unwrap_or_default();
+        self.fit_drop_cap_layouts(fonts, opts, &name);
         for _ in 0..4 {
-            self.place();
+            self.place(fonts);
             let n = self.layouts.len();
             let mut again = false;
             for i in 0..n {
@@ -468,6 +613,75 @@ mod tests {
             assert_eq!(body.lines[usize::from(lines)].left, 0.0);
             assert_eq!(view.doc.main.paras[0].chp_of_char(0).size, 96);
         }
+    }
+
+    #[test]
+    fn a_drop_caps_ink_spans_the_requested_body_lines() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut doc = quill_core::text::from_plain_text(
+            "The lighthouse at Harrow Bay has never been the tallest on the coast.",
+        );
+        assert!(quill_core::tools::drop_cap(
+            &mut doc,
+            quill_core::StoryId::Main,
+            0,
+            1,
+            3,
+            320,
+            0,
+            false,
+            false,
+        ));
+        let mut view = DocView::new(doc, "Drop cap".into());
+        view.page_view = true;
+        view.area = Rect::new(0.0, 0.0, 900.0, 700.0);
+        view.update_layout(&mut fonts);
+        let cap =
+            view.tops[0] + first_ink_top(view.layout(0), &view.doc.main.paras[0], &fonts).unwrap();
+        let body =
+            view.tops[1] + first_ink_top(view.layout(1), &view.doc.main.paras[1], &fonts).unwrap();
+        assert!((cap - body).abs() < 0.01, "cap {cap}, body {body}");
+        let cap_bottom = view.tops[0]
+            + ink_vertical(view.layout(0), &view.doc.main.paras[0], &fonts)
+                .unwrap()
+                .1;
+        let last = &view.layout(1).lines[0];
+        let body_baseline = view.tops[1] + last.top + last.baseline + last.height * 2.0;
+        assert!(
+            (cap_bottom - body_baseline).abs() < 0.5,
+            "cap {cap_bottom}, body {body_baseline}"
+        );
+    }
+
+    #[test]
+    fn a_drop_caps_indent_ends_at_its_visible_ink() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        // Imported files can carry a much wider frame width than the visible
+        // glyph. A drop cap's wrap belongs at the outline instead.
+        let doc = quill_formats::rtf::read(
+            br#"{\rtf1\ansi\pard\fs15\sa380\brdrt\brdrs Credits\par
+                \pard\fs52\dropcapli3\dropcapt1\absw2000 T\par
+                \pard\fs23\qj\sa150\sl288\slmult1 he lighthouse at Harrow Bay has never been
+                the tallest on the coast, nor the brightest, nor the most photographed.\par}"#,
+        )
+        .unwrap();
+        let mut view = DocView::new(doc, "Drop cap".into());
+        view.page_view = true;
+        view.area = Rect::new(0.0, 0.0, 900.0, 700.0);
+        view.update_layout(&mut fonts);
+        let expected = ink_right(view.layout(1), &view.doc.main.paras[1], &fonts).unwrap();
+        let frame = view.frames[0];
+        assert!(
+            (frame.w - expected).abs() < 0.01,
+            "{} != {expected}",
+            frame.w
+        );
+        assert!(frame.w < 100.0, "stored frame width leaked into wrap");
+        assert!(view.layout(2).lines[0].left > 0.0);
     }
 
     #[test]

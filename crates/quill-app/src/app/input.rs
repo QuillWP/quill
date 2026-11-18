@@ -62,6 +62,51 @@ impl App {
             w.window.request_redraw();
             return;
         }
+        if w.st.format_edit.is_some() {
+            let mods = Mods::from_winit(w.mods);
+            if let Key::Character(c) = &event.logical_key
+                && mods.cmd
+            {
+                if c.eq_ignore_ascii_case("v") {
+                    if let Some(text) = clip.plain_text() {
+                        w.st.format_edit_text(&text);
+                    }
+                    w.window.request_redraw();
+                    return;
+                }
+                if c.eq_ignore_ascii_case("c") || c.eq_ignore_ascii_case("x") {
+                    if let Some(text) = w.st.format_edit_selection() {
+                        clip.put_text(&text);
+                        if c.eq_ignore_ascii_case("x") {
+                            w.st.format_edit_key(DKey::Backspace, None);
+                        }
+                    }
+                    w.window.request_redraw();
+                    return;
+                }
+            }
+            let key = match &event.logical_key {
+                Key::Named(NamedKey::Enter) => DKey::Return,
+                Key::Named(NamedKey::Escape) => DKey::Escape,
+                Key::Named(NamedKey::Tab) => DKey::Tab { back: mods.shift },
+                Key::Named(NamedKey::Backspace) => DKey::Backspace,
+                Key::Named(NamedKey::Delete) => DKey::Delete,
+                Key::Named(NamedKey::ArrowLeft) => DKey::Left,
+                Key::Named(NamedKey::ArrowRight) => DKey::Right,
+                Key::Character(c) if mods.cmd && c.eq_ignore_ascii_case("a") => DKey::SelectAll,
+                _ => DKey::Char,
+            };
+            w.st.format_edit_key(
+                key,
+                if mods.cmd {
+                    None
+                } else {
+                    event.text.as_deref()
+                },
+            );
+            w.window.request_redraw();
+            return;
+        }
         if w.st.dialog_has_keys() {
             let mods = Mods::from_winit(w.mods);
             let key = match &event.logical_key {
@@ -247,6 +292,11 @@ impl App {
         let w = &mut self.windows[i].1;
         if w.st.zoom_edit.is_some() {
             w.st.zoom_text(text);
+            w.window.request_redraw();
+            return;
+        }
+        if w.st.format_edit.is_some() {
+            w.st.format_edit_text(text);
             w.window.request_redraw();
             return;
         }

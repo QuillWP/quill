@@ -107,16 +107,11 @@ impl WinState {
 
     pub(super) fn formatting_toolbar_top(&self) -> f32 {
         self.toolbar_top()
-            + if self.show_toolbar && self.toolbar_position() == 0 {
+            + if self.show_toolbar {
                 toolbar::thickness(false)
             } else {
                 0.0
             }
-    }
-
-    /// Preferences > Toolbar: 0 top, 1 left, 2 right.
-    pub(super) fn toolbar_position(&self) -> u8 {
-        crate::settings::with(|s| s.toolbar_position)
     }
 
     /// Where the toolbar is and how long it is, if it is showing.
@@ -124,33 +119,14 @@ impl WinState {
         if !self.show_toolbar {
             return None;
         }
-        let down = (self.height - BAR - self.text_top()).max(0.0);
-        Some(match self.toolbar_position() {
-            1 => (
-                toolbar::Place {
-                    x: 0.0,
-                    y: self.text_top(),
-                    vertical: true,
-                },
-                down,
-            ),
-            2 => (
-                toolbar::Place {
-                    x: self.width - BAR - toolbar::thickness(true),
-                    y: self.text_top(),
-                    vertical: true,
-                },
-                down,
-            ),
-            _ => (
-                toolbar::Place {
-                    x: 0.0,
-                    y: self.toolbar_top(),
-                    vertical: false,
-                },
-                (self.width - 128.0).max(0.0),
-            ),
-        })
+        Some((
+            toolbar::Place {
+                x: 0.0,
+                y: self.toolbar_top(),
+                vertical: false,
+            },
+            (self.width - 128.0).max(0.0),
+        ))
     }
 
     /// How far the text area starts from the left, and how much narrower
@@ -163,11 +139,7 @@ impl WinState {
     /// The same for the toolbar alone, without the docked Style Sheets
     /// palette that sits between it and the text.
     pub(super) fn toolbar_side(&self) -> (f32, f32) {
-        match (self.show_toolbar, self.toolbar_position()) {
-            (true, 1) => (toolbar::thickness(true), toolbar::thickness(true)),
-            (true, 2) => (0.0, toolbar::thickness(true)),
-            _ => (0.0, 0.0),
-        }
+        (0.0, 0.0)
     }
 
     /// The toolbar button under a point, if the point is on the toolbar.
@@ -411,8 +383,11 @@ impl WinState {
             self.vscroll = Rect::new(w - BAR, a.y, BAR, a.h);
             self.vscroll_other = Rect::new(w - BAR, o.y, BAR, o.h);
         }
-        let live =
-            focused && self.menu.is_none() && !self.dialog_has_keys() && self.zoom_edit.is_none();
+        let live = focused
+            && self.menu.is_none()
+            && !self.dialog_has_keys()
+            && self.zoom_edit.is_none()
+            && self.format_edit.is_none();
         // Hyphenation looks for its next place once a change is laid out.
         if let Some((Which::Hyphenation(st), d)) = self.dialogs.last_mut() {
             self.view.update_layout(fonts);
@@ -517,7 +492,14 @@ impl WinState {
         }
         let style = self.view.style_name();
         let status = Rect::new(0.0, h - BAR, w - gutter, BAR);
-        let page = format!("Page {}", self.main_view().caret_page() + 1);
+        let main = self.main_view();
+        let page = format!(
+            "Page {} of {}",
+            main.caret_page() + 1,
+            main.pages.len().max(1)
+        );
+        let paragraphs = chrome::count_label(main.status_count.paragraphs, "paragraph");
+        let characters = chrome::count_label(main.status_count.characters, "character");
         let message = self.view.status.clone();
 
         if let Some(p) = &self.pane {
@@ -559,7 +541,18 @@ impl WinState {
         self.draw_revisions(c, &mut label);
         self.draw_revision_badges(c, &mut label);
         self.draw_comment_links(c, z / k);
-        let hbar = chrome::draw_status(c, &mut label, status, &page, &style, message.as_deref());
+        let hbar = chrome::draw_status(
+            c,
+            &mut label,
+            status,
+            chrome::Status {
+                page: &page,
+                style: &style,
+                paragraphs: &paragraphs,
+                characters: &characters,
+                message: message.as_deref(),
+            },
+        );
         if !self.native_scrollbars {
             let v = self.main_view();
             let max = v.max_scroll_x();
@@ -596,7 +589,20 @@ impl WinState {
         if self.show_formatting_toolbar {
             let chp = self.view.current_chp();
             let font = self.view.doc.font_name(chp.font).to_string();
-            let rs = FormattingToolbarState { font: &font, chp };
+            let edit = self.format_edit.as_ref().map(|edit| bars::FieldEdit {
+                hit: match edit.kind {
+                    format_edit::Kind::Font => Hit::FontPopup,
+                    format_edit::Kind::Size => Hit::SizePopup,
+                },
+                text: &edit.text,
+                anchor: edit.anchor,
+                caret: edit.caret,
+            });
+            let rs = FormattingToolbarState {
+                font: &font,
+                chp,
+                edit,
+            };
             bars::draw_formatting_toolbar(
                 c,
                 &mut label,
@@ -725,34 +731,6 @@ impl WinState {
         });
     }
 
-    /// Drop the Toolbar menu from button `i`: below it on a toolbar across
-    /// the top, beside it on one down the side.
-    pub(super) fn open_toolbar_menu(&mut self, i: usize, label: &mut Label) {
-        let Some((at, _)) = self.toolbar_place() else {
-            return;
-        };
-        let Some(anchor) = toolbar::button_rect(at, i) else {
-            return;
-        };
-        let (m, actions) = app_menus::toolbar_menu(crate::settings::with(|s| s.toolbar_position));
-        let bounds = Rect::new(0.0, 0.0, self.width, self.height);
-        let open = if at.vertical {
-            menu::place_side(label, &m, anchor, bounds)
-        } else {
-            menu::place(label, &m, anchor, bounds, true)
-        };
-        self.menu = Some(MenuTrack {
-            source: MenuSource::Context,
-            menus: vec![m],
-            actions,
-            open,
-            submenu: None,
-            typed: (String::new(), None),
-            opened: Instant::now(),
-            held: true,
-        });
-    }
-
     /// Drop the commands that did not fit in a narrow standard toolbar.
     pub(super) fn open_toolbar_overflow(&mut self, label: &mut Label) {
         let Some((at, length)) = self.toolbar_place() else {
@@ -774,8 +752,7 @@ impl WinState {
                 )
             })
             .collect();
-        let position = crate::settings::with(|s| s.toolbar_position);
-        let (menu, actions) = app_menus::toolbar_overflow(&items, position);
+        let (menu, actions) = app_menus::toolbar_overflow(&items);
         let bounds = Rect::new(0.0, 0.0, self.width, self.height);
         let open = menu::place(label, &menu, anchor, bounds, true);
         self.menu = Some(MenuTrack {

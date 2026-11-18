@@ -32,7 +32,7 @@ impl Default for Fonts {
         Fonts {
             source_font: MONO.into(),
             source_size: 20,
-            display_font: "New York".into(),
+            display_font: quill_core::default_font().into(),
             display_size: 24,
         }
     }

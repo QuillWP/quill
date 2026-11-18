@@ -29,16 +29,6 @@ const MONTHS: [&str; 12] = [
     "December",
 ];
 
-const DAYS: [&str; 7] = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-];
-
 #[cfg(unix)]
 pub fn now() -> Now {
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -146,29 +136,9 @@ impl Now {
         MONTHS[(self.month as usize).clamp(1, 12) - 1]
     }
 
-    pub fn day_name(&self) -> &'static str {
-        DAYS[self.weekday as usize % 7]
-    }
-
     /// "October 14, 2026", what Insert > Date types.
     pub fn date_normal(&self) -> String {
         format!("{} {}, {}", self.month_name(), self.day, self.year)
-    }
-
-    /// "Wed, Oct 14, 2026".
-    pub fn date_abbreviated(&self) -> String {
-        format!(
-            "{}, {} {}, {}",
-            &self.day_name()[..3],
-            &self.month_name()[..3],
-            self.day,
-            self.year
-        )
-    }
-
-    /// "Wednesday, October 14, 2026".
-    pub fn date_long(&self) -> String {
-        format!("{}, {}", self.day_name(), self.date_normal())
     }
 }
 
@@ -189,8 +159,6 @@ mod tests {
         };
         assert_eq!(n.date(), "10/3/26");
         assert_eq!(n.date_normal(), "October 3, 2026");
-        assert_eq!(n.date_abbreviated(), "Sat, Oct 3, 2026");
-        assert_eq!(n.date_long(), "Saturday, October 3, 2026");
         assert_eq!(n.time_with_seconds(), "4:05:09 PM");
         assert_eq!(n.time(), "4:05 PM");
         let midnight = Now { hour: 0, ..n };

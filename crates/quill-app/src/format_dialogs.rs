@@ -25,6 +25,8 @@ pub enum Which {
     /// Paste Special, and the forms it offers.
     PasteSpecial(Vec<crate::paste_special::Form>),
     Character(CharProps),
+    /// Font > Other: the size when the dialog opened.
+    FontSize(u16),
     Paragraph(ParaProps),
     /// Paragraph formatting staged inside the Style dialog.
     StyleParagraph(ParaProps),
@@ -74,7 +76,6 @@ pub enum Which {
     /// Regex Search; true while the Replace part is showing.
     RegexSearch(bool),
     Sed,
-    Glossary(crate::glossary::GlossaryState),
     /// The counts and which of them are shown.
     WordCount(crate::tool_dialogs::Counts, [bool; 4]),
     ChangeCase,
@@ -115,7 +116,7 @@ pub enum Alert {
     ContinueSearch(Box<crate::find_dialog::Search>),
     /// Delete a color text uses: OK makes that text black, Choose Color…
     /// asks for another.
-    DeleteColor(quill_core::props::Rgb),
+    DeleteColor(quill_core::props::Rgb, &'static str),
 }
 
 /// Use As Default in the Document or Section dialog: make the dialog's
@@ -584,6 +585,18 @@ pub fn parse_font_size(text: &str) -> Option<u16> {
         .then(|| (size * 2.0).round() as u16)
 }
 
+/// Font > Other: type a point size instead of choosing a preset.
+pub fn font_size(view: &DocView) -> (Dialog, Which) {
+    let size = view.current_chp().size;
+    let mut d = Dialog::new("Font Size", 250.0, 92.0);
+    d.text("Size:", 14.0, 16.0);
+    d.field("size", &crate::bars::format_size(size), 62.0, 12.0, 92.0);
+    d.text("points", 160.0, 16.0);
+    d.action_buttons(&[("cancel", "Cancel", 68.0, false), ("ok", "OK", 68.0, true)]);
+    d.focus("size");
+    (d, Which::FontSize(size))
+}
+
 pub fn read_character(d: &Dialog, base: &CharProps, view: &mut DocView) -> Option<CharProps> {
     let mut c = *base;
     let font = d.selected_text("font");
@@ -724,6 +737,7 @@ pub fn paragraph_properties(p: &ParaProps) -> Dialog {
     );
     d.disable("noline");
 
+    d.button("dropcap", "Drop Cap…", 358.0, 80.0, 68.0, false);
     d.button("tabs", "Tabs…", 358.0, 108.0, 68.0, false);
     d.button("border", "Border…", 358.0, 136.0, 68.0, false);
     d.button("frame", "Frame…", 358.0, 164.0, 68.0, false);
@@ -804,6 +818,15 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
             });
             true
         }
+        Which::FontSize(base) => {
+            let Some(size) = parse_font_size(&d.field_text("size")) else {
+                return false;
+            };
+            if size != *base {
+                view.format_chars("Formatting", move |c| c.size = size);
+            }
+            true
+        }
         Which::Paragraph(base) => {
             let Some(target) = read_paragraph(d, base) else {
                 return false;
@@ -856,7 +879,6 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
         | Which::Grep(_)
         | Which::RegexSearch(_)
         | Which::Sed
-        | Which::Glossary(_)
         | Which::WordCount(..)
         | Which::ChangeCase
         | Which::ReviewChanges
@@ -940,6 +962,19 @@ mod tests {
     }
 
     #[test]
+    fn other_font_size_changes_only_after_valid_ok() {
+        let mut v = view("Some text");
+        let before = v.current_chp().size;
+        let (mut d, mut which) = font_size(&v);
+        d.set_field("size", "large");
+        assert!(!apply(&mut which, &mut d, &mut v));
+        assert_eq!(v.current_chp().size, before);
+        d.set_field("size", "13.5");
+        assert!(apply(&mut which, &mut d, &mut v));
+        assert_eq!(v.current_chp().size, 27);
+    }
+
+    #[test]
     fn ok_without_changes_keeps_spacing_and_indents_exact() {
         // None of these shows exactly in inches: 12 pt is "0.17 in", which
         // would read back as 12.25 pt, and 0.5 cm is "0.2 in".
@@ -957,6 +992,12 @@ mod tests {
         assert!(apply(&mut which, &mut d, &mut v));
         assert_eq!(v.doc.main.paras[0].pap.before, 360);
         assert_eq!(v.doc.main.paras[0].pap.after, 120);
+    }
+
+    #[test]
+    fn paragraph_offers_drop_cap_with_the_related_dialogs() {
+        let d = paragraph_properties(&ParaProps::default());
+        assert_eq!(d.item_label("dropcap"), "Drop Cap…");
     }
 
     #[test]

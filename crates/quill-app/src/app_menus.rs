@@ -39,15 +39,16 @@ pub enum Action {
     ToggleStylesPalette,
     ToggleMissingFonts,
     ToggleFullScreen,
-    /// Dock the toolbar: 0 top, 1 left, 2 right.
-    ToolbarPosition(u8),
-    CustomizeToolbar,
     About,
     Licenses,
     #[cfg(target_os = "macos")]
     ReadAloud,
     #[cfg(target_os = "macos")]
     StopReading,
+    #[cfg(target_os = "macos")]
+    SizeWindow,
+    #[cfg(target_os = "macos")]
+    MoveWindow,
     /// Open an entry from File > Open Recent.
     Recent(usize),
     /// Take one entry out of the recent list (Open Recent > Remove from List).
@@ -401,7 +402,6 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
                 ],
             }),
             b.cmd("Go To…", Cmd::GoTo),
-            b.cmd("Glossary…", Cmd::Glossary),
             b.cmd("Hyperlink…", Cmd::Hyperlink).key("⌘⌥K"),
             b.cmd("Remove Link", Cmd::RemoveHyperlink)
                 .enabled(v.has_link()),
@@ -467,8 +467,6 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
                 .checked(cx.show_formatting_toolbar),
             b.item("Paragraph Toolbar", Action::ToggleParagraphToolbar)
                 .checked(cx.show_paragraph_toolbar),
-            b.item("Stylesheets Palette", Action::ToggleStylesPalette)
-                .checked(crate::settings::with(|s| s.show_styles_palette)),
             b.item("Highlight Missing Fonts", Action::ToggleMissingFonts)
                 .checked(crate::settings::with(|s| s.highlight_missing_fonts)),
             b.item("Ruler", Action::ToggleRuler)
@@ -551,8 +549,6 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Picture…", Cmd::PictureProperties)
                 .enabled(v.selected_picture().is_some()),
             sep(),
-            b.cmd("Paragraph Styles…", Cmd::StyleDialog),
-            b.cmd("Character Styles…", Cmd::CharacterStylesDialog),
             b.cmd("Revert To Style", Cmd::RevertToStyle),
             b.cmd("Clear Formatting", Cmd::ClearFormatting),
             sep(),
@@ -584,6 +580,7 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             });
         font_items.push(item);
     }
+    font_items.push(b.cmd("Other…", Cmd::FontSizeDialog));
     font_items.push(sep());
     font_items.push(b.cmd("Increase Font Size", Cmd::LargerFontSize));
     font_items.push(b.cmd("Decrease Font Size", Cmd::SmallerFontSize));
@@ -627,6 +624,12 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
 
     let mut window_items = vec![
         b.cmd("Show Clipboard", Cmd::ShowClipboard),
+        b.item("Style Sheets", Action::ToggleStylesPalette)
+            .checked(crate::settings::with(|s| s.show_styles_palette)),
+        #[cfg(target_os = "macos")]
+        b.item("Size To…", Action::SizeWindow),
+        #[cfg(target_os = "macos")]
+        b.item("Move To…", Action::MoveWindow),
         b.cmd("New Window", Cmd::NewWindow),
         sep(),
     ];
@@ -867,47 +870,13 @@ pub fn size_popup(cx: &MenuContext) -> (Menu, Vec<Action>) {
     )
 }
 
-/// The menu that drops from the toolbar's last button: where the toolbar
-/// sits, and Customize. The position is the same setting Preferences shows.
-pub fn toolbar_menu(position: u8) -> (Menu, Vec<Action>) {
-    let mut b = Builder {
-        actions: vec![Action::None],
-    };
-    let items = vec![
-        b.item("Top", Action::ToolbarPosition(0))
-            .checked(position == 0),
-        b.item("Left", Action::ToolbarPosition(1))
-            .checked(position == 1),
-        b.item("Right", Action::ToolbarPosition(2))
-            .checked(position == 2),
-        Item::separator(),
-        b.item("Customize…", Action::CustomizeToolbar),
-    ];
-    (
-        Menu {
-            title: String::new(),
-            items,
-        },
-        b.actions,
-    )
-}
-
 /// Commands clipped from the standard toolbar in a narrow window.
-pub fn toolbar_overflow(
-    items: &[(String, Option<Cmd>, bool, bool)],
-    position: u8,
-) -> (Menu, Vec<Action>) {
+pub fn toolbar_overflow(items: &[(String, Option<Cmd>, bool, bool)]) -> (Menu, Vec<Action>) {
     let mut b = Builder {
         actions: vec![Action::None],
     };
     let mut menu_items = Vec::new();
     for (label, command, enabled, checked) in items {
-        if *command == Some(Cmd::ToolbarMenu) {
-            let (menu, actions) = toolbar_menu(position);
-            let submenu = b.absorb(menu, &actions);
-            menu_items.push(b.item(label, Action::None).submenu(submenu));
-            continue;
-        }
         menu_items.push(match command {
             Some(command) => {
                 let item = b.cmd(label, *command).enabled(*enabled);
@@ -973,9 +942,7 @@ fn bar_label(hit: BarHit) -> &'static str {
         BarHit::TabType(quill_core::TabAlign::Right) => "Right Tab",
         BarHit::TabType(quill_core::TabAlign::Decimal) => "Decimal Tab",
         BarHit::TabType(quill_core::TabAlign::Bar) => "Vertical Line Tab",
-        BarHit::Scale(0) => "Normal Scale",
-        BarHit::Scale(1) => "Table Scale",
-        BarHit::Scale(_) => "Page Scale",
+        BarHit::Scale => "Normal Scale",
         BarHit::Tool(name) => name,
         BarHit::FormattingOverflow | BarHit::ParagraphOverflow => "More Toolbar Items",
     }
@@ -997,7 +964,7 @@ fn bar_checked(cx: &MenuContext, hit: BarHit, tab_type: quill_core::TabAlign) ->
         BarHit::Spacing(_) => pap.line == quill_core::LineSpacing::AtLeast(480),
         BarHit::SpaceBefore(open) => (pap.before > 0) == open,
         BarHit::TabType(kind) => tab_type == kind,
-        BarHit::Scale(n) => n == 0,
+        BarHit::Scale => true,
         BarHit::Tool("Show/Hide ¶") => cx.view.show_marks,
         _ => false,
     }
@@ -1016,7 +983,7 @@ fn bar_checkable(hit: BarHit) -> bool {
             | BarHit::Spacing(_)
             | BarHit::SpaceBefore(_)
             | BarHit::TabType(_)
-            | BarHit::Scale(_)
+            | BarHit::Scale
             | BarHit::Tool("Show/Hide ¶")
     )
 }
@@ -1045,8 +1012,8 @@ pub fn bar_overflow(
             items.push(b.item(bar_label(hit), Action::None).submenu(submenu));
             continue;
         }
-        let enabled = !matches!(hit, BarHit::Scale(1 | 2))
-            && !matches!(hit, BarHit::Tool(name) if crate::bars::tool_command(name).is_none());
+        let enabled =
+            !matches!(hit, BarHit::Tool(name) if crate::bars::tool_command(name).is_none());
         let mut item = b.item(bar_label(hit), Action::Bar(hit)).enabled(enabled);
         if bar_checkable(hit) {
             item = item.checked(bar_checked(cx, hit, tab_type));
@@ -1556,7 +1523,21 @@ mod tests {
             actions[default_font.id as usize],
             Action::Cmd(Cmd::DefaultFont)
         );
-        assert!(!font.items.iter().any(|item| item.label == "Other…"));
+        let point_24 = font
+            .items
+            .iter()
+            .position(|item| item.label == "24 Point")
+            .unwrap();
+        let other = font
+            .items
+            .iter()
+            .position(|item| item.label == "Other…")
+            .unwrap();
+        assert_eq!(other, point_24 + 1);
+        assert_eq!(
+            actions[font.items[other].id as usize],
+            Action::Cmd(Cmd::FontSizeDialog)
+        );
 
         let window = menus.iter().find(|menu| menu.title == "Window").unwrap();
         assert!(!window.items.iter().any(|item| item.label == "Help…"));
@@ -1585,18 +1566,17 @@ mod tests {
                 .map(|i| actions[i.id as usize].clone())
         };
         assert!(!menus.iter().any(|m| m.title == "Character Styles"));
+        assert_eq!(action("Format", "Paragraph Styles…"), None);
+        assert_eq!(action("Format", "Character Styles…"), None);
+        assert_eq!(action("View", "Style Sheets"), None);
         assert_eq!(
-            action("Format", "Paragraph Styles…"),
-            Some(Action::Cmd(Cmd::StyleDialog))
-        );
-        assert_eq!(
-            action("Format", "Character Styles…"),
-            Some(Action::Cmd(Cmd::CharacterStylesDialog))
-        );
-        assert_eq!(
-            action("View", "Stylesheets Palette"),
+            action("Window", "Style Sheets"),
             Some(Action::ToggleStylesPalette)
         );
-        assert_eq!(action("Window", "Stylesheets Palette"), None);
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(action("Window", "Size To…"), Some(Action::SizeWindow));
+            assert_eq!(action("Window", "Move To…"), Some(Action::MoveWindow));
+        }
     }
 }

@@ -157,7 +157,7 @@ fn make_about() -> *mut AnyObject {
     // SAFETY: all objects and selectors are AppKit/Foundation classes, called
     // on the main thread. The window owns its views and stays alive when closed.
     unsafe {
-        let rect = NSRect::new(NSPoint::ZERO, NSSize::new(420.0, 600.0));
+        let rect = NSRect::new(NSPoint::ZERO, NSSize::new(700.0, 430.0));
         let window: *mut AnyObject = msg_send![class!(NSPanel), alloc];
         let window: *mut AnyObject = msg_send![window, initWithContentRect: rect styleMask: 3usize backing: 2usize defer: false];
         let _: () = msg_send![window, setTitle: &*NSString::from_str("About Quill")];
@@ -165,16 +165,14 @@ fn make_about() -> *mut AnyObject {
         let content: *mut AnyObject = msg_send![window, contentView];
         let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
         let icon: *mut AnyObject = msg_send![app, applicationIconImage];
-        let image: *mut AnyObject = msg_send![class!(NSImageView), alloc];
-        let image: *mut AnyObject = msg_send![image, initWithFrame: NSRect::new(NSPoint::new(178.0, 520.0), NSSize::new(64.0, 64.0))];
-        let _: () = msg_send![image, setImage: icon];
-        let _: () = msg_send![image, setImageScaling: 3usize];
-        let _: () = msg_send![content, addSubview: image];
-        let _: () = msg_send![image, release];
-        // A debug build also says when and from what it was built, which
-        // takes a line from the credits below.
+        let app_icon: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+        let app_icon: *mut AnyObject = msg_send![app_icon, initWithFrame: NSRect::new(NSPoint::new(28.0, 330.0), NSSize::new(72.0, 72.0))];
+        let _: () = msg_send![app_icon, setImage: icon];
+        let _: () = msg_send![app_icon, setImageScaling: 3usize];
+        let _: () = msg_send![content, addSubview: app_icon];
+        let _: () = msg_send![app_icon, release];
+        // A debug build also says when and from what it was built.
         let build = cfg!(debug_assertions).then(crate::build_info::summary);
-        let low = if build.is_some() { 20.0 } else { 0.0 };
         let mut lines = vec![
             (
                 if cfg!(debug_assertions) {
@@ -182,34 +180,46 @@ fn make_about() -> *mut AnyObject {
                 } else {
                     "Quill".to_owned()
                 },
-                486.0,
-                20.0,
+                370.0,
+                24.0,
             ),
             (
                 format!("Version {}", env!("CARGO_PKG_VERSION")),
-                462.0,
-                12.0,
+                346.0,
+                13.0,
             ),
             (
                 "Copyright \u{a9} 2026 Lucas Krupinski and Quill contributors".to_owned(),
-                438.0 - low,
+                322.0,
                 11.0,
             ),
         ];
         if let Some(build) = build {
-            lines.push((build, 440.0, 10.0));
+            lines.push((build, 304.0, 10.0));
         }
         for (string, y, size) in lines {
             let label: *mut AnyObject =
                 msg_send![class!(NSTextField), labelWithString: &*NSString::from_str(&string)];
-            let _: () = msg_send![label, setFrame: NSRect::new(NSPoint::new(20.0, y), NSSize::new(380.0, 28.0))];
+            let _: () = msg_send![label, setFrame: NSRect::new(NSPoint::new(122.0, y), NSSize::new(550.0, 30.0))];
             let font: *mut AnyObject = msg_send![class!(NSFont), systemFontOfSize: size];
             let _: () = msg_send![label, setFont: font];
-            let _: () = msg_send![label, setAlignment: 1usize];
             let _: () = msg_send![content, addSubview: label];
         }
+        let bytes = include_bytes!("../../../assets/quill-about.jpg");
+        let data: *mut AnyObject = msg_send![class!(NSData), dataWithBytes: bytes.as_ptr().cast::<std::ffi::c_void>() length: bytes.len()];
+        let artwork: *mut AnyObject = msg_send![class!(NSImage), alloc];
+        let artwork: *mut AnyObject = msg_send![artwork, initWithData: data];
+        if !artwork.is_null() {
+            let image: *mut AnyObject = msg_send![class!(NSImageView), alloc];
+            let image: *mut AnyObject = msg_send![image, initWithFrame: NSRect::new(NSPoint::new(28.0, 28.0), NSSize::new(252.0, 252.0))];
+            let _: () = msg_send![image, setImage: artwork];
+            let _: () = msg_send![image, setImageScaling: 1usize];
+            let _: () = msg_send![content, addSubview: image];
+            let _: () = msg_send![image, release];
+            let _: () = msg_send![artwork, release];
+        }
         let scroll: *mut AnyObject = msg_send![class!(NSTextView), scrollableTextView];
-        let _: () = msg_send![scroll, setFrame: NSRect::new(NSPoint::new(20.0, 20.0), NSSize::new(380.0, 406.0 - low))];
+        let _: () = msg_send![scroll, setFrame: NSRect::new(NSPoint::new(304.0, 28.0), NSSize::new(368.0, 252.0))];
         let _: () = msg_send![scroll, setHasVerticalScroller: true];
         let _: () = msg_send![scroll, setAutohidesScrollers: true];
         let text: *mut AnyObject = msg_send![scroll, documentView];
@@ -229,14 +239,16 @@ fn make_about() -> *mut AnyObject {
     }
 }
 
-/// The credits: the summary, then the link, centered in the system font.
+/// The credits: the website, summary and license link in the system font.
 fn credits() -> *mut AnyObject {
     // SAFETY: called on the main thread with live AppKit objects, using
     // messages the classes named answer.
     unsafe {
         let summary = crate::licenses::SUMMARY;
         let link = crate::licenses::LINK_TEXT;
-        let all = format!("quillwp.com\n\n{summary}\n\n{link}");
+        let introduction =
+            "A small word processor inspired by Lucas's favorite word processor from 1992.";
+        let all = format!("{introduction}\n\nquillwp.com\n\n{summary}\n\n{link}");
         let text = NSString::from_str(&all);
         let attributed: *mut AnyObject = msg_send![class!(NSMutableAttributedString), alloc];
         let attributed: *mut AnyObject = msg_send![attributed, initWithString: &*text];
@@ -250,7 +262,6 @@ fn credits() -> *mut AnyObject {
         let color: *mut AnyObject = msg_send![class!(NSColor), labelColor];
         add("NSColor", color, whole);
         let style: *mut AnyObject = msg_send![class!(NSMutableParagraphStyle), new];
-        let _: () = msg_send![style, setAlignment: 1usize]; // centered
         add("NSParagraphStyle", style, whole);
         // The link covers the last sentence.
         let target = NSString::from_str("quill://licenses");
@@ -259,37 +270,13 @@ fn credits() -> *mut AnyObject {
         add("NSLink", url, NSRange::new(at, link.encode_utf16().count()));
         let website = NSString::from_str("https://quillwp.com");
         let website: *mut AnyObject = msg_send![class!(NSURL), URLWithString: &*website];
-        add("NSLink", website, NSRange::new(0, "quillwp.com".len()));
+        let at = all[..all.find("quillwp.com").unwrap()]
+            .encode_utf16()
+            .count();
+        add("NSLink", website, NSRange::new(at, "quillwp.com".len()));
 
-        let bytes = include_bytes!("../../../assets/quill-about.jpg");
-        let data: *mut AnyObject = msg_send![class!(NSData), dataWithBytes: bytes.as_ptr().cast::<std::ffi::c_void>() length: bytes.len()];
-        let image: *mut AnyObject = msg_send![class!(NSImage), alloc];
-        let image: *mut AnyObject = msg_send![image, initWithData: data];
-        if image.is_null() {
-            let _: () = msg_send![style, release];
-            return attributed;
-        }
-        let attachment: *mut AnyObject = msg_send![class!(NSTextAttachment), new];
-        let _: () = msg_send![attachment, setImage: image];
-        let _: () =
-            msg_send![attachment, setBounds: NSRect::new(NSPoint::ZERO, NSSize::new(260.0, 260.0))];
-        let picture: *mut AnyObject =
-            msg_send![class!(NSAttributedString), attributedStringWithAttachment: attachment];
-        let result: *mut AnyObject = msg_send![class!(NSMutableAttributedString), new];
-        let _: () = msg_send![result, appendAttributedString: picture];
-        let newline: *mut AnyObject = msg_send![class!(NSAttributedString), alloc];
-        let newline: *mut AnyObject =
-            msg_send![newline, initWithString: &*NSString::from_str("\n")];
-        let _: () = msg_send![result, appendAttributedString: newline];
-        let _: () = msg_send![result, appendAttributedString: attributed];
-        let length: usize = msg_send![result, length];
-        let _: () = msg_send![result, addAttribute: &*NSString::from_str("NSParagraphStyle") value: style range: NSRange::new(0, length)];
-        let _: () = msg_send![newline, release];
-        let _: () = msg_send![attachment, release];
-        let _: () = msg_send![image, release];
-        let _: () = msg_send![attributed, release];
         let _: () = msg_send![style, release];
-        result
+        attributed
     }
 }
 

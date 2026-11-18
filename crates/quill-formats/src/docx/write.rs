@@ -680,6 +680,17 @@ fn paragraph(doc: &Document, ids: &[String], p: &Paragraph, out: &mut String) {
     let main = main_index(doc, p);
     // A live table of contents is a TOC field, so Word can update it too.
     let toc = doc.props.live_toc.zip(doc.existing_toc());
+    // The index Quill made is an INDEX field and its entries are XE fields,
+    // so Word can update it.
+    let index = doc.existing_index();
+    let marks = quill_core::contents::marked_entry_spans(p);
+    if let (Some(range), Some(at)) = (&index, main)
+        && range.start == at
+    {
+        out.push_str(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> INDEX </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        );
+    }
     if let (Some((o, _)), Some(0)) = (toc, main) {
         let _ = write!(
             out,
@@ -745,7 +756,29 @@ fn paragraph(doc: &Document, ids: &[String], p: &Paragraph, out: &mut String) {
                 text.clear();
             }
         };
-        for c in p.text[s..e].chars() {
+        for (offset, c) in p.text[s..e].char_indices() {
+            let offset = s + offset;
+            if let Some(mark) = marks
+                .iter()
+                .find(|m| offset >= m.start && offset < m.end.max(m.start + 1))
+            {
+                // The marker, entry text and ';' of an index entry are one
+                // XE field. Visible text between them stays in the text.
+                if offset + c.len_utf8() >= mark.end {
+                    flush(&mut text, out);
+                    out.push_str("</w:r>");
+                    if let Some(xe) = entry_field(mark.kind, &mark.flags, &mark.text) {
+                        out.push_str(&xe);
+                    }
+                    out.push_str("<w:r>");
+                    if !props.is_empty() {
+                        let _ = write!(out, "<w:rPr>{props}</w:rPr>");
+                    }
+                }
+                if chp.hidden {
+                    continue;
+                }
+            }
             let instr = match c {
                 chars::FIELD_PAGE => Some((" PAGE ", "1")),
                 chars::FIELD_DATE => Some((r#" DATE \@ "M/d/yy" "#, "")),
@@ -822,18 +855,138 @@ fn paragraph(doc: &Document, ids: &[String], p: &Paragraph, out: &mut String) {
     if toc.is_some_and(|(_, end)| main == Some(end)) {
         out.push_str(r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#);
     }
+    if index.as_ref().is_some_and(|r| main == Some(r.end - 1)) {
+        out.push_str(r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#);
+    }
     out.push_str("</w:p>");
+}
+
+/// The hidden entry Quill keeps for an XE (index) or TC (table of contents)
+/// field instruction, such as `.ib.Cats:Siamese;` or `.c2.Methods;`, or None
+/// if `instr` is neither with text. Page ranges (\r) and cross references
+/// (\t) are not kept: the entry still lists the page it is on. A TC entry
+/// for a table other than the default one (\f with something but C) is
+/// not Quill's to list.
+pub(crate) fn marked_entry(instr: &str) -> Option<String> {
+    let mut chars = instr.trim_start().chars().peekable();
+    let mut words: Vec<(String, bool)> = Vec::new();
+    while let Some(&c) = chars.peek() {
+        if c.is_whitespace() {
+            chars.next();
+        } else if c == '"' {
+            chars.next();
+            let mut w = String::new();
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' => break,
+                    '\\' => match chars.next() {
+                        Some(n) => w.push(n),
+                        None => break,
+                    },
+                    c => w.push(c),
+                }
+            }
+            words.push((w, true));
+        } else {
+            let mut w = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_whitespace() {
+                    break;
+                }
+                w.push(c);
+                chars.next();
+            }
+            words.push((w, false));
+        }
+    }
+    let kind = words.first()?.0.to_ascii_uppercase();
+    let text = words.get(1)?.0.clone();
+    let switches: Vec<&(String, bool)> = words.iter().skip(2).collect();
+    let arg = |name: &str| {
+        let k = switches
+            .iter()
+            .position(|(w, quoted)| !quoted && w.eq_ignore_ascii_case(name))?;
+        switches.get(k + 1).map(|(w, _)| w.as_str())
+    };
+    let has = |name: &str| {
+        switches
+            .iter()
+            .any(|(w, quoted)| !quoted && w.eq_ignore_ascii_case(name))
+    };
+    let text = text.replace([';', '\n', '\r'], ",");
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    match kind.as_str() {
+        "XE" => {
+            let mut flags = String::new();
+            if has("\\b") {
+                flags.push('b');
+            }
+            if has("\\i") {
+                flags.push('i');
+            }
+            Some(format!(".i{flags}.{text};"))
+        }
+        "TC" => {
+            if arg("\\f").is_some_and(|f| !f.eq_ignore_ascii_case("c")) {
+                return None;
+            }
+            let level = arg("\\l").and_then(|l| l.parse::<u8>().ok()).unwrap_or(1);
+            let level = level.clamp(1, 9);
+            Some(if level == 1 {
+                format!(".c.{text};")
+            } else {
+                format!(".c{level}.{text};")
+            })
+        }
+        _ => None,
+    }
+}
+
+/// An index or table of contents entry as Word's XE or TC field, in hidden
+/// text as Word makes it. Bold and italic page numbers are the \b and \i
+/// switches. A page range is kept as its first entry, since the range's end
+/// has no field.
+fn entry_field(kind: char, flags: &str, text: &str) -> Option<String> {
+    if flags.contains(')') || text.is_empty() {
+        return None;
+    }
+    let mut instr = if kind == 'c' {
+        let level = flags.parse::<u8>().unwrap_or(1).clamp(1, 9);
+        format!(r#" TC "{}" \f C \l {level}"#, field_quote(text))
+    } else {
+        let mut instr = format!(r#" XE "{}""#, field_quote(text));
+        if flags.contains('b') {
+            instr.push_str(r" \b");
+        }
+        if flags.contains('i') {
+            instr.push_str(r" \i");
+        }
+        instr
+    };
+    instr.push(' ');
+    // Not hidden-text formatting: Word shows an XE or TC field's code only
+    // with the formatting marks on, and an index or contents update skips
+    // an entry whose runs are formatted as hidden text.
+    Some(format!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve">{}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        esc(&instr)
+    ))
 }
 
 /// The TOC field instruction for a table of contents made with `o`:
 /// headings of the levels it lists, or TC entries; \n leaves out the
 /// page numbers.
 pub(crate) fn toc_instruction(o: &quill_core::contents::TocOptions) -> String {
-    let mut s = if o.outline {
-        format!(r#"TOC \o "{}-{}""#, o.from, o.to)
-    } else {
-        r#"TOC \f"#.to_string()
-    };
+    let mut s = String::from("TOC");
+    if o.outline || !o.entries {
+        s.push_str(&format!(r#" \o "{}-{}""#, o.from, o.to));
+    }
+    if o.entries {
+        s.push_str(r#" \f"#);
+    }
     if !o.page_numbers {
         s.push_str(r#" \n"#);
     }
@@ -849,6 +1002,7 @@ pub(crate) fn toc_options(instr: &str) -> Option<quill_core::contents::TocOption
     }
     let mut o = quill_core::contents::TocOptions {
         outline: false,
+        entries: false,
         ..Default::default()
     };
     let mut known = false;
@@ -866,7 +1020,10 @@ pub(crate) fn toc_options(instr: &str) -> Option<quill_core::contents::TocOption
                     o.to = b.clamp(1, 9).max(o.from);
                 }
             }
-            "\\f" => known = true,
+            "\\f" => {
+                o.entries = true;
+                known = true;
+            }
             "\\n" => o.page_numbers = false,
             _ => {}
         }

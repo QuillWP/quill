@@ -22,7 +22,12 @@ fn collection_dialog(
         10.0,
     );
     for (i, (id, label)) in choices.into_iter().enumerate() {
-        d.radio(id, label, 70.0 + 80.0 * i as f32, 10.0, 1, i == 0);
+        if page_numbers {
+            // A table of contents can collect both kinds of line.
+            d.check(id, label, 70.0 + 80.0 * i as f32, 10.0, true);
+        } else {
+            d.radio(id, label, 70.0 + 80.0 * i as f32, 10.0, 1, i == 0);
+        }
     }
     if page_numbers {
         d.check("numbers", "Show Page Numbers", 10.0, 36.0, true);
@@ -45,7 +50,7 @@ fn collection_dialog(
 pub fn toc() -> Dialog {
     collection_dialog(
         "Table of Contents",
-        [("outline", "Outline"), ("cparas", ".C. Paragraphs")],
+        [("outline", "Headings"), ("entries", "TOC Entries")],
         "Level",
         true,
     )
@@ -61,10 +66,15 @@ pub fn level_changed(d: &mut Dialog, id: &str) {
 
 pub fn read_toc(d: &Dialog) -> Option<TocOptions> {
     let mut o = TocOptions {
-        outline: d.radio_on(1) == "outline",
+        outline: d.is_on("outline"),
+        entries: d.is_on("entries"),
         page_numbers: d.is_on("numbers"),
         ..TocOptions::default()
     };
+    // With neither ticked there would be nothing to list.
+    if !o.outline && !o.entries {
+        o.outline = true;
+    }
     if d.radio_on(2) == "range" {
         let n = |id| {
             d.field_text(id)

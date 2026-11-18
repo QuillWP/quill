@@ -23,7 +23,6 @@ pub mod app {
 
 #[path = "docview/clipboard_rich.rs"]
 pub mod clipboard_rich;
-pub mod glossary_file;
 pub mod image;
 pub use quill_formats::png;
 pub mod regional;

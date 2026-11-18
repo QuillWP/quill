@@ -8,9 +8,11 @@ Applications folder. A Mac you build on yourself opens the app without the
 
 - macOS 11 Big Sur or later. Quill runs on macOS 11 and later; the build
   tools below may need a newer macOS than that.
-- An Apple Silicon Mac (M1 or newer). The published builds are for Apple
-  Silicon only. Building on an Intel Mac should work the same way, but it has
-  not been tested.
+- A Mac with an Apple Silicon (M1 or newer) or Intel processor. Quill builds
+  for the processor of the Mac you build on. The published downloads are made
+  on an Apple Silicon Mac, for both kinds of Mac (see "Packages for both kinds
+  of Mac" below). The Intel builds have not been tested on Intel hardware yet,
+  and building on an Intel Mac has not been tested either.
 - Several gigabytes of free disk space for the tools and the build.
 - An internet connection the first time, to download the tools and the code
   libraries Quill uses.
@@ -117,3 +119,35 @@ stopped, at the cost of running much more slowly:
     python3 tools/package.py --debug
 
 It is made at `target/debug/Quill Debug.app`.
+
+## Packages for both kinds of Mac
+
+Steps 5 and 6 build only for the Mac you are using. To make the disk images
+that are published, add `--dist`:
+
+    python3 tools/package.py --dist
+
+On a Mac this builds Quill for both Apple Silicon and Intel. It builds for your
+own processor first and then cross-compiles for the other one, which needs no
+extra software on the Mac, but the other processor's Rust target must be
+installed once. For an Apple Silicon Mac, that is:
+
+    rustup target add x86_64-apple-darwin
+
+(On an Intel Mac, add `aarch64-apple-darwin` instead.) If it is missing,
+`--dist` stops before building anything and prints that command.
+
+The disk images are written to the `dist` folder, one for each processor, with
+the processor in the name:
+
+    Quill-<version>-macos-aarch64.dmg   (Apple Silicon)
+    Quill-<version>-macos-x86_64.dmg    (Intel)
+
+`dist/Quill.app` is the app for your own Mac. Add `--debug` to make the debug
+versions of both. The packages are signed ad hoc, so macOS shows the warning
+described in the README when someone opens them. The Intel build is made on an
+Apple Silicon Mac and has not been run on Intel hardware yet.
+
+To build for just one processor, set it yourself:
+
+    CARGO_BUILD_TARGET=x86_64-apple-darwin python3 tools/package.py --dist

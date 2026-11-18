@@ -112,6 +112,7 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
         cell_layers: Vec::new(),
         toc_field: None,
         other_generated: false,
+        index_field: false,
         budget: crate::ReadBudget::default(),
     };
     // .docm and .dotm files keep their Visual Basic project here.
@@ -444,11 +445,18 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
     crate::comments::settle(&mut r.doc, &real);
     // A TOC field Quill can keep up to date, made as Quill makes its own (at
     // the start, before a section break), stays live.
-    if r.toc_field.is_some() && r.doc.existing_toc().is_some() {
+    let toc_kept = r.toc_field.is_some() && r.doc.existing_toc().is_some();
+    let index_kept = r.index_field && r.doc.existing_index().is_some();
+    if toc_kept {
         r.doc.props.live_toc = r.toc_field;
-        if !r.other_generated {
-            r.report.forget(notes::GENERATED_INDEXES);
-        }
+    }
+    // Every generated field is one Quill can make again.
+    if (toc_kept || index_kept)
+        && !r.other_generated
+        && r.toc_field.is_some() == toc_kept
+        && r.index_field == index_kept
+    {
+        r.report.forget(notes::GENERATED_INDEXES);
     }
     r.doc.forget_history();
     if let Some(why) = r.budget.too_large() {
@@ -731,6 +739,9 @@ struct Reader {
     toc_field: Option<quill_core::contents::TocOptions>,
     /// An index, or a second table of contents, kept as plain text.
     other_generated: bool,
+    /// An INDEX field in the main text, which stays an index Quill can make
+    /// again if it is laid out as Quill's own.
+    index_field: bool,
     /// The lists that have numbered a paragraph, by numId.
     lists_used: HashSet<String>,
     /// The pictures the part being read refers to, by relationship id.
@@ -2123,6 +2134,25 @@ impl Reader {
                         let link = link.map_or(0, quill_core::link::intern);
                         self.read_runs(child, p, CharProps { link, ..base }, field)
                     }
+                    None if child
+                        .attr("instr")
+                        .and_then(super::write::marked_entry)
+                        .is_some() =>
+                    {
+                        let entry = child
+                            .attr("instr")
+                            .and_then(super::write::marked_entry)
+                            .unwrap_or_default();
+                        let at = p.len();
+                        p.insert(
+                            at,
+                            &entry,
+                            CharProps {
+                                hidden: true,
+                                ..base
+                            },
+                        );
+                    }
                     None => {
                         let instr = child.attr("instr").unwrap_or_default();
                         self.note_field(instr);
@@ -2316,8 +2346,23 @@ impl Reader {
                     }
                     Some("end") => {
                         if field.depth == 1 {
+                            // An index entry becomes Quill's hidden entry.
+                            if let Some(entry) = super::write::marked_entry(&field.instr) {
+                                let at = p.len();
+                                p.insert(at, &std::mem::take(&mut text), chp);
+                                let at = p.len();
+                                p.insert(
+                                    at,
+                                    &entry,
+                                    CharProps {
+                                        hidden: true,
+                                        ..chp
+                                    },
+                                );
                             // A field with no stored result.
-                            if let Some(c) = field_kind(&field.instr).filter(|_| !field.separated) {
+                            } else if let Some(c) =
+                                field_kind(&field.instr).filter(|_| !field.separated)
+                            {
                                 text.push(c);
                             } else if !field.separated {
                                 let instr = field.instr.clone();
@@ -2581,9 +2626,20 @@ impl Reader {
 
     /// A field Quill keeps as its current text.
     fn note_field(&mut self, instr: &str) {
+        if super::write::marked_entry(instr).is_some() {
+            return;
+        }
         let toc = super::write::toc_options(instr);
         if self.part == Part::Main && self.toc_field.is_none() && toc.is_some() {
             self.toc_field = toc;
+        } else if self.part == Part::Main
+            && !self.index_field
+            && instr
+                .split_whitespace()
+                .next()
+                .is_some_and(|w| w.eq_ignore_ascii_case("INDEX"))
+        {
+            self.index_field = true;
         } else if matches!(
             instr
                 .split_whitespace()

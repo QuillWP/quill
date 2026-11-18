@@ -82,12 +82,14 @@ publish them oldest first, one commit per tag, built from the tag's own tree
 workspace version and the README status line to that version, add its section
 to `VERSION-HISTORY.md` headed with the date of the tag commit in
 quill-review, run the checks above, build the release and debug packages
-(`--dist` and `--dist --debug`) and keep both disk images of every version in
-`dist/`, record their sizes in the README table, and commit and tag. Review
+(`--dist` and `--dist --debug`; each makes an Apple Silicon and an Intel
+disk image) and keep all the disk images of every version in `dist/`, check
+the Apple Silicon app is still under the 8 MB the README claims, and commit and tag. Review
 all the commits together before pushing, then push, and make one GitHub
-release per tag with both disk images and that version's history section.
-State in the release which packages were built (Mac only, ad hoc signed unless
-the signing variables were set) and which debug.
+release per tag with all the disk images and that version's history section.
+State in the release which packages were built (Mac only, the Intel ones built
+but not tested on Intel hardware, ad hoc signed unless the signing variables
+were set) and which are debug.
 
 ## Tagging
 

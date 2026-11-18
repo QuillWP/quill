@@ -517,16 +517,7 @@ impl DocView {
     /// Type text where the selection is, as one undoable step, with the
     /// insertion point's format.
     pub fn insert_text(&mut self, text: &str) {
-        self.doc.break_typing();
-        self.type_text_raw(text);
-    }
-
-    /// Insert a fragment (a glossary entry) at the selection.
-    pub fn insert_fragment(&mut self, label: &'static str, frag: &Fragment) {
-        self.doc.begin(label, self.sel);
-        let at = self.delete_selection();
-        let end = self.doc.insert_fragment(MAIN, at, frag);
-        self.finish_edit(Selection::caret(end));
+        self.insert_service_text(text);
     }
 
     /// Tools > Word Count over the selection, or the whole text without

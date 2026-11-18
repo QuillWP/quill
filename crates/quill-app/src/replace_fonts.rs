@@ -5,8 +5,60 @@ use crate::dialog::Dialog;
 use crate::docview::DocView;
 use quill_layout::FontFamilyInfo;
 
-/// Keep the missing names, replace them with the insertion font, or cancel.
-/// The clipboard selection has not changed the document when this is shown.
+/// What the person chose in the missing fonts warning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FontChoice {
+    /// Choose replacements for the missing fonts.
+    Replace,
+    /// Keep the missing font names and show stand-ins.
+    Keep,
+    /// The third button: OK when opening a file, Cancel when pasting.
+    Other,
+}
+
+/// The one warning about missing fonts, for opening a file and for pasting,
+/// so the two always look and behave alike. `other` labels the third button.
+pub fn ask_missing_fonts(text: String, other: &str) -> FontChoice {
+    let answer = crate::app::message_box(
+        rfd::MessageLevel::Warning,
+        "Quill",
+        text,
+        rfd::MessageButtons::YesNoCancelCustom(
+            "Replace Fonts…".into(),
+            "Keep Fonts".into(),
+            other.into(),
+        ),
+    );
+    match answer {
+        rfd::MessageDialogResult::Custom(label) if label == "Replace Fonts…" => {
+            FontChoice::Replace
+        }
+        rfd::MessageDialogResult::Custom(label) if label == "Keep Fonts" => FontChoice::Keep,
+        _ => FontChoice::Other,
+    }
+}
+
+/// Pasting text set in the Mac's private system fonts keeps them, so the
+/// paste is faithful, but other systems do not have them. False cancels.
+pub fn confirm_private_paste(names: &[String]) -> bool {
+    let shown = names
+        .iter()
+        .take(10)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::app::ask(
+        "The pasted text uses private system fonts.",
+        &format!(
+            "{shown}\n\nThese fonts belong to this Mac. They will not be available on other platforms, where the text will show in another font."
+        ),
+        "Paste",
+    )
+}
+
+/// Some(false) keeps the missing names, Some(true) pastes with them and then
+/// opens Replace Missing Fonts so each can be replaced, None cancels. The
+/// document has not changed when this is shown.
 pub fn confirm_paste(missing: &[String], replacement: &str) -> Option<bool> {
     let mut names = missing
         .iter()
@@ -17,22 +69,13 @@ pub fn confirm_paste(missing: &[String], replacement: &str) -> Option<bool> {
     if missing.len() > 10 {
         names.push_str(&format!("\n{} more missing fonts.", missing.len() - 10));
     }
-    let answer = crate::app::message_box(
-        rfd::MessageLevel::Warning,
-        "Quill",
-        format!(
-            "Some fonts in the pasted text are unavailable.\n\n{names}\n\nKeep Fonts preserves their names and displays substitute fonts. Replace uses {replacement} instead, keeping the other formatting."
-        ),
-        rfd::MessageButtons::YesNoCancelCustom(
-            "Replace".into(),
-            "Keep Fonts".into(),
-            "Cancel".into(),
-        ),
+    let text = format!(
+        "Some fonts in the pasted text are unavailable.\n\n{names}\n\nKeep Fonts preserves their names and displays substitute fonts. Replace Fonts... pastes the text, then lets you choose a replacement for each missing font (the font at the insertion point is {replacement})."
     );
-    match answer {
-        rfd::MessageDialogResult::Custom(label) if label == "Replace" => Some(true),
-        rfd::MessageDialogResult::Custom(label) if label == "Keep Fonts" => Some(false),
-        _ => None,
+    match ask_missing_fonts(text, "Cancel") {
+        FontChoice::Replace => Some(true),
+        FontChoice::Keep => Some(false),
+        FontChoice::Other => None,
     }
 }
 

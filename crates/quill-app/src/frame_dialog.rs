@@ -1,4 +1,5 @@
-//! Format > Frame and Insert > Drop Cap, laid out from the original.
+//! Format > Frame and Insert > Drop Cap. Drop Cap is also available from
+//! Format > Paragraph, beside the other paragraph-related dialogs.
 
 use crate::dialog::{Dialog, units};
 use crate::docview::DocView;

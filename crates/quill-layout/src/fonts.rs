@@ -38,6 +38,15 @@ pub struct FaceKey {
     pub fake_italic: bool,
 }
 
+/// The visible outline of a glyph from its pen position and baseline, in points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InkBounds {
+    pub left: f32,
+    pub bottom: f32,
+    pub right: f32,
+    pub top: f32,
+}
+
 #[derive(Clone, Debug)]
 struct FaceSource {
     path: PathBuf,
@@ -205,6 +214,17 @@ impl Catalog {
         self.families
             .iter()
             .map(|f| f.name.to_lowercase())
+            .collect()
+    }
+
+    /// The family names a person can use, in lower case. A system font kept
+    /// under a private name counts under its plain one: macOS has New York as
+    /// ".New York", and Quill shows it for "New York", so "New York" is not
+    /// missing. This is the same rule `Fonts::substitute` follows.
+    pub fn usable_names(&self) -> HashSet<String> {
+        self.families
+            .iter()
+            .map(|f| f.name.trim_start_matches('.').to_lowercase())
             .collect()
     }
 
@@ -543,7 +563,7 @@ pub const UI_FONT: &str = "Quill UI";
 /// has installed them, so lines break where they did in Word.
 fn aliases(name: &str) -> &'static [&'static str] {
     match name.to_ascii_lowercase().as_str() {
-        "quill ui" => {
+        "quill ui" | ".applesystemuifont" | ".sfns-regular" | ".sf ns" | ".sf compact" => {
             #[cfg(target_os = "macos")]
             {
                 &[
@@ -576,6 +596,7 @@ fn aliases(name: &str) -> &'static [&'static str] {
             "Noto Serif",
             "Liberation Serif",
             "DejaVu Serif",
+            "Times",
         ],
         // Legacy document font substitutions; the interface has its own role.
         "geneva" => &[
@@ -612,6 +633,7 @@ fn aliases(name: &str) -> &'static [&'static str] {
             "Book Antiqua",
             "TeX Gyre Pagella",
             "DejaVu Serif",
+            "Times",
         ],
         "symbol" => &["Symbol", "Standard Symbols PS"],
         // Office's sans-serif faces.
@@ -641,14 +663,24 @@ fn aliases(name: &str) -> &'static [&'static str] {
             "Times New Roman",
             "Liberation Serif",
             "DejaVu Serif",
+            "Times",
         ],
-        "constantia" => &["Charter", "Georgia", "Times New Roman", "Liberation Serif"],
-        "book antiqua" | "palatino linotype" => &["Palatino", "TeX Gyre Pagella", "DejaVu Serif"],
+        "constantia" => &[
+            "Charter",
+            "Georgia",
+            "Times New Roman",
+            "Liberation Serif",
+            "Times",
+        ],
+        "book antiqua" | "palatino linotype" => {
+            &["Palatino", "TeX Gyre Pagella", "DejaVu Serif", "Times"]
+        }
         "garamond" => &[
             "EB Garamond",
             "Baskerville",
             "Times New Roman",
             "Liberation Serif",
+            "Times",
         ],
         "consolas" | "lucida console" => &["Menlo", "Monaco", "DejaVu Sans Mono", "Courier New"],
         // Japanese and Chinese faces Office documents name.
@@ -671,7 +703,8 @@ fn aliases(name: &str) -> &'static [&'static str] {
     }
 }
 
-/// Used when a font and all its aliases are missing.
+/// Used when a font and all its aliases are missing, after the system's
+/// default document font and then the system's own font.
 const LAST_RESORT: &[&str] = &[
     "Times",
     "Times New Roman",
@@ -870,6 +903,8 @@ pub struct Fonts {
     loaded: HashMap<(PathBuf, u32, u16), FaceId>,
     resolved: HashMap<(String, bool, bool), FaceKey>,
     fallback_faces: Option<Vec<FaceId>>,
+    /// List the system's private fonts too (see `family_names`).
+    show_private: bool,
 }
 
 /// Font bytes live for the whole run, so faces can borrow them as `'static`.
@@ -921,15 +956,24 @@ impl Fonts {
             loaded: HashMap::new(),
             resolved: HashMap::new(),
             fallback_faces: None,
+            show_private: false,
         }
     }
 
-    /// Family names for the Font menu, sorted, without hidden system fonts.
+    /// Whether the font lists include the private system fonts (names that
+    /// start with a dot). Text can use them either way; this only decides
+    /// whether a person picks them from a menu.
+    pub fn set_show_private(&mut self, on: bool) {
+        self.show_private = on;
+    }
+
+    /// Family names for the Font menu, sorted, without private system fonts
+    /// unless `set_show_private` turned them on.
     pub fn family_names(&self) -> Vec<&str> {
         self.catalog
             .families
             .iter()
-            .filter(|f| !f.hidden)
+            .filter(|f| !f.hidden || self.show_private)
             .map(|f| f.name.as_str())
             .collect()
     }
@@ -941,7 +985,7 @@ impl Fonts {
         self.catalog
             .families
             .iter()
-            .filter(|f| !f.hidden)
+            .filter(|f| !f.hidden || self.show_private)
             .map(|f| {
                 let mut variants = Vec::new();
                 for (bold, italic) in [(false, false), (true, false), (false, true), (true, true)] {
@@ -976,6 +1020,20 @@ impl Fonts {
         &self.faces[id as usize]
     }
 
+    /// What shows in place of a font that is not installed and has no
+    /// look-alike: the default document font, else the system's own font,
+    /// else any font a person can see in the font menu. Private system fonts
+    /// are not chosen by name, so a missing font never reads as ".Something".
+    fn last_resort(&self) -> Option<&Family> {
+        let public = |n: &&str| self.catalog.find(n).filter(|f| !f.hidden);
+        std::iter::once(quill_core::default_font())
+            .chain(aliases(UI_FONT).iter().copied())
+            .chain(LAST_RESORT.iter().copied())
+            .find_map(|n| public(&n))
+            .or_else(|| self.catalog.families.iter().find(|f| !f.hidden))
+            .or_else(|| self.catalog.families.first())
+    }
+
     /// The installed family shown in place of `name`, chosen the way
     /// `resolve` chooses it. None when `name` is installed, or when the
     /// stand-in is the same design under a private name (macOS keeps New
@@ -984,11 +1042,15 @@ impl Fonts {
         if self.catalog.find(name).is_some() {
             return None;
         }
+        // A private system font a Mac app named in copied text is the Mac's
+        // own font, not a missing one.
+        if cfg!(target_os = "macos") && name.starts_with('.') {
+            return None;
+        }
         let found = aliases(name)
             .iter()
-            .chain(LAST_RESORT)
             .find_map(|n| self.catalog.find(n))
-            .or_else(|| self.catalog.families.first())?;
+            .or_else(|| self.last_resort())?;
         if found
             .name
             .trim_start_matches('.')
@@ -1007,9 +1069,8 @@ impl Fonts {
         }
         let found = std::iter::once(name)
             .chain(aliases(name).iter().copied())
-            .chain(LAST_RESORT.iter().copied())
             .find_map(|n| self.catalog.find(n).cloned())
-            .or_else(|| self.catalog.families.first().cloned());
+            .or_else(|| self.last_resort().cloned());
         let result = match found {
             Some(family) => {
                 self.pick_face(&family, bold, italic, name.eq_ignore_ascii_case(UI_FONT))
@@ -1178,6 +1239,39 @@ impl Fonts {
         } else {
             adv
         }
+    }
+
+    /// A glyph's actual visible outline at `size` points. This includes the
+    /// synthetic slant and weight used when the family lacks that face.
+    pub fn ink_bounds(&self, key: FaceKey, glyph: GlyphId, size: f32) -> Option<InkBounds> {
+        let face = &self.faces[key.face as usize];
+        let outline = face.font.outline(glyph)?;
+        let scale = size / face.units_per_em;
+        let shear = if key.fake_italic {
+            crate::ITALIC_SHEAR
+        } else {
+            0.0
+        };
+        let b = outline.bounds;
+        let xs = [
+            b.min.x + b.min.y * shear,
+            b.max.x + b.min.y * shear,
+            b.min.x + b.max.y * shear,
+            b.max.x + b.max.y * shear,
+        ];
+        let left = xs.into_iter().fold(f32::INFINITY, f32::min) * scale;
+        let mut right = xs.into_iter().fold(f32::NEG_INFINITY, f32::max) * scale;
+        let bottom = b.min.y.min(b.max.y) * scale;
+        let top = b.min.y.max(b.max.y) * scale;
+        if key.fake_bold {
+            right += bold_offset(size);
+        }
+        Some(InkBounds {
+            left,
+            bottom,
+            right,
+            top,
+        })
     }
 
     /// Kerning between two glyphs of the same face, in points.
@@ -1485,6 +1579,55 @@ mod tests {
     }
 
     #[test]
+    fn a_privately_named_system_font_is_usable_under_its_plain_name() {
+        let path = PathBuf::from("unused.ttf");
+        let catalog = Catalog::from_files(&[
+            ("Times", path.clone(), 0, 400, false),
+            (".New York", path, 0, 400, false),
+        ]);
+        let names = catalog.usable_names();
+        assert!(names.contains("new york"));
+        assert!(names.contains("times"));
+        assert!(!names.contains("zapfino"));
+    }
+
+    #[test]
+    fn private_fonts_are_listed_only_when_asked_for() {
+        let path = PathBuf::from("unused.ttf");
+        let mut fonts = Fonts::new(Catalog::from_files(&[
+            (".SF NS", path.clone(), 0, 400, false),
+            ("Arial", path, 0, 400, false),
+        ]));
+        assert_eq!(fonts.family_names(), ["Arial"]);
+        assert_eq!(fonts.family_info().len(), 1);
+        fonts.set_show_private(true);
+        assert_eq!(fonts.family_names(), [".SF NS", "Arial"]);
+        assert_eq!(fonts.family_info().len(), 2);
+        // Naming one in text is not a missing font on the Mac.
+        #[cfg(target_os = "macos")]
+        assert_eq!(fonts.substitute(".AppleSystemUIFont"), None);
+    }
+
+    #[test]
+    fn a_missing_font_shows_in_the_default_font_and_never_a_private_one() {
+        let path = PathBuf::from("unused.ttf");
+        let default = quill_core::default_font();
+        let fonts = Fonts::new(Catalog::from_files(&[
+            (".AardvarkUI", path.clone(), 0, 400, false),
+            ("Times", path.clone(), 0, 400, false),
+            (default, path.clone(), 0, 400, false),
+        ]));
+        assert_eq!(fonts.substitute("Zapfino"), Some(default));
+        // With the default font gone, a public font stands in, not the
+        // private one that sorts first.
+        let fonts = Fonts::new(Catalog::from_files(&[
+            (".AardvarkUI", path.clone(), 0, 400, false),
+            ("Zebra Sans", path, 0, 400, false),
+        ]));
+        assert_eq!(fonts.substitute("Zapfino"), Some("Zebra Sans"));
+    }
+
+    #[test]
     fn substitutes_name_the_font_shown_instead() {
         let path = PathBuf::from("unused.ttf");
         let fonts = Fonts::new(Catalog::from_files(&[
@@ -1497,7 +1640,9 @@ mod tests {
         // Office's fonts get a face of their kind, sans or serif.
         assert_eq!(fonts.substitute("Calibri"), Some("Arial"));
         assert_eq!(fonts.substitute("Cambria"), Some("Times"));
-        assert_eq!(fonts.substitute("Zapfino"), Some("Times"));
+        // A font with no look-alike shows in the system's own font, not a
+        // serif: the default document font when installed, else the system's.
+        assert_eq!(fonts.substitute("Zapfino"), Some("Arial"));
         assert_eq!(fonts.substitute("Helvetica"), Some("Arial"));
     }
 

@@ -82,6 +82,19 @@ fn title_from_path(path: &Path) -> String {
     stem.splitn(3, '-').nth(2).unwrap_or("Untitled").to_string()
 }
 
+/// Where one document's recovery copy lives: `current`, or a new stable
+/// slot on its first autosave.
+pub fn slot(current: Option<&Path>, title: &str, serial: u64) -> Result<PathBuf, String> {
+    match current {
+        Some(path) => Ok(path.to_path_buf()),
+        None => Ok(new_path(
+            &directory().ok_or_else(|| "Quill's recovery folder is unavailable.".to_string())?,
+            title,
+            serial,
+        )),
+    }
+}
+
 /// Refresh one document's recovery copy, creating its stable slot on the
 /// first autosave. `original` is the formatted document behind edited
 /// Markdown source, kept beside it so recovery can put Source view back.
@@ -92,14 +105,7 @@ pub fn save(
     title: &str,
     serial: u64,
 ) -> Result<PathBuf, String> {
-    let path = match current {
-        Some(path) => path.to_path_buf(),
-        None => new_path(
-            &directory().ok_or_else(|| "Quill's recovery folder is unavailable.".to_string())?,
-            title,
-            serial,
-        ),
-    };
+    let path = slot(current, title, serial)?;
     // The text goes first: if Quill stops between the two writes, what
     // was typed is there, at worst without the document behind it.
     match original {
@@ -113,6 +119,61 @@ pub fn save(
         }
     }
     Ok(path)
+}
+
+/// One window's autosave: copies of its documents, so the typing thread
+/// does not wait for them to be written.
+pub struct Job {
+    pub path: PathBuf,
+    pub doc: Document,
+    pub original: Option<Document>,
+}
+
+/// Each job's recovery path and whether it was written.
+pub type Outcome = Vec<(PathBuf, Result<(), String>)>;
+
+/// The writer thread, while it has work or an answer nobody has taken.
+static WRITER: std::sync::Mutex<Option<std::thread::JoinHandle<Outcome>>> =
+    std::sync::Mutex::new(None);
+
+fn writer() -> std::sync::MutexGuard<'static, Option<std::thread::JoinHandle<Outcome>>> {
+    WRITER.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Write the jobs on a background thread. Returns false, writing nothing,
+/// when the last batch is still running or its outcome has not been taken.
+pub fn start(jobs: Vec<Job>) -> bool {
+    let mut slot = writer();
+    if slot.is_some() {
+        return false;
+    }
+    *slot = Some(std::thread::spawn(move || {
+        jobs.into_iter()
+            .map(|job| {
+                let done = save(Some(&job.path), &job.doc, job.original.as_ref(), "", 0);
+                (job.path, done.map(|_| ()))
+            })
+            .collect()
+    }));
+    true
+}
+
+/// The last batch's outcome, once it has finished.
+pub fn finished() -> Option<Outcome> {
+    let mut slot = writer();
+    if !slot.as_ref()?.is_finished() {
+        return None;
+    }
+    slot.take()?.join().ok()
+}
+
+/// Wait for any batch in flight, so a late write cannot bring back a
+/// recovery file that was just removed.
+pub fn wait() {
+    let handle = writer().take();
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
 }
 
 /// A document left by an earlier process.
@@ -242,6 +303,7 @@ pub fn load_all() -> Vec<Recovered> {
 
 pub fn remove(path: Option<PathBuf>) {
     if let Some(path) = path {
+        wait();
         let _ = std::fs::remove_file(original_path(&path));
         let _ = std::fs::remove_file(path);
     }
@@ -250,6 +312,39 @@ pub fn remove(path: Option<PathBuf>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_autosave_writes_every_job_and_reports_each() {
+        let dir = std::env::temp_dir().join(format!("quill-bg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("good.wrec");
+        // A file where a folder is needed, so this write fails.
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let bad = blocker.join("bad.wrec");
+        let job = |path: &Path| Job {
+            path: path.to_path_buf(),
+            doc: Document::new(),
+            original: None,
+        };
+        assert!(start(vec![job(&good), job(&bad)]));
+        // Only one batch at a time.
+        assert!(!start(vec![job(&good)]));
+        let outcome = loop {
+            if let Some(outcome) = finished() {
+                break outcome;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(outcome.len(), 2);
+        assert!(outcome[0].1.is_ok() && good.exists());
+        assert!(outcome[1].1.is_err());
+        // Removing waits for a batch that is still running.
+        assert!(start(vec![job(&good)]));
+        remove(Some(good.clone()));
+        assert!(!good.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn recovery_names_are_safe_and_keep_a_readable_title() {

@@ -157,6 +157,7 @@ pub enum DialogId {
     PageSetup,
     Print,
     Character,
+    FontSize,
     Paragraph,
     SummaryInfo,
     Section,
@@ -170,14 +171,12 @@ pub enum DialogId {
     CharacterStyles,
     Preferences,
     DefaultFont,
-    ToolbarPreferences,
     Find,
     Replace,
     GoTo,
     Grep,
     RegexSearch,
     Sed,
-    Glossary,
     WordCount,
     ChangeCase,
     Renumber,
@@ -237,6 +236,9 @@ enum Repeatable {
 
 pub struct DocView {
     pub(crate) doc: Document,
+    /// Whole-document counts for the status bar, refreshed with main-text
+    /// layout changes rather than recomputed on every repaint and scroll.
+    pub(crate) status_count: quill_core::text::WordCount,
     pub title: String,
     /// Where the document was opened from or last saved to.
     pub path: Option<std::path::PathBuf>,
@@ -371,6 +373,9 @@ pub struct DocView {
     /// A message shown where the page number goes, like Calculate's
     /// answer. Cleared by the next edit or move.
     pub status: Option<String>,
+    /// Fonts a paste warned about, for Replace Missing Fonts to list even if the
+    /// layout's font catalog counts one as present.
+    pub pasted_missing: Vec<String>,
     /// Where the last few edits were, newest last, for Go Back.
     back: Vec<Position>,
     /// A picture handle being dragged.
@@ -403,8 +408,10 @@ pub struct DocView {
 
 impl DocView {
     pub fn new(doc: Document, title: String) -> Self {
+        let status_count = quill_core::text::word_count(&doc);
         DocView {
             doc,
+            status_count,
             title,
             path: None,
             path_chosen: false,
@@ -471,6 +478,7 @@ impl DocView {
             last_click: None,
             repeat: None,
             status: None,
+            pasted_missing: Vec::new(),
             back: Vec::new(),
             pic_drag: None,
             pic_crop: None,

@@ -1,4 +1,4 @@
-//! Edit Color as the standard macOS Colors panel. The panel is shown
+//! More Colors as the standard macOS Colors panel. The panel is shown
 //! modally with Cancel and OK under it, so it answers like Quill's other
 //! dialogs: OK gives the color, Cancel or the close button gives nothing.
 
@@ -45,7 +45,7 @@ pub fn pick(start: Rgb) -> Option<Rgb> {
             return None;
         }
         let _: () = msg_send![panel, setShowsAlpha: false];
-        let _: () = msg_send![panel, setTitle: &*NSString::from_str("Edit Color")];
+        let _: () = msg_send![panel, setTitle: &*NSString::from_str("More Colors")];
         let color: *mut AnyObject = msg_send![
             class!(NSColor),
             colorWithSRGBRed: start.r() as f64 / 255.0,

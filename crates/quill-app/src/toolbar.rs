@@ -1,6 +1,5 @@
 //! The standard toolbar: the row of buttons under the menu bar for files,
-//! editing, tools, inserting and views. It can also be docked down either
-//! side of the window.
+//! editing, tools, inserting and views.
 //!
 //! The pictures are Quill's own: flat vector drawings on a 19 x 18 grid (a
 //! few borrowed from the old ribbon on 16 x 16; see `icon`), drawn at the
@@ -9,13 +8,12 @@
 
 use std::cell::RefCell;
 
-use crate::bars::{airy, background, hover_color, line_color, padding, pressed_color};
+use crate::bars::{background, hover_color, line_color, padding, pressed_color};
 use crate::canvas::{self, Canvas, Label, Rect};
 use crate::commands::Cmd;
 use crate::icon::{self, Image};
 
-/// The bar's thickness: an icon with `bar_padding_vert` on each side, and
-/// the divider along its edge (both edges of a side toolbar).
+/// The bar's thickness: an icon with padding on each side and its divider.
 pub fn thickness(vertical: bool) -> f32 {
     let vert = padding().1;
     if vertical {
@@ -25,22 +23,16 @@ pub fn thickness(vertical: bool) -> f32 {
     }
 }
 
-/// Button pitch (`toolbar_spacing` in the settings file, 24 by default):
-/// from one icon to the next, leaving a few points between 19-point icons.
+/// Button pitch from one icon to the next.
 fn pitch() -> f32 {
-    crate::settings::with(|s| match s.interface_style {
-        crate::settings::InterfaceStyle::AiryClassic => 34.0,
-        crate::settings::InterfaceStyle::Classic => s.toolbar_spacing as f32,
-    })
+    34.0
 }
-/// Extra space before a new group of buttons.
-const GAP: f32 = 9.0;
 const ICON_W: u32 = 19;
 const ICON_H: u32 = 18;
 const OVERFLOW_W: f32 = 24.0;
 
 fn group_gap() -> f32 {
-    if airy() { 15.0 } else { GAP }
+    15.0
 }
 
 #[derive(Clone, Copy)]
@@ -87,8 +79,6 @@ const TOOLS: &[Tool] = &[
     tool("Bullet", BULLET_S, Some(Cmd::Bullet)),
     tool("Unnest Paragraph", UNNEST_S, Some(Cmd::Unnest)),
     tool("Nest Paragraph", NEST_S, Some(Cmd::Nest)),
-    // Retired picture: kept so later indices stay put.
-    tool("Unused", "", None),
     tool("Spelling", SPELLING_S, Some(Cmd::Spelling)),
     tool("Change Case", CHANGE_CASE_S, Some(Cmd::ChangeCase)),
     tool("Border", BORDER_S, Some(Cmd::BorderDialog)),
@@ -96,16 +86,10 @@ const TOOLS: &[Tool] = &[
     tool("Down", DOWN_S, Some(Cmd::FontSizeDown)),
     tool("Replace", REPLACE_S, Some(Cmd::Replace)),
     tool("Page Break", PAGE_BREAK_S, Some(Cmd::PageBreak)),
-    tool("Unused", REPAGINATE_S, None),
-    // Symbol, retired: Emoji & Symbols in the Edit menu does its job.
-    tool("Unused", "", None),
     tool("Normal", NORMAL_VIEW_S, Some(Cmd::NormalView)),
     tool("Page Layout", PAGE_LAYOUT_S, Some(Cmd::PageLayoutView)),
     tool("Print Preview", PRINT_PREVIEW_S, Some(Cmd::PrintPreview)),
-    tool("Toolbar Menu", TOOLBAR_MENU_S, Some(Cmd::ToolbarMenu)),
     small("Insert Table", TABLE_S, Some(Cmd::InsertTable)),
-    // Graphs are not built yet.
-    small("Insert Graph", GRAPH_S, None),
     small("Insert Picture", PICTURE_S, Some(Cmd::InsertPicture)),
     small("Show/Hide ¶", MARKS_S, Some(Cmd::ShowMarks)),
     tool("Hyperlink", LINK_S, Some(Cmd::Hyperlink)),
@@ -126,17 +110,15 @@ const LAYOUT: &[(usize, bool)] = &[
     (6, false),
     (7, false),
     // Spelling, Replace
-    (12, true),
-    (17, false),
+    (11, true),
+    (16, false),
     // Page Break
-    (18, true),
+    (17, true),
     // Show/Hide ¶, Normal, Page Layout, Print Preview
-    (28, true),
-    (21, false),
-    (22, false),
-    (23, false),
-    // The Toolbar menu
-    (24, true),
+    (23, true),
+    (18, false),
+    (19, false),
+    (20, false),
 ];
 
 /// Where the toolbar is: its top left corner, and whether it runs down
@@ -148,9 +130,8 @@ pub struct Place {
     pub vertical: bool,
 }
 
-/// Each button's icon, in points. The first icon starts `bar_padding_horiz`
-/// in and every icon sits `bar_padding_vert` from the bar's edges, like
-/// the formatting toolbar's controls.
+/// Each button's icon, in points. The first starts at the horizontal padding,
+/// and each sits at the vertical padding like the formatting toolbar controls.
 fn rects(at: Place) -> Vec<Rect> {
     let (horiz, vert) = padding();
     let (w, h) = (ICON_W as f32, ICON_H as f32);
@@ -220,13 +201,6 @@ pub fn slot(i: usize) -> (usize, Option<Cmd>) {
     let default = LAYOUT.get(i).map_or(0, |l| l.0);
     let (picture, command) = custom.unwrap_or((default, TOOLS.get(default).and_then(|t| t.cmd)));
     let command = command.filter(|cmd| *cmd != Cmd::RepaginateNow);
-    let picture = if picture == 11 {
-        command
-            .and_then(|cmd| TOOLS.iter().position(|t| t.cmd == Some(cmd)))
-            .unwrap_or(0)
-    } else {
-        picture
-    };
     (picture, command)
 }
 
@@ -283,8 +257,8 @@ pub fn slot_name(i: usize) -> &'static str {
         .unwrap_or("")
 }
 
-/// Icons and the (scale, bar color, style) they were rendered for.
-type IconCache = ((f32, u32, bool), Vec<Image<'static>>);
+/// Icons and the (scale, bar color) they were rendered for.
+type IconCache = ((f32, u32), Vec<Image<'static>>);
 
 thread_local! {
     /// The icons as last rendered.
@@ -295,7 +269,7 @@ thread_local! {
 fn with_icons<R>(n: f32, f: impl FnOnce(&[Image<'static>]) -> R) -> R {
     ICONS.with(|cell| {
         let mut cache = cell.borrow_mut();
-        let key = (n, background(), airy());
+        let key = (n, background());
         if cache.as_ref().is_none_or(|(k, _)| *k != key) {
             let made = TOOLS
                 .iter()
@@ -314,12 +288,8 @@ fn fit(t: &Tool) -> f32 {
 
 /// The rounded backing behind a button's picture: a little round the icon.
 fn backing(r: Rect) -> Rect {
-    if airy() {
-        let x = r.x - (pitch() - r.w) / 2.0 + 2.0;
-        Rect::new(x, r.y - 4.0, pitch() - 4.0, r.h + 8.0)
-    } else {
-        Rect::new(r.x - 1.5, r.y - 1.0, r.w + 3.0, r.h + 2.0)
-    }
+    let x = r.x - (pitch() - r.w) / 2.0 + 2.0;
+    Rect::new(x, r.y - 4.0, pitch() - 4.0, r.h + 8.0)
 }
 
 /// Where a click counts for the button with icon `r`: its share of the
@@ -373,18 +343,16 @@ pub fn draw(
         Rect::new(at.x, at.y, length, thickness(false))
     });
     let button_rects = rects(at);
-    if airy() {
-        for (i, r) in button_rects.iter().enumerate().skip(1) {
-            if !LAYOUT[i].1 {
-                continue;
-            }
-            if at.vertical {
-                let y = r.y - group_gap() / 2.0;
-                c.hline(at.x + 8.0, at.x + thickness(true) - 8.0, y, line_color());
-            } else {
-                let x = r.x - group_gap() / 2.0;
-                c.vline(x, at.y + 7.0, at.y + thickness(false) - 7.0, line_color());
-            }
+    for (i, r) in button_rects.iter().enumerate().skip(1) {
+        if !LAYOUT[i].1 {
+            continue;
+        }
+        if at.vertical {
+            let y = r.y - group_gap() / 2.0;
+            c.hline(at.x + 8.0, at.x + thickness(true) - 8.0, y, line_color());
+        } else {
+            let x = r.x - group_gap() / 2.0;
+            c.vline(x, at.y + 7.0, at.y + thickness(false) - 7.0, line_color());
         }
     }
     let hidden = hidden_slots(at, length);
@@ -406,11 +374,10 @@ pub fn draw(
             };
             let live = enabled(cmd, s);
             let on = cmd == Some(Cmd::ShowMarks) && s.show_marks;
-            let radius = if airy() { 5.0 } else { 4.0 };
             if pressed == Some(i) || on {
-                canvas::round_rect(c, backing(r), radius, pressed_color());
+                canvas::round_rect(c, backing(r), 5.0, pressed_color());
             } else if hover == Some(i) && live {
-                canvas::round_rect(c, backing(r), radius, hover_color());
+                canvas::round_rect(c, backing(r), 5.0, hover_color());
             }
             // Buttons that can do nothing just now show faded.
             let alpha = if live { 255 } else { c.faded() };
@@ -460,15 +427,6 @@ pub fn button_at(at: Place, length: f32, x: f32, y: f32) -> Option<usize> {
 /// The enabled button under a point, by index.
 pub fn hit(at: Place, length: f32, x: f32, y: f32, s: &ToolState) -> Option<usize> {
     button_at(at, length, x, y).filter(|&i| i == overflow_index() || enabled(slot(i).1, s))
-}
-
-/// Button `i`'s frame, for placing a menu that drops from it.
-pub fn button_rect(at: Place, i: usize) -> Option<Rect> {
-    rects(at)
-        .get(i)
-        .copied()
-        .filter(|r| r.w > 0.0)
-        .map(|r| cell(at, r))
 }
 
 /// Button `i`'s tooltip: what its command is called, and its shortcut.
@@ -597,13 +555,6 @@ const PAGE_BREAK_S: &str = "
     rect W 5 12 13 17
     line k 4 17 4 11 14 11 14 17
 ";
-const REPAGINATE_S: &str = "
-    rrect W k 7 5 11 12 0.5
-    arc B 9 8.5 6 210 350
-    poly B - 12.5 7 17.3 7 14.9 10
-    arc B 9 8.5 6 30 170
-    poly B - 0.7 10 5.5 10 3.1 7
-";
 const NORMAL_VIEW_S: &str = "
     line k 2 3 16 3
     line k 2 6 16 6
@@ -626,9 +577,6 @@ const PRINT_PREVIEW_S: &str = "
     ring B 12 11 3.2 3.2
     line B/1.5 14.5 13.5 17 16
 ";
-const TOOLBAR_MENU_S: &str = "
-    poly k - 5.5 7 13.5 7 9.5 11.5
-";
 // These four came from the old ribbon and are on its 16 x 16 grid.
 const TABLE_S: &str = "
     rrect W k 2 2 14 14 1
@@ -636,12 +584,6 @@ const TABLE_S: &str = "
     line k 2 6 14 6
     line k 2 10 14 10
     line k 8 2 8 14
-";
-const GRAPH_S: &str = "
-    rect B 3 9 5 13
-    rect B 7 5 9 13
-    rect B 11 7 13 13
-    line k 2 14 14 14
 ";
 const PICTURE_S: &str = "
     rrect W k 2 3 14 13 1
@@ -679,10 +621,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn saved_pictures_keep_stable_indices() {
-        assert_eq!(TOOLS.len(), 31);
-        assert_eq!(TOOLS[12].name, "Spelling");
-        assert_eq!(TOOLS[24].name, "Toolbar Menu");
+    fn picture_indices_follow_the_tools_table() {
+        assert_eq!(TOOLS.len(), 26);
+        assert_eq!(TOOLS[11].name, "Spelling");
+        assert_eq!(TOOLS[23].name, "Show/Hide ¶");
     }
 
     #[test]
@@ -706,20 +648,18 @@ mod tests {
                 "Normal",
                 "Page Layout",
                 "Print Preview",
-                "Toolbar Menu",
             ]
         );
     }
 
     #[test]
-    fn unknown_commands_use_the_default_and_the_blank_picture_borrows_one() {
+    fn unknown_commands_use_the_default() {
         let original = crate::settings::get();
         crate::settings::update(|s| {
-            s.toolbar_buttons = vec![(8, 11, "UnknownCommand".into()), (9, 11, "Save".into())];
+            s.toolbar_buttons = vec![(8, 0, "UnknownCommand".into())];
         });
         assert!(crate::commands::by_name("UnknownCommand").is_none());
-        assert_eq!(slot(8), (12, Some(Cmd::Spelling)));
-        assert_eq!(slot(9), (2, Some(Cmd::Save)));
+        assert_eq!(slot(8), (11, Some(Cmd::Spelling)));
         crate::settings::update(|s| *s = original);
     }
 
@@ -748,26 +688,21 @@ mod tests {
 
     #[test]
     fn buttons_sit_a_pitch_apart_with_gaps_between_groups() {
-        let original = crate::settings::get();
-        for style in crate::settings::InterfaceStyle::ALL {
-            crate::settings::update(|s| s.interface_style = style);
-            let r = rects(Place {
-                x: 0.0,
-                y: 0.0,
-                vertical: false,
-            });
-            let groups = LAYOUT.iter().filter(|l| l.1).count() as f32;
-            assert_eq!(r[0].x, padding().0);
-            assert_eq!(r[1].x - r[0].x, pitch());
-            assert_eq!(
-                r.last().unwrap().right(),
-                padding().0
-                    + groups * group_gap()
-                    + (LAYOUT.len() - 1) as f32 * pitch()
-                    + ICON_W as f32
-            );
-        }
-        crate::settings::update(|s| *s = original);
+        let r = rects(Place {
+            x: 0.0,
+            y: 0.0,
+            vertical: false,
+        });
+        let groups = LAYOUT.iter().filter(|l| l.1).count() as f32;
+        assert_eq!(r[0].x, padding().0);
+        assert_eq!(r[1].x - r[0].x, pitch());
+        assert_eq!(
+            r.last().unwrap().right(),
+            padding().0
+                + groups * group_gap()
+                + (LAYOUT.len() - 1) as f32 * pitch()
+                + ICON_W as f32
+        );
     }
 
     #[test]
@@ -800,14 +735,9 @@ mod tests {
     }
 
     #[test]
-    fn the_last_button_opens_the_toolbar_menu() {
-        assert_eq!(command(LAYOUT.len() - 1), Some(Cmd::ToolbarMenu));
-    }
-
-    #[test]
     fn other_toolbars_find_pictures_by_name() {
         assert_eq!(picture_named("Bullet").map(|p| p.1), Some((19, 18)));
         assert_eq!(picture_named("Insert Table").map(|p| p.1), Some((16, 16)));
-        assert_eq!(picture_named("Insert Graph").map(|p| p.2), Some(None));
+        assert!(picture_named("Insert Graph").is_none());
     }
 }

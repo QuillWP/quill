@@ -236,18 +236,10 @@ impl App {
         detail: &str,
         missing: &[(String, String)],
     ) {
-        let answer = super::message_box(
-            rfd::MessageLevel::Warning,
-            "Quill",
-            format!("{message}\n\n{detail}"),
-            rfd::MessageButtons::YesNoCancelCustom(
-                "OK".into(),
-                "Keep These Fonts".into(),
-                "Replace Fonts…".into(),
-            ),
-        );
+        let answer =
+            crate::replace_fonts::ask_missing_fonts(format!("{message}\n\n{detail}"), "OK");
         match answer {
-            rfd::MessageDialogResult::Custom(b) if b == "Keep These Fonts" => {
+            crate::replace_fonts::FontChoice::Keep => {
                 crate::settings::update(|s| {
                     let fonts = missing.iter().map(|(font, _)| font.clone());
                     match s
@@ -267,10 +259,10 @@ impl App {
                     }
                 });
             }
-            rfd::MessageDialogResult::Custom(b) if b == "Replace Fonts…" => {
+            crate::replace_fonts::FontChoice::Replace => {
                 self.replace_missing_fonts(window);
             }
-            _ => font_reminder(),
+            crate::replace_fonts::FontChoice::Other => font_reminder(),
         }
     }
 
@@ -281,7 +273,26 @@ impl App {
             return;
         };
         let w = &mut self.windows[i].1;
-        let missing = missing_fonts(&w.st.main_view().doc, fonts);
+        let mut missing = missing_fonts(&w.st.main_view().doc, fonts);
+        // Fonts a paste just warned about are listed even when the layout's
+        // catalog finds a stand-in for them as present.
+        let view = w.st.main_view_mut();
+        let warned = std::mem::take(&mut view.pasted_missing);
+        let stand_in = fonts.family_info().first().map(|f| f.name.clone());
+        for name in warned {
+            let used = (0..view.doc.fonts.len())
+                .filter_map(|id| u16::try_from(id).ok())
+                .any(|id| view.doc.font_name(id).eq_ignore_ascii_case(&name));
+            if used
+                && !missing.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name))
+                && let Some(shown) = fonts
+                    .substitute(&name)
+                    .map(str::to_string)
+                    .or(stand_in.clone())
+            {
+                missing.push((name, shown));
+            }
+        }
         if missing.is_empty() {
             w.st.main_view_mut().status = Some("No fonts are missing.".into());
             w.window.request_redraw();

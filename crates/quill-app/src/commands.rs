@@ -50,8 +50,6 @@ commands! {
     RegexSearch,
     Sed,
     GoBack,
-    Glossary,
-    InsertGlossaryEntry,
     // View
     ShowMarks,
     ShowChanges,
@@ -119,6 +117,7 @@ commands! {
     RepaginateNow,
     // Dialogs
     CharacterDialog,
+    FontSizeDialog,
     ParagraphDialog,
     SectionDialog,
     DocumentDialog,
@@ -149,7 +148,6 @@ commands! {
     CharacterStylesDialog,
     Preferences,
     DefaultFont,
-    ToolbarMenu,
     // Character formatting
     Bold,
     Italic,
@@ -330,6 +328,7 @@ impl Cmd {
             Print => "Print…",
             SavePdf => "Save as PDF…",
             CharacterDialog => "Character…",
+            FontSizeDialog => "Other Font Size…",
             ParagraphDialog => "Paragraph…",
             SectionDialog => "Section…",
             DocumentDialog => "Document Setup…",
@@ -357,7 +356,6 @@ impl Cmd {
             StyleDialog => "Paragraph Styles…",
             CharacterStylesDialog => "Character Styles…",
             DefaultFont => "Default Font…",
-            ToolbarMenu => "Toolbar Menu",
             Preferences => "Preferences…",
             Quit => "Quit",
             Undo => "Undo",
@@ -378,8 +376,6 @@ impl Cmd {
             RegexSearch => "Regex Search…",
             Sed => "Sed…",
             GoBack => "Go Back",
-            Glossary => "Glossary…",
-            InsertGlossaryEntry => "Insert Glossary Entry",
             SplitWindow => "Split Window",
             NewWindow => "New Window",
             ShowClipboard => "Show Clipboard",
@@ -709,7 +705,6 @@ pub fn lookup(key: &Key, physical_char: Option<char>, mods: Mods) -> Option<Cmd>
 
         (K::Named(N::Backspace), true, false, true)
         | (K::Named(N::Backspace), false, false, true) => DeletePrevWord,
-        (K::Named(N::Backspace), true, false, false) => InsertGlossaryEntry,
         (K::Named(N::Backspace), _, _, _) => Backspace,
         (K::Named(N::Delete), false, _, true) => DeleteNextWord,
         (K::Named(N::Delete), _, _, _) => DeleteForward,
@@ -742,7 +737,6 @@ pub fn lookup(key: &Key, physical_char: Option<char>, mods: Mods) -> Option<Cmd>
         (K::Ch('f'), true, false, false) => Find,
         (K::Ch('h'), true, false, false) | (K::Ch('f'), true, true, false) => Replace,
         (K::Ch('g'), true, false, false) => GoTo,
-        (K::Ch('k'), true, false, false) => Glossary,
         (K::Ch('e'), true, false, false) => InsertFootnote,
         (K::Ch('e'), true, true, false) => TrackChanges,
         (K::Ch('l'), true, false, false) => Spelling,
@@ -898,7 +892,6 @@ pub fn shortcut_label(cmd: Cmd) -> &'static str {
         Find => "⌘F",
         Replace => "⌘⇧F",
         GoTo => "⌘G",
-        Glossary => "⌘K",
         Hyperlink => "⌘⌥K",
         ZoomIn => "⌘=",
         ZoomOut => "⌘-",

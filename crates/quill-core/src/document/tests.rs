@@ -57,11 +57,11 @@ fn doc_with(paras: &[&str]) -> Document {
 }
 
 #[test]
-fn new_document_is_new_york_12() {
+fn new_document_is_the_default_font_12() {
     let d = Document::new();
     assert_eq!(d.main.paras.len(), 1);
     let chp = d.main.paras[0].mark_chp;
-    assert_eq!(d.font_name(chp.font), "New York");
+    assert_eq!(d.font_name(chp.font), super::default_font());
     assert_eq!(chp.size, 24);
     assert!(!d.is_modified());
 }

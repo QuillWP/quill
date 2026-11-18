@@ -553,6 +553,7 @@ fn quill_keeps_everything_exactly() {
     let mut doc = kitchen_sink();
     doc.props.live_toc = Some(quill_core::contents::TocOptions {
         outline: true,
+        entries: false,
         page_numbers: false,
         from: 2,
         to: 4,
@@ -968,6 +969,7 @@ fn a_live_table_of_contents_is_a_toc_field_in_docx() {
     assert_eq!(doc.existing_toc(), Some(0));
     let o = quill_core::contents::TocOptions {
         outline: true,
+        entries: false,
         page_numbers: true,
         from: 1,
         to: 3,

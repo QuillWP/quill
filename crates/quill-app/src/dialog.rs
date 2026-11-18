@@ -142,6 +142,8 @@ pub struct PopItem {
     pub selected: bool,
     /// A button's text; empty for a box.
     pub label: &'static str,
+    /// Draw a non-color item as a button. False makes a label-only heading.
+    pub framed: bool,
     /// What the pointer shows over it.
     pub tip: Option<String>,
     /// False for a button that does nothing now.
@@ -165,7 +167,9 @@ pub fn draw_popout_panel(c: &mut Canvas, label: &mut Label, panel: Rect, p: &Pop
             it.rect.h,
         );
         if !it.label.is_empty() {
-            modern_box(c, r, 5.0, 0xB5B5B5, 0xF4F4F4);
+            if it.framed {
+                modern_box(c, r, 5.0, 0xB5B5B5, 0xF4F4F4);
+            }
             let ink = if it.enabled { 0x202020 } else { 0xA0A0A0 };
             let w = label.width(MODERN_FONT, SIZE, false, it.label);
             label.draw(
@@ -173,7 +177,11 @@ pub fn draw_popout_panel(c: &mut Canvas, label: &mut Label, panel: Rect, p: &Pop
                 MODERN_FONT,
                 SIZE,
                 false,
-                r.x + (r.w - w) / 2.0,
+                if it.framed {
+                    r.x + (r.w - w) / 2.0
+                } else {
+                    r.x
+                },
                 r.y + r.h / 2.0 + 4.5,
                 it.label,
                 ink,
@@ -214,8 +222,8 @@ pub struct Dialog {
     /// A close box at the left of the title bar, for windows like Style
     /// and Preferences that have one instead of (or as well as) Cancel.
     pub close_box: bool,
-    /// A window that lets the document be used while it is open (Find,
-    /// Glossary, Spelling).
+    /// A window that lets the document be used while it is open (Find or
+    /// Spelling, for example).
     pub modeless: bool,
     /// Drawn as inactive: a modeless window while the document has the
     /// keyboard.

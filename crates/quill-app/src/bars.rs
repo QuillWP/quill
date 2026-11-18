@@ -22,47 +22,32 @@ fn zoom() -> f32 {
     1.0
 }
 
-/// The look every toolbar and the ruler share, from the settings file.
-/// The bars' color (`bar_background`).
+/// The look every toolbar and the ruler share.
 pub fn background() -> u32 {
-    crate::settings::with(|s| match s.interface_style {
-        crate::settings::InterfaceStyle::AiryClassic => 0xF8F9FB,
-        crate::settings::InterfaceStyle::Classic => s.bar_background,
-    })
+    0xF8F9FB
 }
 
-/// Blank points before the first control and above and below the controls
-/// (`bar_padding_horiz` and `bar_padding_vert`).
+/// Blank points before the first control and above and below the controls.
 pub fn padding() -> (f32, f32) {
-    crate::settings::with(|s| match s.interface_style {
-        crate::settings::InterfaceStyle::AiryClassic => (14.0, 7.0),
-        crate::settings::InterfaceStyle::Classic => {
-            (s.bar_padding_horiz as f32, s.bar_padding_vert as f32)
-        }
-    })
-}
-
-/// Whether Quill is drawing the roomier modern treatment.
-pub fn airy() -> bool {
-    crate::settings::with(|s| s.interface_style == crate::settings::InterfaceStyle::AiryClassic)
+    (14.0, 7.0)
 }
 
 /// A quiet hover surface. Blue is reserved for a selected or pressed tool.
 pub fn hover_color() -> u32 {
-    if airy() { 0xE8EDF3 } else { color::HOVER }
+    0xE8EDF3
 }
 
-/// The active surface in Airy Classic uses the system-like blue accent.
+/// Active controls use the system-like blue accent.
 pub fn pressed_color() -> u32 {
-    if airy() { 0xD9E9FC } else { color::PRESSED }
+    0xD9E9FC
 }
 
 fn control_height() -> f32 {
-    if airy() { 22.0 } else { 16.0 }
+    22.0
 }
 
 fn button_radius() -> f32 {
-    if airy() { 4.0 } else { 3.0 }
+    4.0
 }
 
 /// The flat line under a bar that starts at `top`, in the window's own
@@ -80,12 +65,9 @@ fn darker(c: u32) -> u32 {
     ch(16) | ch(8) | ch(0)
 }
 
-/// The flat dividers, and the outlines of the white boxes (`line_color`).
+/// The flat dividers, and the outlines of the white boxes.
 pub fn line_color() -> u32 {
-    crate::settings::with(|s| match s.interface_style {
-        crate::settings::InterfaceStyle::AiryClassic => 0xD9DEE5,
-        crate::settings::InterfaceStyle::Classic => s.line_color,
-    })
+    0xD9DEE5
 }
 
 /// Heights in the window's interface units, zoom included. Item layouts
@@ -101,7 +83,7 @@ pub fn paragraph_toolbar_height() -> f32 {
 }
 
 /// The ruler: just the measuring scale.
-pub const SCALE_HEIGHT: f32 = 18.0;
+pub const SCALE_HEIGHT: f32 = 30.0;
 const UI: &str = quill_layout::fonts::UI_FONT;
 
 /// A control on the formatting or paragraph toolbar.
@@ -123,22 +105,18 @@ pub enum Hit {
     Spacing(u8),
     SpaceBefore(bool),
     TabType(TabAlign),
-    Scale(u8),
+    Scale,
     /// A button sharing a standard toolbar picture, by its name, and
     /// running that picture's command.
     Tool(&'static str),
 }
 
 /// Layout of the formatting toolbar's controls, relative to its top-left.
-/// Extra points after each control (`formatting_toolbar_spacing` in the
-/// settings file), so the buttons are not shoulder to shoulder as in the original.
+/// Extra points after each control keep the buttons from sitting shoulder to shoulder.
 /// The original's first control sat 8 points in; this moves the row to the
 /// bar's padding instead, and puts the controls below the top padding.
 fn spaced(items: impl IntoIterator<Item = (Hit, Rect)>) -> Vec<(Hit, Rect)> {
-    let gap = crate::settings::with(|s| match s.interface_style {
-        crate::settings::InterfaceStyle::AiryClassic => 6.0,
-        crate::settings::InterfaceStyle::Classic => s.formatting_toolbar_spacing as f32,
-    });
+    let gap = 6.0;
     let (horiz, vert) = padding();
     let (dx, y) = (horiz / zoom() - 8.0, vert / zoom());
     items
@@ -187,7 +165,6 @@ fn formatting_toolbar_items() -> Vec<(Hit, Rect)> {
         (Hit::Tool("Insert Picture"), 18.0, SPACER),
         (Hit::Tool("Insert Table"), 18.0, 0.0),
         (Hit::Tool("Border"), 18.0, 0.0),
-        (Hit::Tool("Insert Graph"), 18.0, 0.0),
     ])
 }
 
@@ -212,9 +189,7 @@ fn paragraph_toolbar_items() -> Vec<(Hit, Rect)> {
     for k in 1..=3u8 {
         v.push((Hit::Columns(k), 18.0, if k == 1 { 12.0 } else { 0.0 }));
     }
-    for i in 0..3u8 {
-        v.push((Hit::Scale(i), 17.0, if i == 0 { 12.0 } else { 0.0 }));
-    }
+    v.push((Hit::Scale, 17.0, 12.0));
     if crate::settings::with(|s| s.paragraph_toolbar_tabs) {
         for (i, t) in [
             TabAlign::Left,
@@ -315,9 +290,7 @@ pub fn tip(hit: Hit) -> Option<String> {
         Hit::TabType(TabAlign::Right) => ("Right Tab", None),
         Hit::TabType(TabAlign::Decimal) => ("Decimal Tab", None),
         Hit::TabType(TabAlign::Bar) => ("Vertical Line", None),
-        Hit::Scale(0) => ("Normal Scale", None),
-        Hit::Scale(1) => ("Table Scale", None),
-        Hit::Scale(_) => ("Page Scale", None),
+        Hit::Scale => ("Normal Scale", None),
         Hit::Tool(name) => match tool_command(name) {
             Some(c) => (crate::commands::tip_name(c), Some(c)),
             None => (name, None),
@@ -381,24 +354,53 @@ pub fn popup_rect(hit: Hit, formatting_toolbar_top: f32, paragraph_toolbar_top: 
 }
 
 /// A field showing a value, with the popup arrow at its right end.
-fn popup_field(c: &mut Canvas, label: &mut Label, r: Rect, text: &str, hot: bool) {
-    popup_field_font(c, label, r, text, hot, UI);
+fn popup_field(
+    c: &mut Canvas,
+    label: &mut Label,
+    r: Rect,
+    text: &str,
+    hot: bool,
+    edit: Option<&FieldEdit<'_>>,
+) {
+    popup_field_font(c, label, r, text, hot, UI, edit);
 }
 
-fn popup_field_font(c: &mut Canvas, label: &mut Label, r: Rect, text: &str, hot: bool, font: &str) {
+fn popup_field_font(
+    c: &mut Canvas,
+    label: &mut Label,
+    r: Rect,
+    text: &str,
+    hot: bool,
+    font: &str,
+    edit: Option<&FieldEdit<'_>>,
+) {
     // The box is outlined in `line_color`, a shade darker under the pointer.
     let line = line_color();
-    let edge = if hot { darker(line) } else { line };
+    let edge = if edit.is_some() {
+        0x0A84FF
+    } else if hot {
+        darker(line)
+    } else {
+        line
+    };
     canvas::round_rect(c, r, 3.0, edge);
     canvas::round_rect(c, r.inset(1.0), 2.0, color::WHITE);
     let clip = c.set_clip(Rect::new(r.x + 1.0, r.y + 1.0, r.w - 17.0, r.h - 2.0));
-    // `toolbar_picker_font_size` is in points as shown, so undo the zoom
-    // the box is drawn at; the baseline centers capitals in the box.
-    let size = crate::settings::with(|s| match s.interface_style {
-        crate::settings::InterfaceStyle::AiryClassic => 13.0,
-        crate::settings::InterfaceStyle::Classic => s.toolbar_picker_font_size as f32,
-    }) / zoom();
+    // Undo the zoom the box is drawn at; the baseline centers capitals in the box.
+    let size = 13.0 / zoom();
     let base = r.y + r.h / 2.0 + size * 0.36;
+    let text = edit.map_or(text, |edit| edit.text);
+    if let Some(edit) = edit {
+        let (a, b) = (edit.anchor.min(edit.caret), edit.anchor.max(edit.caret));
+        let start = label.width(font, size, false, &text[..a]);
+        let end = label.width(font, size, false, &text[..b]);
+        c.fill(
+            Rect::new(r.x + 5.0 + start, r.y + 3.0, end - start, r.h - 6.0),
+            0xC5DFFF,
+        );
+        let caret = label.width(font, size, false, &text[..edit.caret]);
+        c.vline(r.x + 5.0 + caret, r.y + 3.0, r.bottom() - 3.0, icon::INK);
+    }
     label.draw(c, font, size, false, r.x + 5.0, base, text, icon::INK);
     c.restore_clip(clip);
     let n = c.scale;
@@ -494,6 +496,15 @@ fn draw_overflow_button(c: &mut Canvas, label: &mut Label, r: Rect, hot: bool) {
 pub struct FormattingToolbarState<'a> {
     pub font: &'a str,
     pub chp: CharProps,
+    pub edit: Option<FieldEdit<'a>>,
+}
+
+/// Text selection and caret shown while a formatting toolbar field is active.
+pub struct FieldEdit<'a> {
+    pub hit: Hit,
+    pub text: &'a str,
+    pub anchor: usize,
+    pub caret: usize,
 }
 
 /// Draw the formatting toolbar, with `hover` the control under the pointer.
@@ -520,16 +531,18 @@ pub fn draw_formatting_toolbar(
         let hot = hover == Some(hit);
         let (spec, on, live) = match hit {
             Hit::FontPopup => {
-                popup_field_font(c, label, r, s.font, hot, s.font);
+                let edit = s.edit.as_ref().filter(|edit| edit.hit == hit);
+                popup_field_font(c, label, r, s.font, hot, s.font, edit);
                 continue;
             }
             Hit::SizePopup => {
-                popup_field(c, label, r, &format_size(s.chp.size), hot);
+                let edit = s.edit.as_ref().filter(|edit| edit.hit == hit);
+                popup_field(c, label, r, &format_size(s.chp.size), hot, edit);
                 continue;
             }
             Hit::ColorPopup => {
                 // A swatch of the selection's color in place of a name.
-                popup_field(c, label, r, "", hot);
+                popup_field(c, label, r, "", hot, None);
                 let swatch = Rect::new(r.x + 5.0, r.y + 4.0, r.w - 22.0, r.h - 8.0);
                 c.fill(swatch, darker(line_color()));
                 c.fill(swatch.inset(1.0), s.chp.color.0);
@@ -610,7 +623,7 @@ pub fn draw_paragraph_toolbar(
         let hot = hover == Some(hit);
         let (spec, on, live) = match hit {
             Hit::StylePopup => {
-                popup_field(c, label, r, &s.style, hot);
+                popup_field(c, label, r, &s.style, hot, None);
                 continue;
             }
             Hit::Align(a) => {
@@ -650,13 +663,7 @@ pub fn draw_paragraph_toolbar(
                 };
                 (spec, s.tab_type == t, true)
             }
-            // Only the indent scale is built; the table and page scales
-            // come later.
-            Hit::Scale(i) => (
-                [INDENT_SCALE, TABLE_SCALE, PAGE_SCALE][i.min(2) as usize],
-                i == 0,
-                i == 0,
-            ),
+            Hit::Scale => (INDENT_SCALE, true, true),
             Hit::Columns(k) => (
                 [ONE_COLUMN, TWO_COLUMNS, THREE_COLUMNS][(k as usize).clamp(1, 3) - 1],
                 s.columns == k as u16,
@@ -719,11 +726,16 @@ pub fn draw_ruler(c: &mut Canvas, label: &mut Label, top: f32, width: f32, s: &R
     }
     let pt = |t: Twips| x0 + t as f32 / 1440.0 * s.inch;
     let p = s.pap;
-    // First line indent hangs from the top; left indent stands on the bottom.
+    // First-line and remaining-paragraph indents occupy separate lanes.
     triangle(c, pt(p.left + p.first), base + 1.0, false, ink);
-    triangle(c, pt(p.left), base + 7.0, true, ink);
+    let left = pt(p.left);
+    triangle(c, left, base + 12.0, true, ink);
+    // The box below the lower triangle moves both left indents together.
+    let both = Rect::new(left - 4.0, base + 15.0, 9.0, 5.0);
+    c.fill(both, ink);
+    c.fill(both.inset(1.0), paper);
     let right = pt((s.text_width * 20.0) as Twips - p.right);
-    triangle(c, right, base + 7.0, true, ink);
+    triangle(c, right, base + 12.0, true, ink);
     for t in s.tabs.unwrap_or(&p.tabs) {
         let x = pt(t.pos);
         if s.chosen == Some(t.pos) {
@@ -783,8 +795,10 @@ pub fn format_size(half_points: u16) -> String {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ScaleGrab {
     FirstIndent,
-    /// The left indent marker; the first line indent moves with it.
+    /// The remaining-paragraph indent, leaving the first line where it is.
     LeftIndent,
+    /// The box below the left indent; both left indents move together.
+    BothIndents,
     RightIndent,
     /// An existing tab stop, by position.
     Tab(Twips),
@@ -810,10 +824,13 @@ pub fn scale_grab(s: &RulerState, top: f32, x: f32, y: f32) -> ScaleGrab {
     let first = at(p.left + p.first);
     let left = at(p.left);
     let right = at((s.text_width * 20.0) as Twips - p.right);
-    if near(first) && y < base + 2.0 {
+    if near(first) && y < base + 6.0 {
         return ScaleGrab::FirstIndent;
     }
-    if near(left) && y >= base {
+    if near(left) && y >= base + 13.0 {
+        return ScaleGrab::BothIndents;
+    }
+    if near(left) && y >= base + 6.0 {
         return ScaleGrab::LeftIndent;
     }
     if near(first) {
@@ -852,6 +869,13 @@ pub fn apply_grab(
     match grab {
         ScaleGrab::FirstIndent => pap.first = at - start.left,
         ScaleGrab::LeftIndent => {
+            pap.left = at.max(-1440);
+            pap.first = start
+                .left
+                .saturating_add(start.first)
+                .saturating_sub(pap.left);
+        }
+        ScaleGrab::BothIndents => {
             pap.left = at.max(-1440);
             pap.first = start.first;
         }
@@ -985,16 +1009,18 @@ const DOUBLE: &str = "
     line k 3 12 13 12
 ";
 const CLOSED_SPACE: &str = "
-    line s 3 3 13 3
-    line k 3 6 13 6
-    line k 3 8 13 8
-    line k 3 10 10 10
+    line k 5 3 13 3
+    line k 5 6 13 6
+    line k 5 9 11 9
+    line k 2 11 2 3
+    poly k - 0.5 5 2 2.5 3.5 5
 ";
 const OPEN_SPACE: &str = "
-    line s 3 3 13 3
-    line k 3 8 13 8
-    line k 3 10 13 10
-    line k 3 12 10 12
+    line k 5 8 13 8
+    line k 5 11 13 11
+    line k 5 14 11 14
+    line k 2 2 2 7
+    poly k - 0.5 5 2 7.5 3.5 5
 ";
 const TAB_LEFT: &str = "
     line k 6 4 6 12 12 12
@@ -1018,16 +1044,6 @@ const INDENT_SCALE: &str = "
     line k 2 8 14 8
     poly k - 2.5 3.5 7.5 3.5 5 7
     poly k - 8.5 12.5 13.5 12.5 11 9
-";
-const TABLE_SCALE: &str = "
-    line k 2 4 6 4
-    line k 4 4 4 12
-    line k 10 4 14 4
-    line k 12 4 12 12
-";
-const PAGE_SCALE: &str = "
-    line k 5 3 3 3 3 13 5 13
-    line k 11 3 13 3 13 13 11 13
 ";
 const OVERFLOW: &str = "
     line k/1.5 4 6 8 10 12 6
@@ -1075,12 +1091,68 @@ mod tests {
         assert!(!formatting.is_empty() && !paragraph.is_empty());
         assert!(!formatting.contains(&Hit::FontPopup));
         assert!(!paragraph.contains(&Hit::StylePopup));
-        assert!(formatting.contains(&Hit::Tool("Insert Graph")));
+        assert!(formatting.contains(&Hit::Tool("Border")));
         let r = overflow_rect(false, 30.0, 520.0).unwrap();
         assert_eq!(
             formatting_toolbar_hit(30.0, 520.0, r.x + 2.0, r.y + 2.0),
             Some(Hit::FormattingOverflow)
         );
+    }
+
+    #[test]
+    fn the_three_left_indent_handles_have_separate_lanes() {
+        let mut pap = ParaProps {
+            left: 720,
+            first: 0,
+            ..Default::default()
+        };
+        let state = RulerState {
+            pap: &pap,
+            text_left: 20.0,
+            text_width: 500.0,
+            inch: 72.0,
+            tabs: None,
+            chosen: None,
+            columns: Vec::new(),
+        };
+        let top = 40.0;
+        let x = 56.0;
+        assert_eq!(
+            scale_grab(&state, top, x, top + 10.0),
+            ScaleGrab::FirstIndent
+        );
+        assert_eq!(
+            scale_grab(&state, top, x, top + 18.0),
+            ScaleGrab::LeftIndent
+        );
+        assert_eq!(
+            scale_grab(&state, top, x, top + 26.0),
+            ScaleGrab::BothIndents
+        );
+
+        let start = pap.clone();
+        apply_grab(
+            &mut pap,
+            &start,
+            ScaleGrab::LeftIndent,
+            1440,
+            TabAlign::Left,
+            false,
+            10_000,
+        );
+        assert_eq!((pap.left, pap.left + pap.first), (1440, 720));
+
+        pap = start.clone();
+        apply_grab(
+            &mut pap,
+            &start,
+            ScaleGrab::BothIndents,
+            1440,
+            TabAlign::Left,
+            false,
+            10_000,
+        );
+        assert_eq!((pap.left, pap.first), (1440, 0));
     }
 
     #[test]
@@ -1110,8 +1182,6 @@ mod tests {
             TAB_DECIMAL,
             TAB_BAR,
             INDENT_SCALE,
-            TABLE_SCALE,
-            PAGE_SCALE,
         ];
         for spec in all {
             let im = icon::render(spec, 16, 16, 1.0, 0);

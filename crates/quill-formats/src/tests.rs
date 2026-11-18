@@ -755,7 +755,7 @@ fn docx_round_trip() {
     assert_eq!(back.summary.title, "Test & check");
     assert_eq!(
         back.font_name(back.main.paras[1].chp_of_char(0).font),
-        "New York"
+        quill_core::default_font()
     );
 }
 
@@ -1308,4 +1308,123 @@ fn a_picture_nothing_uses_any_more_does_not_stop_a_save() {
     let back = load(&path).unwrap();
     let _ = std::fs::remove_file(&path);
     assert_eq!(back.objects.len(), 1);
+}
+
+#[test]
+fn index_entries_and_the_index_are_word_fields_in_docx() {
+    let mut doc = quill_core::text::from_plain_text("Cats sleep\nDogs bark");
+    let mut hidden = doc.main.paras[0].chp_at(0);
+    hidden.hidden = true;
+    // "Cats" is the entry; the marker and ';' around it are hidden.
+    let after = doc.insert_text(
+        quill_core::StoryId::Main,
+        quill_core::story::Position::new(0, 4),
+        ";",
+        hidden,
+    );
+    assert_eq!(after, quill_core::story::Position::new(0, 5));
+    doc.insert_text(
+        quill_core::StoryId::Main,
+        quill_core::story::Position::new(0, 0),
+        ".ib.",
+        hidden,
+    );
+    doc.insert_text(
+        quill_core::StoryId::Main,
+        quill_core::story::Position::new(1, 0),
+        ".i.Dogs:Pugs;",
+        hidden,
+    );
+    let entries = doc.index_entries();
+    assert_eq!(entries.len(), 2);
+    let numbered: Vec<_> = entries
+        .into_iter()
+        .enumerate()
+        .map(|(k, e)| (e, k, "1".to_string()))
+        .collect();
+    let options = quill_core::contents::IndexOptions::default();
+    let paras = doc.index_paragraphs(&numbered, &options);
+    doc.place_index(paras);
+    assert!(doc.existing_index().is_some());
+
+    let (bytes, xml) = {
+        let bytes = docx::write(&doc, 1_760_000_000);
+        let xml = String::from_utf8_lossy(
+            &zip::Archive::open(&bytes)
+                .unwrap()
+                .read("word/document.xml")
+                .unwrap()
+                .unwrap(),
+        )
+        .into_owned();
+        (bytes, xml)
+    };
+    assert!(xml.contains(r#" XE &quot;Cats&quot; \b "#), "{xml}");
+    assert!(xml.contains(r#" XE &quot;Dogs:Pugs&quot; "#), "{xml}");
+    assert!(xml.contains("INDEX"), "{xml}");
+    assert!(!xml.contains(".ib."), "marker text must not be written");
+    // Word skips an entry whose field runs are formatted as hidden text
+    // when it builds an index (checked in Word), so they are plain runs.
+    assert!(!xml.contains("<w:vanish/></w:rPr><w:instrText"), "{xml}");
+
+    let (back, report) = docx::read::read_reported(&bytes).unwrap();
+    let again = back.index_entries();
+    assert_eq!(again.len(), 2);
+    assert_eq!(again[0].main, "Cats");
+    assert!(again[0].bold);
+    assert_eq!(again[1].main, "Dogs");
+    assert_eq!(again[1].sub.as_deref(), Some("Pugs"));
+    assert!(back.existing_index().is_some());
+    assert!(report.notes().is_empty(), "{:?}", report.notes());
+}
+
+#[test]
+fn table_of_contents_entries_are_word_tc_fields_in_docx() {
+    let mut doc = quill_core::text::from_plain_text("Intro text\nMore text");
+    let mut hidden = doc.main.paras[0].chp_at(0);
+    hidden.hidden = true;
+    doc.insert_text(
+        quill_core::StoryId::Main,
+        quill_core::story::Position::new(0, 0),
+        ".c2.Methods;",
+        hidden,
+    );
+    doc.insert_text(
+        quill_core::StoryId::Main,
+        quill_core::story::Position::new(1, 0),
+        ".c.Results;",
+        hidden,
+    );
+    let bytes = docx::write(&doc, 1_760_000_000);
+    let xml = String::from_utf8_lossy(
+        &zip::Archive::open(&bytes)
+            .unwrap()
+            .read("word/document.xml")
+            .unwrap()
+            .unwrap(),
+    )
+    .into_owned();
+    assert!(
+        xml.contains(r#" TC &quot;Methods&quot; \f C \l 2 "#),
+        "{xml}"
+    );
+    assert!(!xml.contains("<w:vanish/></w:rPr><w:instrText"), "{xml}");
+    assert!(
+        xml.contains(r#" TC &quot;Results&quot; \f C \l 1 "#),
+        "{xml}"
+    );
+    assert!(!xml.contains(".c2."), "marker text must not be written");
+
+    let (back, report) = docx::read::read_reported(&bytes).unwrap();
+    assert_eq!(back.main.paras[0].text, ".c2.Methods;Intro text");
+    assert_eq!(back.main.paras[1].text, ".c.Results;More text");
+    assert!(back.main.paras[0].chp_of_char(0).hidden);
+    let o = quill_core::contents::TocOptions {
+        outline: false,
+        ..Default::default()
+    };
+    let entries = back.toc_entries(&o);
+    assert_eq!(entries.len(), 2);
+    assert_eq!((entries[0].level, entries[0].text.as_str()), (2, "Methods"));
+    assert!(report.notes().is_empty(), "{:?}", report.notes());
 }

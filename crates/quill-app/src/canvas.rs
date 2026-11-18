@@ -62,10 +62,6 @@ pub mod color {
     pub const HIGHLIGHT: u32 = 0xCCCCFF;
     /// The outline around each selected table cell.
     pub const CELL_OUTLINE: u32 = 0x6A9EEB;
-    /// Flat buttons: the backing under the pointer, and the one held down
-    /// or switched on.
-    pub const HOVER: u32 = 0xCACACA;
-    pub const PRESSED: u32 = 0xB2B2B2;
 }
 
 /// Color `c` as dark mode shows the interface: grays turn over, so white

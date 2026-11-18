@@ -84,10 +84,21 @@ pub fn show(
 /// A note with an OK button and an unticked checkbox. True if the box was
 /// ticked.
 pub fn remind(message: &str, detail: &str, checkbox: &str) -> bool {
+    with_checkbox(1, message, detail, checkbox)
+}
+
+/// A warning with an OK button and an unticked checkbox. True if the box
+/// was ticked.
+pub fn warn_with_checkbox(message: &str, detail: &str, checkbox: &str) -> bool {
+    with_checkbox(0, message, detail, checkbox)
+}
+
+/// `style` is NSAlert's: 0 warning, 1 informational.
+fn with_checkbox(style: usize, message: &str, detail: &str, checkbox: &str) -> bool {
     // SAFETY: called on the app thread, as all of Quill's AppKit calls are.
     autoreleasepool(|_| unsafe {
         let alert: Retained<AnyObject> = msg_send_id![class!(NSAlert), new];
-        let _: () = msg_send![&*alert, setAlertStyle: 1usize];
+        let _: () = msg_send![&*alert, setAlertStyle: style];
         let _: () = msg_send![&*alert, setMessageText: &*NSString::from_str(message)];
         let _: () = msg_send![&*alert, setInformativeText: &*NSString::from_str(detail)];
         let _: () = msg_send![&*alert, setShowsSuppressionButton: true];

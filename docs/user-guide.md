@@ -4,7 +4,7 @@ Quill is inspired by Lucas's favorite word processor from 1992. It is built
 in Rust for the Mac, and a Windows build is on its way.
 The website is [quillwp.com](https://quillwp.com).
 Documents use `.qwp`.
-Alpha builds do not import earlier versions' settings, glossary, dictionary or
+Alpha builds do not import earlier versions' settings, dictionary or
 document recovery files.
 
 The original offered styles, tables, frames, pictures, footnotes, headers and
@@ -137,6 +137,13 @@ whole main document. Choosing Read Aloud again replaces what is currently being 
 does not include voice data of its own. Read Aloud is a Mac feature; it is not shown in the
 Windows or Linux menus.
 
+## Dictation on the Mac
+
+Choose **Edit > Start Dictation** and speak where the insertion point is. Dictation uses the
+language, shortcut, microphone and privacy choices configured for Dictation in macOS; Quill does
+not record audio or send speech to a recognition service of its own. The dictated passage is one
+undoable edit. macOS may ask to enable Dictation the first time it is used.
+
 ## Tracked changes
 
 Tools > Track Changes (Command-Shift-E) records insertions, deletions and
@@ -251,8 +258,22 @@ In any list, Return starts the next item, Return on an empty item ends the list,
 Backspace at the start of an item takes off its bullet and keeps the text.
 
 The Fonts panel sets the font, style (the faces the chosen font has) and size of new documents.
+Until you choose one, new documents use Helvetica on the Mac, Arial on Windows and Liberation Sans
+on Linux. If that font is not installed, the system font is used instead. Fonts the system keeps private (the ones whose names start with a dot, such as the
+Mac's system font) are left out of the font menus unless Preferences > Fonts > Show Private System
+Fonts is on. Text copied from a Mac app in one of them pastes in that font, after a warning that
+the font will not be available on other computers. A font that is not installed shows in the default font, is marked by
+View > Highlight Missing Fonts and stays in the document, so Replace Missing Fonts can still replace it.
 
 ## Platform interface
+
+The standard toolbar stays across the top of every document window. Preferences > Toolbar
+can show or hide it, customize its buttons and add tab controls to the paragraph toolbar.
+
+In the formatting toolbar, click the text portion of Font or Size to type a value. Font names
+complete from installed families as you type. Press Enter or Tab to apply the completed font
+or a size from 1 to 1638 points; Escape cancels. The arrow at the right of either field keeps
+the visual dropdown of installed fonts or common sizes.
 
 The percentage field at the right of the top toolbar changes document zoom.
 Click the number, type a percentage and press Enter or Tab; Escape cancels an
@@ -267,6 +288,10 @@ When a window is too narrow for a toolbar, a down arrow appears at that toolbar'
 edge. Its menu contains only the controls hidden at the current width, with the same enabled
 and selected states as their buttons. Widening the window returns controls to the bar and
 removes them from the menu; the arrow disappears when everything fits.
+
+The ruler's upper left triangle changes only the first-line indent. The lower triangle changes
+the remaining lines while leaving the first line in place. Drag the small box below them to
+move both left indents together. The right triangle changes the right indent.
 
 The Print Preview command, toolbar button and shortcut open the macOS print
 panel, which shows its own preview.
@@ -287,8 +312,8 @@ the table keeps its borders, and Format > Border changes them. Gridlines are a s
 guide for cells with no border, as in tables from other programs, and have their own
 `table_gridline_color` and `table_gridline_dotted`.
 
-**Format > Paragraph Styles...** (Command-T) lists paragraph styles, laid out like
-**Format > Character Styles**: **This Document**
+The **Window > Style Sheets** palette lists paragraph and character styles. Its
+**This Document** option
 shows Normal, the styles the document uses and the styles it defines; **All Styles** adds
 the automatic ones. Under the list are the chosen style's description and how many
 paragraphs use it. **+** opens the style editor on a new style made from the
@@ -351,7 +376,7 @@ uses the manual character formatting. Choosing a named style strikes the manual 
 through, and saving makes the style's text take the character style; going back to **No
 Style** brings the manual values back.
 
-**Format > Character Styles...** lists the document's character styles. To make one,
+The **Character** tab of **Window > Style Sheets** lists the document's character styles. To make one,
 format and select some text, press **+**, name it and save it. Select other text and
 press **Apply**, or click the style in the Style Sheets palette, or choose it at the
 caret before typing. The style stores differences from the paragraph's
@@ -397,10 +422,26 @@ edit the entry names, then choose Update Table of Contents to make it live again
 The matching headings change together as one Undo step. Subsequent heading edits
 continue updating the live contents.
 
+Insert > TOC Entry marks selected text, as Word's Mark Table of Contents Entry does,
+so a table of contents lists it, among the headings, when its TOC Entries box is ticked
+(Headings and TOC Entries are separate boxes, and both are on by default). Insert > Index
+Entry does the same for the index. Both save in .docx as Word's own TC and XE fields,
+and the index saves as an INDEX field, so Word can update them.
+
 A document opens in the view it was saved in; Preferences > View > In View is for new
 documents. The Custom row of the color palette holds the colors saved in Preferences >
 Colors, for every document, and then the colors this document uses. Pointing at a saved
 color shows its name. Preferences > View has Interface Size, and Advanced has Smart Quotes.
+
+Every color box and the toolbar's Font Color open the same palette, and it works the same
+everywhere. Click a color to use it, or click back into the document or dialog to keep the
+one chosen. **More Colors...** on a custom color changes it wherever it is used: in the
+document's text and styles (one Undo step, "Change Color"), or, for a color saved in
+Preferences, in Preferences. On a standard color it makes a new custom color. **Delete**
+takes the chosen custom color out of the palette. A color the text uses asks for a
+replacement (Use Black or Choose Color...), and Cancel changes nothing. A color saved in
+Preferences is deleted from Preferences only: documents keep using it, and it stays in
+their Custom row as the document's own. The standard colors cannot be deleted.
 
 In Preferences > Fonts, Additional Font Sources opens a separate dialog for
 loading fonts without installing them. Choose fills a source row, + Add Source
@@ -435,11 +476,9 @@ turn lighter or darker so text stays as readable against its highlight or shadin
 Pictures keep their colors. Only the screen changes: the document keeps its own colors, and
 printing, Save as PDF and every saved format are the same as in Light.
 
-Preferences > View > Interface > Style chooses the shape and spacing of Quill's own
-window chrome. Airy Classic is the default: it uses near-white bars, quiet dividers,
-roomier controls, grouped tools and monochrome icons, with blue reserved for active tools.
-Classic keeps the earlier compact gray interface. This choice is independent of Appearance,
-so either interface style can be Light, Dark or Auto.
+Quill uses near-white bars, quiet dividers, roomier controls, grouped tools and monochrome
+icons, with blue reserved for active tools. Preferences > View > Appearance controls whether
+that interface is Light, Dark or Auto.
 
 ## Building
 

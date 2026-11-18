@@ -33,17 +33,6 @@ fn toolbar_and_formatting_pop_ups_are_handed_to_the_system_menu_on_the_mac() {
     state.width = 900.0;
     state.height = 700.0;
     state.ui = 1.5;
-    let toolbar_menu = (0..64)
-        .find(|i| toolbar::command(*i) == Some(Cmd::ToolbarMenu))
-        .expect("the toolbar has a Toolbar Menu button");
-    state.open_toolbar_menu(toolbar_menu, &mut label);
-    let (menu, actions, _) = state.take_popup_menu().expect("the toolbar's menu");
-    assert!(state.menu.is_none(), "Quill draws nothing itself");
-    assert!(
-        menu.items
-            .iter()
-            .any(|it| actions.get(it.id as usize) == Some(&Action::ToolbarPosition(1)))
-    );
     for hit in [Hit::FontPopup, Hit::SizePopup, Hit::StylePopup] {
         state.open_popup(hit, &mut label, &env);
         let rect = state.menu.as_ref().expect("a pop-up opens").open.rect;
@@ -62,21 +51,11 @@ fn toolbar_and_formatting_pop_ups_are_handed_to_the_system_menu_on_the_mac() {
         .take_popup_menu()
         .expect("the narrow standard toolbar has overflow");
     assert!(menu.items.iter().any(|item| item.label == "Print Preview"));
-    assert!(menu.items.iter().any(|item| item.label == "Toolbar Menu"));
     state.open_bar_overflow(false, &mut label, &env);
-    let (menu, actions, _) = state
+    let (menu, _, _) = state
         .take_popup_menu()
         .expect("the narrow formatting toolbar has overflow");
-    let graph = menu
-        .items
-        .iter()
-        .find(|item| item.label == "Insert Graph")
-        .unwrap();
-    assert!(!graph.enabled);
-    assert_eq!(
-        actions[graph.id as usize],
-        Action::Bar(Hit::Tool("Insert Graph"))
-    );
+    assert!(menu.items.iter().all(|item| item.label != "Insert Graph"));
     state.open_bar_overflow(true, &mut label, &env);
     let (menu, _, _) = state
         .take_popup_menu()
@@ -1327,14 +1306,6 @@ fn representative_window_visuals_match_baselines() {
         include_bytes!("../../../../tests/visual/narrow-overflow.png"),
     );
     assert_visual_baseline(
-        "classic-compact-100",
-        640,
-        520,
-        1.0,
-        &format!("setting:interface_style = classic|zoom:100|{sample}"),
-        include_bytes!("../../../../tests/visual/classic-compact-100.png"),
-    );
-    assert_visual_baseline(
         "compact-100",
         640,
         520,
@@ -1717,7 +1688,7 @@ fn deleting_a_color_the_document_uses_asks_and_makes_its_text_black() {
     assert_eq!(state.dialogs.len(), 2);
     assert!(matches!(
         state.dialogs[1].0,
-        Which::Alert(format_dialogs::Alert::DeleteColor(Rgb(0x336699)))
+        Which::Alert(format_dialogs::Alert::DeleteColor(Rgb(0x336699), "color"))
     ));
     // Cancel changes nothing.
     state.dialog_outcome(Outcome::Cancel, &mut clip);
@@ -1770,12 +1741,183 @@ fn deleting_a_color_can_choose_its_replacement() {
 }
 
 #[test]
+fn every_pop_out_control_reaches_its_dialog_on_every_platform() {
+    use crate::dialog::Outcome;
+    // The Mac, Windows and Linux front ends all turn a press on the pop-out
+    // into an outcome with this one function, so none can miss a button.
+    assert_eq!(
+        crate::palette::pop_outcome("edit", false),
+        Some(Outcome::Button("edit"))
+    );
+    assert_eq!(
+        crate::palette::pop_outcome("delete_color", false),
+        Some(Outcome::Button("delete_color"))
+    );
+    assert_eq!(
+        crate::palette::pop_outcome("cus3", true),
+        Some(Outcome::Swatch {
+            id: "cus3",
+            double: true
+        })
+    );
+    assert_eq!(
+        crate::palette::pop_outcome("std0", false),
+        Some(Outcome::Swatch {
+            id: "std0",
+            double: false
+        })
+    );
+    assert_eq!(crate::palette::pop_outcome("ok", false), None);
+    // And every button the pop-out has is one of them.
+    let st = crate::palette::PaletteState::new(None, &Document::new());
+    for it in crate::palette::popout(&st, "color").items {
+        if !it.label.is_empty() && it.enabled {
+            assert!(
+                crate::palette::pop_outcome(it.id, false).is_some(),
+                "{}",
+                it.id
+            );
+        }
+    }
+}
+
+#[test]
+fn modifying_a_color_changes_it_wherever_it_is_used() {
+    let mut state = blue_words();
+    let mut clip = Clipboard::without_system();
+    let first = |s: &WinState| s.view.doc.main.paras[0].chp_of_char(0).color;
+    state.dialog_outcome(Outcome::Button("color"), &mut clip);
+    state.dialog_outcome(
+        Outcome::Swatch {
+            id: "cus0",
+            double: false,
+        },
+        &mut clip,
+    );
+    state.dialog_outcome(Outcome::Button("edit"), &mut clip);
+    state.dialogs[1].1.set_field("hex", "#AA2200");
+    state.dialog_outcome(Outcome::Changed("hex"), &mut clip);
+    state.dialog_outcome(Outcome::Ok, &mut clip);
+    assert_eq!(first(&state), Rgb(0xAA2200));
+    assert_eq!(
+        state.view.doc.main.paras[0].chp_of_char(6).color,
+        Rgb::BLACK
+    );
+    assert_eq!(state.view.doc.undo_label(), Some("Change Color"));
+    assert_eq!(state.dialogs[0].1.swatch_rgb("color"), Some(0xAA2200));
+    state.view.doc.undo();
+    assert_eq!(first(&state), Rgb(0x336699));
+}
+
+#[test]
+fn modifying_a_saved_color_changes_preferences_and_not_the_document() {
+    let mut state = blue_words();
+    let mut clip = Clipboard::without_system();
+    crate::settings::update(|s| s.named_colors = vec![(0xABCDEF, "Brand".into())]);
+    state.dialog_outcome(Outcome::Button("color"), &mut clip);
+    // The saved color leads the row; the text's own follows it.
+    assert_eq!(pop_item(&state, "cus0").rgb, Some(0xABCDEF));
+    state.dialog_outcome(
+        Outcome::Swatch {
+            id: "cus0",
+            double: false,
+        },
+        &mut clip,
+    );
+    state.dialog_outcome(Outcome::Button("edit"), &mut clip);
+    state.dialogs[1].1.set_field("hex", "#010203");
+    state.dialog_outcome(Outcome::Changed("hex"), &mut clip);
+    state.dialog_outcome(Outcome::Ok, &mut clip);
+    let saved = crate::settings::with(|s| s.named_colors.clone());
+    crate::settings::update(|s| s.named_colors.clear());
+    crate::palette::drop_edits();
+    assert_eq!(saved, [(0x010203, "Brand".to_string())]);
+    assert_eq!(
+        state.view.doc.main.paras[0].chp_of_char(0).color,
+        Rgb(0x336699)
+    );
+    assert!(!state.view.doc.is_modified());
+}
+
+#[test]
+fn deleting_a_saved_color_in_preferences_clears_its_row_for_save() {
+    crate::settings::update(|s| s.named_colors = vec![(0x336699, "Brand".into())]);
+    let mut state = WinState::new(DocView::new(Document::new(), "Doc".into()));
+    let d = crate::prefs_dialog::preferences(crate::prefs_dialog::COLORS_PANEL, &[]);
+    state.dialogs.push((
+        Which::Preferences {
+            panel: crate::prefs_dialog::COLORS_PANEL,
+            families: Vec::new(),
+            original: Box::new(crate::settings::get()),
+            draft: Box::new(crate::settings::get()),
+        },
+        d,
+    ));
+    let mut clip = Clipboard::without_system();
+    assert_eq!(state.dialogs[0].1.item_label("color0"), "#336699");
+    state.dialog_outcome(Outcome::Button("cbox0"), &mut clip);
+    state.dialog_outcome(
+        Outcome::Swatch {
+            id: "cus0",
+            double: false,
+        },
+        &mut clip,
+    );
+    state.dialog_outcome(Outcome::Button("delete_color"), &mut clip);
+    assert_eq!(state.dialogs.len(), 1);
+    assert_eq!(state.dialogs[0].1.item_label("color0"), "None");
+    // Like Clear, it is saved with Preferences, not before.
+    assert_eq!(crate::settings::with(|s| s.named_colors.len()), 1);
+    state.dialog_outcome(Outcome::Button("save"), &mut clip);
+    let saved = crate::settings::with(|s| s.named_colors.clone());
+    crate::settings::update(|s| s.named_colors.clear());
+    assert!(saved.is_empty());
+}
+
+#[test]
+fn the_color_dialog_deletes_a_color_the_same_way() {
+    let mut state = blue_words();
+    state.dialogs.clear();
+    let (palette, st) = crate::palette::palette(Some(Rgb(0x336699)), &state.view.doc);
+    state.dialogs.push((Which::Palette(st), palette));
+    let mut clip = Clipboard::without_system();
+    assert!(state.dialogs[0].1.is_enabled("delete_color"));
+    state.dialog_outcome(Outcome::Button("delete_color"), &mut clip);
+    assert_eq!(state.dialogs.len(), 2);
+    assert!(matches!(
+        state.dialogs[1].0,
+        Which::Alert(format_dialogs::Alert::DeleteColor(Rgb(0x336699), _))
+    ));
+    // Cancel changes nothing.
+    state.dialog_outcome(Outcome::Cancel, &mut clip);
+    assert_eq!(state.dialogs.len(), 1);
+    assert_eq!(
+        state.view.doc.main.paras[0].chp_of_char(0).color,
+        Rgb(0x336699)
+    );
+    state.dialog_outcome(Outcome::Button("delete_color"), &mut clip);
+    state.dialog_outcome(Outcome::Ok, &mut clip);
+    assert_eq!(state.dialogs.len(), 1);
+    assert_eq!(
+        state.view.doc.main.paras[0].chp_of_char(0).color,
+        Rgb::BLACK
+    );
+    let Which::Palette(ps) = &state.dialogs[0].0 else {
+        panic!("the palette stays");
+    };
+    assert!(!ps.custom.contains(&Rgb(0x336699)));
+    // Standard colors have nothing to delete.
+    assert!(!state.dialogs[0].1.is_enabled("delete_color"));
+}
+
+#[test]
 fn deleting_an_unused_or_saved_color() {
     let mut state = blue_words();
     let mut clip = Clipboard::without_system();
     crate::settings::update(|s| s.named_colors = vec![(0x336699, "Brand".into())]);
     state.dialog_outcome(Outcome::Button("color"), &mut clip);
-    // A color saved in Preferences is for every document: no Delete.
+    // A color saved in Preferences is for every document. Delete takes it out
+    // of Preferences alone: no question, and the text keeps its color.
     assert_eq!(pop_item(&state, "cus0").tip.as_deref(), Some("Brand"));
     state.dialog_outcome(
         Outcome::Swatch {
@@ -1784,7 +1926,18 @@ fn deleting_an_unused_or_saved_color() {
         },
         &mut clip,
     );
-    assert!(!pop_item(&state, "delete_color").enabled);
+    assert!(pop_item(&state, "delete_color").enabled);
+    state.dialog_outcome(Outcome::Button("delete_color"), &mut clip);
+    assert_eq!(state.dialogs.len(), 1);
+    assert!(crate::settings::with(|s| s.named_colors.is_empty()));
+    assert_eq!(
+        state.view.doc.main.paras[0].chp_of_char(0).color,
+        Rgb(0x336699)
+    );
+    assert!(!state.view.doc.is_modified());
+    // The document still uses it, so it is in the row as the document's own.
+    assert_eq!(pop_item(&state, "cus0").rgb, Some(0x336699));
+    assert_ne!(pop_item(&state, "cus0").tip.as_deref(), Some("Brand"));
     crate::settings::update(|s| s.named_colors.clear());
 
     // A color made with Edit Color but not used yet goes at once.
@@ -1888,7 +2041,8 @@ fn preferences_colors_are_chosen_from_the_palette() {
     state.dialog_outcome(Outcome::Button("cbox1"), &mut clip);
     let pop = state.dialogs[0].1.popout.clone().unwrap();
     assert_eq!(pop.anchor, "cbox1");
-    assert!(!pop.items.iter().any(|i| i.id == "delete_color"));
+    // Every color palette has Delete.
+    assert!(pop.items.iter().any(|i| i.id == "delete_color"));
     state.dialog_outcome(
         Outcome::Swatch {
             id: "std5",
@@ -2404,6 +2558,49 @@ fn the_toolbar_color_button_opens_the_palette_and_a_box_colors_the_text() {
     state.open_popup(Hit::ColorPopup, &mut label, &env);
     assert!(state.tool_palette_down(2.0, 2.0).is_some());
     assert!(state.tool_pal.is_none());
+}
+
+#[test]
+fn the_toolbar_palette_deletes_a_custom_color_with_the_same_question() {
+    use quill_core::props::Rgb;
+    let mut doc = quill_core::text::from_plain_text("Some text");
+    doc.main.paras[0].format_range(0, 9, &mut |c| c.color = Rgb(0x336699));
+    let mut state = WinState::new(DocView::new(doc, "Doc".into()));
+    state.width = 900.0;
+    state.height = 700.0;
+    state.view.sel = Selection::new(Position::new(0, 0), Position::new(0, 4));
+    state.open_tool_palette(Rect::new(100.0, 40.0, 30.0, 20.0));
+    let press = |state: &mut WinState, id: &str| {
+        let t = state.tool_pal.as_ref().expect("the palette is out");
+        let it = t.pop.items.iter().find(|i| i.id == id).unwrap();
+        assert!(it.enabled, "{id}");
+        let (x, y) = (t.panel.x + it.rect.x + 2.0, t.panel.y + it.rect.y + 2.0);
+        state.tool_palette_down(x, y);
+    };
+    // The selection's color is chosen when it opens, so Delete is ready.
+    press(&mut state, "delete_color");
+    assert!(state.tool_pal.is_none());
+    assert!(matches!(
+        state.dialogs[0].0,
+        Which::Alert(format_dialogs::Alert::DeleteColor(Rgb(0x336699), _))
+    ));
+    // Cancel changes nothing.
+    let mut clip = Clipboard::without_system();
+    state.dialog_outcome(Outcome::Cancel, &mut clip);
+    assert!(state.dialogs.is_empty());
+    assert_eq!(
+        state.view.doc.main.paras[0].chp_of_char(0).color,
+        Rgb(0x336699)
+    );
+    assert!(!state.view.doc.is_modified());
+    state.open_tool_palette(Rect::new(100.0, 40.0, 30.0, 20.0));
+    press(&mut state, "delete_color");
+    state.dialog_outcome(Outcome::Ok, &mut clip);
+    assert_eq!(
+        state.view.doc.main.paras[0].chp_of_char(8).color,
+        Rgb::BLACK
+    );
+    assert_eq!(state.view.doc.undo_label(), Some("Delete Color"));
 }
 
 #[test]

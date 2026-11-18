@@ -1,5 +1,22 @@
 use super::*;
 
+#[test]
+fn status_counts_refresh_with_main_text_layout() {
+    let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+        return;
+    };
+    let mut view = DocView::new(quill_core::text::from_plain_text("One"), "Counts".into());
+    assert_eq!(view.status_count.paragraphs, 1);
+    assert_eq!(view.status_count.characters, 4);
+    view.set_selection(Selection::caret(Position::new(0, 3)));
+    view.type_text(" two");
+    view.exec(Cmd::NewParagraph, false, &mut Clipboard::new());
+    view.type_text("three");
+    view.update_layout(&mut fonts);
+    assert_eq!(view.status_count.paragraphs, 2);
+    assert_eq!(view.status_count.characters, 14);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn read_aloud_uses_the_selection_or_the_whole_document() {
@@ -10,6 +27,31 @@ fn read_aloud_uses_the_selection_or_the_whole_document() {
     assert_eq!(view.read_aloud_text(), "First line\nSecond line");
     view.set_selection(Selection::new(Position::new(0, 6), Position::new(1, 6)));
     assert_eq!(view.read_aloud_text(), "line\nSecond");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn text_services_insert_paragraphs_safely_as_one_undo_step() {
+    let mut view = DocView::new(
+        quill_core::text::from_plain_text("Before selected after"),
+        "Dictation".into(),
+    );
+    view.set_selection(Selection::new(Position::new(0, 7), Position::new(0, 15)));
+    view.insert_text(&format!(
+        "dictated\r\nsecond\0{}{}",
+        quill_core::para::chars::OBJECT,
+        quill_core::para::chars::ANNOTATION
+    ));
+    assert_eq!(
+        quill_core::text::to_plain_text(&view.doc, "\n"),
+        "Before dictated\nsecond after"
+    );
+    assert_eq!(view.undo_label(), "Undo Insert Text");
+    view.exec(Cmd::Undo, false, &mut Clipboard::new());
+    assert_eq!(
+        quill_core::text::to_plain_text(&view.doc, "\n"),
+        "Before selected after"
+    );
 }
 
 #[test]

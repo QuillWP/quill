@@ -2,6 +2,7 @@
 //! beside a dialog's color box, opened below the toolbar button. One click
 //! on a box colors the selection and puts the palette away.
 
+use super::dialogs::Deleted;
 use super::*;
 use crate::dialog::Popout;
 use crate::palette::{self, PaletteState, Pick, Target};
@@ -18,7 +19,7 @@ impl WinState {
     pub(super) fn open_tool_palette(&mut self, anchor: Rect) {
         let start = Some(self.view.current_chp().color);
         let st = PaletteState::new(start, &self.view.doc);
-        let pop = palette::popout(&st, "", false);
+        let pop = palette::popout(&st, "");
         let (w, h) = pop.size;
         let x = anchor.x.min(self.width - w - 8.0).max(8.0);
         self.tool_pal = Some(ToolPalette {
@@ -51,10 +52,29 @@ impl WinState {
             .find(|it| it.enabled && it.rect.contains(lx, ly))
             .map(|it| (it.id, it.label.is_empty()));
         match hit {
+            Some(("delete_color", _)) => {
+                if let Some(c) = palette::deletable(&t.st) {
+                    match self.delete_palette_color(c, "") {
+                        Deleted::Asked => self.tool_pal = None,
+                        Deleted::Gone => {
+                            if let Some(t) = &mut self.tool_pal {
+                                palette::forget(&mut t.st, c, &self.view.doc);
+                                t.pop = palette::popout(&t.st, "");
+                            }
+                        }
+                    }
+                }
+            }
+            // Edit Color…: a custom color changes wherever it is used, and a
+            // standard one makes a color for the selected text.
             Some((_, false)) => {
-                let (start, _) = palette::edit_of(&t.st, None);
+                let (start, target) = palette::edit_of(&t.st, None);
+                let target = match target {
+                    Target::Replace(..) => target,
+                    _ => Target::Text,
+                };
                 self.tool_pal = None;
-                self.edit_color(start, Target::Text);
+                self.edit_color(start, target);
             }
             Some((id, true)) => {
                 if let Some(Pick::Chose(color)) = palette::pop_swatch(&mut t.st, id, false) {

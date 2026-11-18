@@ -25,7 +25,7 @@ pub mod tracking;
 
 pub use document::{
     Change, Document, DocumentProps, Fragment, LineNumbering, PageNumberFormat, SectionProps,
-    SectionStart, StoryId, SummaryInfo,
+    SectionStart, StoryId, SummaryInfo, default_font,
 };
 pub use link::Link;
 pub use para::{Mark, Paragraph, Run};

@@ -4,7 +4,9 @@ source ZIP for any build host.
 
 By default the app is built inside the build folder (target/release/Quill.app,
 or target/debug/Quill Debug.app with --debug; on Linux target/release/quill or
-target/debug/quill-debug). --dist makes the packages in dist/.
+target/debug/quill-debug). --dist makes the packages in dist/. On a Mac,
+--dist builds both Apple Silicon and Intel; everything else builds only for
+the Mac it runs on.
 
 Python 3.11+, standard library only. Run --help for options.
 """
@@ -104,6 +106,20 @@ def native_target() -> tuple[str, str]:
     return system, target
 
 
+def dist_targets(system: str, target: str) -> list[str]:
+    """What --dist builds. On a Mac that is the native arch, then the other
+    one, cross-compiled (no Rosetta needed). Setting CARGO_BUILD_TARGET builds
+    only that target. The other arch's Rust target is checked up front so a
+    missing one fails before any long build."""
+    if system != "macos" or "CARGO_BUILD_TARGET" in os.environ:
+        return [target]
+    other = "x86_64-apple-darwin" if target.startswith("aarch64") else "aarch64-apple-darwin"
+    installed = run("rustup", "target", "list", "--installed", capture=True).split()
+    if other not in installed:
+        raise ValueError(f"--dist also builds {other}. Install it once with: rustup target add {other}")
+    return [target, other]
+
+
 def remapped_environment() -> dict:
     """The environment for building, with source paths shortened so the binary
     does not carry the builder's home folder (panic messages keep the crate,
@@ -121,7 +137,7 @@ def remapped_environment() -> dict:
     return env
 
 
-def build(check: bool, debug: bool) -> Path:
+def build(check: bool, debug: bool, target: str | None = None) -> Path:
     if check:
         run("cargo", "fmt", "--all", "--check")
         run("cargo", "clippy", "--workspace", "--all-targets",
@@ -130,8 +146,11 @@ def build(check: bool, debug: bool) -> Path:
     # Cargo reports the actual executable path, respecting CARGO_TARGET_DIR.
     # A debug build keeps its symbols and overflow checks, so a crash report
     # names the functions involved; it runs more slowly.
+    # A target is given only to cross-compile; the native build stays in
+    # target/<profile>/.
     profile = [] if debug else ["--release"]
-    messages = run("cargo", "build", *profile, "--locked",
+    cross = ["--target", target] if target else []
+    messages = run("cargo", "build", *profile, *cross, "--locked",
                    "--package", "quill-app", "--bin", "quill",
                    "--message-format=json-render-diagnostics", capture=True,
                    env=remapped_environment())
@@ -275,7 +294,7 @@ def dev_app(executable: Path, version: str, system: str, debug: bool = False) ->
 
 
 def mac_package(executable: Path, output: Path, version: str, arch: str, label: str = "",
-                debug: bool = False) -> Path:
+                debug: bool = False, publish_app: bool = True) -> Path:
     identity = os.environ.get("MACOS_SIGN_IDENTITY")
     notary = os.environ.get("MACOS_NOTARY_PROFILE")
     destination = output / f"Quill-{version}-macos-{arch}{label}.dmg"
@@ -299,7 +318,10 @@ def mac_package(executable: Path, output: Path, version: str, arch: str, label: 
             run("xcrun", "stapler", "staple", str(image))
             run("xcrun", "stapler", "validate", str(image))
         # Publish only after staging/signing succeeds; preserve other packages.
-        replace_app(app, output / f"{name}.app")
+        # The loose app beside the disk images is the native build's only, so
+        # an Intel build never replaces the app that gets smoke tested.
+        if publish_app:
+            replace_app(app, output / f"{name}.app")
         image.replace(destination)
     return destination
 
@@ -310,7 +332,7 @@ def main() -> int:
     parser.add_argument("--with-source", action="store_true", help="also create a source ZIP alongside the native package")
     parser.add_argument("--check", action="store_true", help="run formatting, strict lint, and tests before building")
     parser.add_argument("--debug", action="store_true", help="build the debug version (slower, but crash reports name the code)")
-    parser.add_argument("--dist", action="store_true", help="make the packages to publish (DMG, tar.gz, zip) in --output")
+    parser.add_argument("--dist", action="store_true", help="make the packages to publish (DMG, tar.gz, zip) in --output; on a Mac, for Apple Silicon and Intel")
     parser.add_argument("--output", type=Path, default=ROOT / "dist", help="where --dist and --source write (default: dist)")
     args = parser.parse_args()
     if args.source and (args.with_source or args.check or args.debug or args.dist):
@@ -331,21 +353,23 @@ def main() -> int:
     if os.environ.get("MACOS_NOTARY_PROFILE") and not os.environ.get("MACOS_SIGN_IDENTITY"):
         raise ValueError("MACOS_NOTARY_PROFILE requires MACOS_SIGN_IDENTITY.")
     system, target = native_target()
-    executable = build(args.check, args.debug)
+    targets = dist_targets(system, target) if args.dist else [target]
     label = "-debug" if args.debug else ""
-    run(sys.executable, str(ROOT / "tools/generate-notices.py"),
-        "--target", target, "--output", str(PACKAGE_NOTICES))
-    if not args.dist:
-        print(f"App: {dev_app(executable, version, system, args.debug)}")
-        if args.with_source:
-            source_package(ROOT, output, version)
-        return 0
-    arch = target.split("-")[0]
-    if system == "macos":
-        package = mac_package(executable, output, version, arch, label, args.debug)
-    else:
-        package = portable_package(executable, output, version, system, arch, label, args.debug)
-    print(f"Package: {package} ({package.stat().st_size / 1024**2:.2f} MiB)")
+    for index, build_target in enumerate(targets):
+        first = index == 0
+        executable = build(args.check and first, args.debug, None if first else build_target)
+        run(sys.executable, str(ROOT / "tools/generate-notices.py"),
+            "--target", build_target, "--output", str(PACKAGE_NOTICES))
+        if not args.dist:
+            print(f"App: {dev_app(executable, version, system, args.debug)}")
+            break
+        arch = build_target.split("-")[0]
+        if system == "macos":
+            package = mac_package(executable, output, version, arch, label, args.debug,
+                                  publish_app=first)
+        else:
+            package = portable_package(executable, output, version, system, arch, label, args.debug)
+        print(f"Package: {package} ({package.stat().st_size / 1024**2:.2f} MiB)")
     if args.with_source:
         source_package(ROOT, output, version)
     return 0

@@ -424,6 +424,16 @@ impl NativeMenu {
                 shown.push((it.label.clone(), it.enabled, it.checked));
                 items.push((item, it.id));
             }
+            // These standard AppKit actions use the person's configured
+            // system Dictation and character palette. Dictation reaches
+            // WinitView through `insertText:replacementRange:`; Quill does
+            // not record audio, request microphone access or send speech to
+            // a recognition service of its own.
+            if menu.title == "Edit" {
+                sub.append(&PredefinedMenuItem::separator())?;
+                sub.append(&PredefinedMenuItem::start_dictation(None))?;
+                sub.append(&PredefinedMenuItem::emoji_and_symbols(None))?;
+            }
             bar.append(&sub)?;
         }
         keep_autofill_out();

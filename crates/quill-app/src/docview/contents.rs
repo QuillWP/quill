@@ -220,7 +220,8 @@ impl DocView {
             .collect();
         let mut changed = 0;
         for (entry, line) in entries.iter().zip(&lines) {
-            if line.is_empty() || *line == entry.text {
+            // A marked entry's text is not in a heading to change.
+            if entry.marked || line.is_empty() || *line == entry.text {
                 continue;
             }
             let para = entry.at.para;
@@ -762,5 +763,51 @@ mod tests {
         assert!(p.chp_of_char(0).hidden && p.chp_of_char(7).hidden);
         assert!(!p.chp_of_char(3).hidden);
         assert_eq!(v.doc.index_entries()[0].main, "Cats");
+    }
+
+    #[test]
+    fn toc_entries_list_the_marked_text_in_the_table_of_contents() {
+        let mut v = DocView::new(quill_core::Document::new(), "T".into());
+        v.type_text("Methods used");
+        v.set_selection(Selection::new(Position::new(0, 0), Position::new(0, 7)));
+        v.insert_entry('c');
+        let p = &v.doc.main.paras[0];
+        assert_eq!(p.text, ".c.Methods; used");
+        assert!(p.chp_of_char(0).hidden && !p.chp_of_char(3).hidden);
+        let o = quill_core::contents::TocOptions {
+            outline: false,
+            ..Default::default()
+        };
+        let entries = v.doc.toc_entries(&o);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].text, "Methods");
+    }
+
+    #[test]
+    fn making_the_index_again_keeps_text_written_after_it_and_undoes_cleanly() {
+        let mut v = DocView::new(
+            quill_core::text::from_plain_text("James Bond was here"),
+            "T".into(),
+        );
+        v.set_selection(Selection::new(Position::new(0, 0), Position::new(0, 10)));
+        v.insert_entry('i');
+        let before = v.doc.clone();
+        v.insert_index(IndexOptions::default());
+        let last = v.doc.main.paras.len() - 1;
+        v.set_selection(Selection::caret(Position::new(last, 0)));
+        v.type_text("Written after the index");
+        v.insert_index(IndexOptions::default());
+        let texts: Vec<_> = v.doc.main.paras.iter().map(|p| p.text.clone()).collect();
+        assert!(
+            texts.iter().any(|t| t == "Written after the index"),
+            "{texts:?}"
+        );
+        // Two Undos take both back, section and all.
+        let mut clip = crate::docview::Clipboard::new();
+        for _ in 0..3 {
+            v.exec(crate::commands::Cmd::Undo, false, &mut clip);
+        }
+        assert_eq!(v.doc.main.paras.len(), before.main.paras.len());
+        assert_eq!(v.doc.section, before.section);
     }
 }

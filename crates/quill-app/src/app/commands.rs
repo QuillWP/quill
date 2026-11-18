@@ -170,6 +170,18 @@ impl App {
             }
             #[cfg(target_os = "macos")]
             (Action::StopReading, _) => crate::mac_speech::stop(),
+            #[cfg(target_os = "macos")]
+            (Action::SizeWindow, Some(id)) => {
+                if let Some(i) = self.index(id) {
+                    crate::mac_window_geometry::size_to(&self.windows[i].1.window);
+                }
+            }
+            #[cfg(target_os = "macos")]
+            (Action::MoveWindow, Some(id)) => {
+                if let Some(i) = self.index(id) {
+                    crate::mac_window_geometry::move_to(&self.windows[i].1.window);
+                }
+            }
             (Action::Recent(index), _) => {
                 if let Some(path) = self.recent.get(index).cloned() {
                     self.open_files(el, &[path]);
@@ -228,13 +240,11 @@ impl App {
     }
 }
 
-/// Settings, Default Font and Toolbar Preferences change nothing in the
+/// Settings and Default Font change nothing in the
 /// document, so opening one must not pull a scrolled view back to the caret.
 pub(super) fn opens_preferences(effect: &Effect) -> bool {
     matches!(
         effect,
-        Effect::Dialog(
-            DialogId::Preferences | DialogId::DefaultFont | DialogId::ToolbarPreferences
-        )
+        Effect::Dialog(DialogId::Preferences | DialogId::DefaultFont)
     )
 }

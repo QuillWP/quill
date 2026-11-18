@@ -1201,12 +1201,19 @@ mod tests {
         let h1 = d.styles.find("heading 1").unwrap();
         let s = d.styles.get(h1);
         let text = describe(&d, s.based_on, &s.pap, &s.chp);
-        assert!(text.starts_with("Normal + Font: Helvetica"), "{text}");
+        assert!(text.starts_with("Normal + "), "{text}");
+        // Headings are set in Helvetica, so it is a difference only where the
+        // default document font is something else.
+        assert_eq!(
+            text.contains("Font: Helvetica"),
+            quill_core::default_font() != "Helvetica",
+            "{text}"
+        );
         assert!(text.contains("Bold"), "{text}");
         let n = d.styles.get(0);
         assert_eq!(
             describe(&d, None, &n.pap, &n.chp),
-            "Font: New York 12 Point, Flush Left"
+            format!("Font: {} 12 Point, Flush Left", quill_core::default_font())
         );
     }
 }
