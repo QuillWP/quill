@@ -9,7 +9,9 @@
 //! instead: see `MAX_URL_BYTES`, `MAX_LINKS` and `MAX_TABLE_BYTES`.
 
 use crate::props::Rgb;
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 /// A browser's color for a link nobody has followed yet.
@@ -60,10 +62,14 @@ struct Table {
     bytes: usize,
 }
 
+fn cost(link: &Link) -> usize {
+    link.url.len() + std::mem::size_of::<Link>()
+}
+
 impl Table {
     /// Add `link` unless a limit would be passed; 0 (no link) if so.
     fn add(&mut self, link: Link, max_links: usize, max_bytes: usize) -> u32 {
-        let cost = link.url.len() + std::mem::size_of::<Link>();
+        let cost = cost(&link);
         if link.url.len() > MAX_URL_BYTES
             || self.links.len() >= max_links
             || self.bytes.saturating_add(cost) > max_bytes
@@ -77,6 +83,29 @@ impl Table {
         self.ids.insert(link, id);
         id
     }
+
+    /// Forget every entry after the first `len`.
+    fn truncate(&mut self, len: usize) {
+        if len >= self.links.len() {
+            return;
+        }
+        for link in self.links.drain(len..) {
+            self.ids.remove(&link);
+            self.bytes -= cost(&link);
+        }
+    }
+}
+
+/// Calls to `intern` on every thread, and on this one. `rollback` compares
+/// the two to know that no other thread can hold a number it would take
+/// back.
+static CALLS: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static OWN_CALLS: Cell<u64> = const { Cell::new(0) };
+    /// Links this thread was refused, because the address was too long or
+    /// the table full.
+    static DROPPED: Cell<usize> = const { Cell::new(0) };
 }
 
 fn table() -> &'static RwLock<Table> {
@@ -89,6 +118,10 @@ fn table() -> &'static RwLock<Table> {
 /// limit, so a document cannot grow the table without bound. Links
 /// already in the table keep their numbers.
 pub fn intern(link: Link) -> u32 {
+    // Counted before the table is looked at, so a `rollback` that starts
+    // after this either sees the call or runs before the lookup.
+    CALLS.fetch_add(1, Ordering::SeqCst);
+    OWN_CALLS.set(OWN_CALLS.get() + 1);
     if let Some(&id) = table()
         .read()
         .unwrap_or_else(|e| e.into_inner())
@@ -101,7 +134,49 @@ pub fn intern(link: Link) -> u32 {
     if let Some(&id) = t.ids.get(&link) {
         return id;
     }
-    t.add(link, MAX_LINKS, MAX_TABLE_BYTES)
+    let id = t.add(link, MAX_LINKS, MAX_TABLE_BYTES);
+    if id == 0 {
+        DROPPED.set(DROPPED.get() + 1);
+    }
+    id
+}
+
+/// How many links this thread has been refused so far. A reader compares
+/// the count before and after a file to tell the person links were lost.
+pub fn dropped() -> usize {
+    DROPPED.get()
+}
+
+/// Where the table stood, so the links of a file Quill then refuses can be
+/// taken out again (`rollback`).
+#[derive(Clone, Copy, Debug)]
+pub struct Mark {
+    len: usize,
+    calls: u64,
+    own: u64,
+}
+
+pub fn mark() -> Mark {
+    let t = table().read().unwrap_or_else(|e| e.into_inner());
+    Mark {
+        len: t.links.len(),
+        calls: CALLS.load(Ordering::SeqCst),
+        own: OWN_CALLS.get(),
+    }
+}
+
+/// Take out the links added since `mark`, for a file that was read and
+/// then refused, so it does not use up the table for the rest of the
+/// session. Nothing is taken out if another thread interned a link since
+/// then, since it could hold one of the numbers. True if it was done.
+pub fn rollback(mark: Mark) -> bool {
+    let mut t = table().write().unwrap_or_else(|e| e.into_inner());
+    let others = CALLS.load(Ordering::SeqCst) - mark.calls - (OWN_CALLS.get() - mark.own);
+    if others != 0 {
+        return false;
+    }
+    t.truncate(mark.len);
+    true
 }
 
 /// The link numbered `id`, or None for 0 and numbers never handed out.
@@ -163,5 +238,34 @@ mod tests {
         assert_eq!(t.add(Link::new("https://b.example/2"), 10, one * 2), 2);
         assert_eq!(t.add(Link::new("https://b.example/3"), 10, one * 2), 0);
         assert_eq!(t.links.len(), 2);
+    }
+
+    #[test]
+    fn truncating_forgets_the_newer_links_and_their_bytes() {
+        let mut t = Table::default();
+        t.add(Link::new("https://c.example/1"), 10, usize::MAX);
+        let bytes = t.bytes;
+        t.add(Link::new("https://c.example/2"), 10, usize::MAX);
+        t.truncate(1);
+        assert_eq!((t.links.len(), t.ids.len(), t.bytes), (1, 1, bytes));
+        // The number comes back for a new link, and the old one keeps its own.
+        assert_eq!(t.add(Link::new("https://c.example/3"), 10, usize::MAX), 2);
+        assert_eq!(t.ids[&Link::new("https://c.example/1")], 1);
+    }
+
+    #[test]
+    fn a_refused_link_is_counted_and_a_rollback_never_breaks_older_numbers() {
+        let kept = intern(Link::new("https://d.example/kept"));
+        let before = dropped();
+        let m = mark();
+        intern(Link::new(&"a".repeat(MAX_URL_BYTES + 1)));
+        assert_eq!(dropped(), before + 1);
+        let added = intern(Link::new("https://d.example/added"));
+        // Other tests intern links at the same time, so whether this one
+        // was taken back depends on them; either way the older link stays.
+        if rollback(m) {
+            assert!(get(added).is_none_or(|l| l.url != "https://d.example/added"));
+        }
+        assert_eq!(get(kept).unwrap().url, "https://d.example/kept");
     }
 }

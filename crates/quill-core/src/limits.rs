@@ -90,9 +90,18 @@ impl Size {
     }
 
     /// The size of plain text, counted without building any paragraphs.
+    /// A line ends at a newline, a return, or a return and newline
+    /// together, the way the text is split into paragraphs; a classic Mac
+    /// file uses returns alone.
     pub fn of_text(text: &str) -> Size {
+        let bytes = text.as_bytes();
+        let ends = bytes
+            .iter()
+            .enumerate()
+            .filter(|&(i, &b)| b == b'\n' || (b == b'\r' && bytes.get(i + 1) != Some(&b'\n')))
+            .count();
         Size {
-            paragraphs: text.bytes().filter(|&b| b == b'\n').count() + 1,
+            paragraphs: ends + 1,
             characters: text.chars().count(),
             runs: 1,
             pictures: 0,
@@ -385,6 +394,18 @@ impl Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_text_counts_paragraphs_the_way_it_splits_them() {
+        for text in ["one", "a\nb\nc", "a\rb\rc", "a\r\nb\r\nc", "a\r\rb\n\nc\r"] {
+            let doc = crate::text::from_plain_text(text);
+            assert_eq!(
+                Size::of_text(text).paragraphs,
+                doc.main.paras.len(),
+                "{text:?}"
+            );
+        }
+    }
 
     #[test]
     fn font_and_style_names_are_cut_to_a_sensible_length() {

@@ -59,6 +59,7 @@ pub const WIDE_ROWS: &str =
 pub const FIELDS: &str =
     "Fields other than page number, date and time were kept as their current text.";
 pub const HYPERLINKS: &str = "Links to places within the document were kept as plain text.";
+pub const LINKS_DROPPED: &str = "Some links were kept as plain text, because their addresses were too long or Quill had no room for more links.";
 pub const BOOKMARKS: &str = "Bookmarks were left out.";
 pub const INDEX_ENTRIES: &str = "Index and table of contents entries were left out.";
 pub const GENERATED_INDEXES: &str =

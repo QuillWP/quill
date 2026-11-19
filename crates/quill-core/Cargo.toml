@@ -9,3 +9,6 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+# Where one character as a reader sees it ends: a letter with its accents,
+# a flag, an emoji sequence. The arrow keys and Delete step by these.
+unicode-segmentation = { version = "1.13", default-features = false }

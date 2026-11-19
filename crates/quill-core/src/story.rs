@@ -2,6 +2,7 @@
 //! Positions and selections point into a story.
 
 use crate::para::Paragraph;
+use unicode_segmentation::GraphemeCursor;
 
 /// A place between two characters. `offset` is a byte offset into the
 /// paragraph's text and always lies on a char boundary. `offset ==
@@ -112,22 +113,44 @@ impl Story {
     }
 
     /// The position one character to the right, crossing paragraph marks.
+    /// A character is what a reader sees as one: a letter with the accents
+    /// typed after it, a flag, or an emoji made of several, so the arrow
+    /// keys and Delete never leave half of one behind.
     pub fn next_char(&self, pos: Position) -> Position {
         let text = &self.paras[pos.para].text;
-        match text[pos.offset..].chars().next() {
-            Some(c) => Position::new(pos.para, pos.offset + c.len_utf8()),
-            None if pos.para + 1 < self.paras.len() => Position::new(pos.para + 1, 0),
-            None => pos,
+        if pos.offset < text.len() {
+            let mut cursor = GraphemeCursor::new(pos.offset, text.len(), true);
+            if let Ok(Some(end)) = cursor.next_boundary(text, 0) {
+                return Position::new(pos.para, end);
+            }
+            // Not reached for a whole paragraph's text, but one code point
+            // is still a step.
+            let c = text[pos.offset..].chars().next().unwrap_or_default();
+            return Position::new(pos.para, pos.offset + c.len_utf8());
+        }
+        if pos.para + 1 < self.paras.len() {
+            Position::new(pos.para + 1, 0)
+        } else {
+            pos
         }
     }
 
-    /// The position one character to the left, crossing paragraph marks.
+    /// The position one character to the left, crossing paragraph marks,
+    /// by the same characters as `next_char`.
     pub fn prev_char(&self, pos: Position) -> Position {
         let text = &self.paras[pos.para].text;
-        match text[..pos.offset].chars().next_back() {
-            Some(c) => Position::new(pos.para, pos.offset - c.len_utf8()),
-            None if pos.para > 0 => Position::new(pos.para - 1, self.paras[pos.para - 1].len()),
-            None => pos,
+        if pos.offset > 0 {
+            let mut cursor = GraphemeCursor::new(pos.offset, text.len(), true);
+            if let Ok(Some(start)) = cursor.prev_boundary(text, 0) {
+                return Position::new(pos.para, start);
+            }
+            let c = text[..pos.offset].chars().next_back().unwrap_or_default();
+            return Position::new(pos.para, pos.offset - c.len_utf8());
+        }
+        if pos.para > 0 {
+            Position::new(pos.para - 1, self.paras[pos.para - 1].len())
+        } else {
+            pos
         }
     }
 
@@ -342,6 +365,50 @@ mod tests {
         assert_eq!(s.next_char(p(0, 0)), p(0, 2));
         assert_eq!(s.next_char(p(0, 2)), p(0, 5));
         assert_eq!(s.prev_char(p(0, 5)), p(0, 2));
+    }
+
+    #[test]
+    fn char_moves_keep_what_reads_as_one_character_whole() {
+        // e and a combining acute; a flag (two regional indicators); a
+        // family emoji joined with zero width joiners; a thumbs up with a
+        // skin tone.
+        let accent = "e\u{301}";
+        let flag = "\u{1F1EB}\u{1F1F7}";
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let thumb = "\u{1F44D}\u{1F3FD}";
+        let text = format!("{accent}{flag}{family}{thumb}x");
+        let s = story(&[&text]);
+        let mut stops = vec![0];
+        let mut at = p(0, 0);
+        while at.offset < text.len() {
+            at = s.next_char(at);
+            stops.push(at.offset);
+        }
+        let ends: Vec<usize> = [accent, flag, family, thumb, "x"]
+            .iter()
+            .scan(0, |n, part| {
+                *n += part.len();
+                Some(*n)
+            })
+            .collect();
+        assert_eq!(stops[1..], ends[..]);
+        // And back again by the same steps.
+        let mut back = vec![text.len()];
+        while at.offset > 0 {
+            at = s.prev_char(at);
+            back.push(at.offset);
+        }
+        back.reverse();
+        assert_eq!(back, stops);
+        // A tab, a line break and a picture's stand-in are each their own
+        // character, even before a combining mark.
+        let s = story(&["a\t\u{B}\u{FFFC}b"]);
+        assert_eq!(s.next_char(p(0, 1)), p(0, 2));
+        assert_eq!(s.next_char(p(0, 2)), p(0, 3));
+        // From inside a cluster, a step goes to its end.
+        let s = story(&[accent]);
+        assert_eq!(s.next_char(p(0, 1)), p(0, 3));
+        assert_eq!(s.prev_char(p(0, 1)), p(0, 0));
     }
 
     #[test]

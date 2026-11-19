@@ -1428,3 +1428,26 @@ fn table_of_contents_entries_are_word_tc_fields_in_docx() {
     assert_eq!((entries[0].level, entries[0].text.as_str()), (2, "Methods"));
     assert!(report.notes().is_empty(), "{:?}", report.notes());
 }
+
+#[test]
+fn a_link_too_long_to_keep_is_reported_when_the_file_opens() {
+    let dir = std::env::temp_dir().join(format!("quill-long-link-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("a.html");
+    let long = "a".repeat(quill_core::link::MAX_URL_BYTES + 1);
+    std::fs::write(
+        &path,
+        format!("<p><a href=\"https://example.com/{long}\">long</a> and <a href=\"https://example.com/\">short</a></p>"),
+    )
+    .unwrap();
+    let (doc, report) = load_reported(&path, true).unwrap();
+    assert!(report.notes().contains(&report::LINKS_DROPPED));
+    let text = &doc.main.paras[0];
+    assert_eq!(text.chp_of_char(0).link, 0, "the long link is plain text");
+    assert_ne!(text.chp_of_char(text.text.find("short").unwrap()).link, 0);
+    // A file whose links all fit says nothing about them.
+    std::fs::write(&path, "<p><a href=\"https://example.com/\">short</a></p>").unwrap();
+    let (_, report) = load_reported(&path, true).unwrap();
+    assert!(!report.notes().contains(&report::LINKS_DROPPED));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

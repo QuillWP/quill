@@ -11,6 +11,7 @@
 use crate::props::CharProps;
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 /// Longest author name kept, in bytes. Word's own limit is 255 characters.
@@ -21,6 +22,12 @@ pub const MAX_REVISIONS: usize = 100_000;
 /// The most memory the table may use in all, counted roughly: each entry's
 /// size, its names and dates, and its place in the two maps.
 pub const MAX_TABLE_BYTES: usize = 32 << 20;
+/// Entries and bytes a file being read may not use, so changes made by
+/// typing always have room of their own. Without it, files opened in a long
+/// session could fill the table and leave a new kind of change with no
+/// entry at all, which would put it in untracked.
+pub const TYPING_RESERVE: usize = 10_000;
+pub const TYPING_RESERVE_BYTES: usize = 4 << 20;
 
 /// Who made a change and when. The date is ISO 8601 as Word writes it,
 /// "2026-10-23T14:05:00Z".
@@ -131,7 +138,22 @@ impl Table {
         self.ids.insert(rev, id);
         (id, false)
     }
+
+    /// Forget every entry after the first `len`.
+    fn truncate(&mut self, len: usize) {
+        if len >= self.revisions.len() {
+            return;
+        }
+        for rev in self.revisions.drain(len..) {
+            self.ids.remove(&rev);
+            self.bytes -= cost(&rev);
+        }
+        self.latest.retain(|_, id| (*id as usize) <= len);
+    }
 }
+
+/// Calls to `intern` on every thread; see `rollback`.
+static CALLS: AtomicU64 = AtomicU64::new(0);
 
 fn table() -> &'static RwLock<Table> {
     static TABLE: OnceLock<RwLock<Table>> = OnceLock::new();
@@ -144,6 +166,8 @@ thread_local! {
     static STRICT: Cell<bool> = const { Cell::new(false) };
     /// How many changes were refused on this thread.
     static REFUSED: Cell<usize> = const { Cell::new(0) };
+    /// Calls to `intern` on this thread.
+    static OWN_CALLS: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Run `read`, which makes the changes of a file being opened. If the table
@@ -156,7 +180,8 @@ pub fn strict<T>(read: impl FnOnce() -> Result<T, String>) -> Result<T, String> 
     STRICT.set(was);
     if REFUSED.get() != before {
         return Err(format!(
-            "The file has more tracked changes than Quill can keep ({MAX_REVISIONS}). Accept or reject some of them where it was made, then open it again."
+            "The file has more tracked changes than Quill can keep ({}). Accept or reject some of them where it was made, then open it again.",
+            MAX_REVISIONS - TYPING_RESERVE
         ));
     }
     result
@@ -169,6 +194,9 @@ pub fn intern(mut rev: Revision) -> u32 {
     if rev.is_empty() {
         return 0;
     }
+    // Counted before the table is looked at; see `rollback`.
+    CALLS.fetch_add(1, Ordering::SeqCst);
+    OWN_CALLS.set(OWN_CALLS.get() + 1);
     // A format change keeps formatting only: what the text is (a picture,
     // a note's mark) and its link are not part of it, and Reject leaves
     // them as they are.
@@ -190,11 +218,52 @@ pub fn intern(mut rev: Revision) -> u32 {
     if let Some(&id) = t.ids.get(&rev) {
         return id;
     }
-    let (id, refused) = t.add(rev, MAX_REVISIONS, MAX_TABLE_BYTES, STRICT.get());
+    let strict = STRICT.get();
+    let (max_count, max_bytes) = if strict {
+        (
+            MAX_REVISIONS - TYPING_RESERVE,
+            MAX_TABLE_BYTES - TYPING_RESERVE_BYTES,
+        )
+    } else {
+        (MAX_REVISIONS, MAX_TABLE_BYTES)
+    };
+    let (id, refused) = t.add(rev, max_count, max_bytes, strict);
     if refused {
         REFUSED.set(REFUSED.get() + 1);
     }
     id
+}
+
+/// Where the table stood, so the changes of a file Quill then refuses can
+/// be taken out again (`rollback`).
+#[derive(Clone, Copy, Debug)]
+pub struct Mark {
+    len: usize,
+    calls: u64,
+    own: u64,
+}
+
+pub fn mark() -> Mark {
+    let t = table().read().unwrap_or_else(|e| e.into_inner());
+    Mark {
+        len: t.revisions.len(),
+        calls: CALLS.load(Ordering::SeqCst),
+        own: OWN_CALLS.get(),
+    }
+}
+
+/// Take out the changes added since `mark`, for a file that was read and
+/// then refused, so it does not use up the table for the rest of the
+/// session. Nothing is taken out if another thread interned a change since
+/// then, since it could hold one of the numbers. True if it was done.
+pub fn rollback(mark: Mark) -> bool {
+    let mut t = table().write().unwrap_or_else(|e| e.into_inner());
+    let others = CALLS.load(Ordering::SeqCst) - mark.calls - (OWN_CALLS.get() - mark.own);
+    if others != 0 {
+        return false;
+    }
+    t.truncate(mark.len);
+    true
 }
 
 /// The revision numbered `id`, or None for 0 and numbers never handed out.
@@ -391,6 +460,52 @@ mod tests {
         t.add(by("Ada", "2026-10-23T10:00:00Z"), 10, one + one / 2, true);
         let (_, refused) = t.add(by("Bo", "2026-10-23T10:00:00Z"), 10, one + one / 2, true);
         assert!(refused);
+    }
+
+    #[test]
+    fn truncating_forgets_newer_entries_and_their_shapes() {
+        let mut t = Table::default();
+        t.add(by("Ada", "2026-10-23T10:00:00Z"), 10, usize::MAX, false);
+        let bytes = t.bytes;
+        t.add(by("Bo", "2026-10-23T10:00:00Z"), 10, usize::MAX, false);
+        t.truncate(1);
+        assert_eq!((t.revisions.len(), t.ids.len(), t.bytes), (1, 1, bytes));
+        assert_eq!(t.latest.len(), 1);
+        // Full again at one entry: Bo's shape is gone with his entry.
+        assert_eq!(
+            t.add(by("Bo", "2026-10-23T11:00:00Z"), 1, usize::MAX, false),
+            (0, false)
+        );
+    }
+
+    #[test]
+    fn a_file_cannot_use_the_room_kept_for_typing() {
+        let mut t = Table::default();
+        let limit = 3;
+        let reserve = 1;
+        for author in ["Ada", "Bo"] {
+            t.add(
+                by(author, "2026-10-23T10:00:00Z"),
+                limit - reserve,
+                usize::MAX,
+                true,
+            );
+        }
+        // A file is refused at the reduced limit...
+        assert_eq!(
+            t.add(
+                by("Cy", "2026-10-23T10:00:00Z"),
+                limit - reserve,
+                usize::MAX,
+                true
+            ),
+            (0, true)
+        );
+        // ...and typing still gets an entry of its own.
+        assert_eq!(
+            t.add(by("Cy", "2026-10-23T10:00:00Z"), limit, usize::MAX, false),
+            (3, false)
+        );
     }
 
     #[test]

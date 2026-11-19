@@ -902,7 +902,10 @@ struct Reader<'a> {
     /// The paragraph being written, and whether to keep it when empty.
     cur: Option<Paragraph>,
     keep: bool,
-    space: bool,
+    /// A space held back until the next character, since a run of spaces
+    /// reads as one. It keeps the formatting it had where it appeared, so
+    /// the space before a link is not part of the link.
+    space: Option<CharProps>,
     lists: Vec<List>,
     tables: u32,
     /// Reading a file rather than the clipboard: styles named by Quill's
@@ -984,7 +987,8 @@ impl<'a> Reader<'a> {
             "u" | "ins" => f.chp.underline = Underline::Single,
             // A link to another page, blue and underlined as a browser
             // shows it unless the page's styles say otherwise. Links to
-            // places on the same page stay plain text.
+            // places on the same page stay plain text, and so does a link
+            // Quill could not keep, so it does not look like a link.
             "a" if let Some(href) = e
                 .attr("href")
                 .map(str::trim)
@@ -994,8 +998,10 @@ impl<'a> Reader<'a> {
                     new_window: e.attr("target") == Some("_blank"),
                     ..quill_core::Link::new(href)
                 });
-                f.chp.color = quill_core::link::BROWSER_BLUE;
-                f.chp.underline = Underline::Single;
+                if f.chp.link != 0 {
+                    f.chp.color = quill_core::link::BROWSER_BLUE;
+                    f.chp.underline = Underline::Single;
+                }
             }
             "s" | "strike" | "del" => f.chp.strike = true,
             "sup" => f.chp.script = quill_core::Script::Super,
@@ -1116,7 +1122,7 @@ impl<'a> Reader<'a> {
     /// End the paragraph being written. A last line break adds no line in
     /// a browser, so it goes; a paragraph that had one stays, empty.
     fn flush(&mut self, out: &mut Vec<Paragraph>) {
-        self.space = false;
+        self.space = None;
         let Some(mut p) = self.cur.take() else {
             return;
         };
@@ -1153,16 +1159,18 @@ impl<'a> Reader<'a> {
         }
         for c in t.chars() {
             if !f.pre && c.is_ascii_whitespace() {
-                self.space = self.cur.as_ref().is_some_and(|p| !p.text.is_empty());
+                if self.space.is_none() && self.cur.as_ref().is_some_and(|p| !p.text.is_empty()) {
+                    self.space = Some(f.chp);
+                }
                 continue;
             }
             if c.is_control() && !matches!(c, '\n' | '\t' | '\r') {
                 continue;
             }
-            let space = std::mem::take(&mut self.space);
+            let space = self.space.take();
             let p = self.para(f);
-            if space {
-                append(p, " ", f.chp);
+            if let Some(chp) = space {
+                append(p, " ", chp);
             }
             if f.pre && matches!(c, '\n' | '\r') {
                 append(p, &chars::LINE_BREAK.to_string(), f.chp);
@@ -1219,14 +1227,14 @@ impl<'a> Reader<'a> {
                 } else {
                     chars::LINE_BREAK
                 };
-                self.space = false;
+                self.space = None;
                 let p = self.para(&f);
                 append(p, &c.to_string(), f.chp);
             }
             "img" => self.picture(e, &f),
             "math" => {
                 self.report.note(notes::EQUATIONS);
-                self.space = false;
+                self.space = None;
                 let p = self.para(&f);
                 crate::math::mathml(e, p, f.chp);
             }
@@ -1360,10 +1368,10 @@ impl<'a> Reader<'a> {
         };
         pic.size = (pic.size.0.clamp(20, 31_680), pic.size.1.clamp(20, 31_680));
         let id = self.doc.add_object(Object::Picture(pic));
-        let space = std::mem::take(&mut self.space);
+        let space = self.space.take();
         let p = self.para(f);
-        if space {
-            append(p, " ", f.chp);
+        if let Some(chp) = space {
+            append(p, " ", chp);
         }
         append(
             p,
@@ -1644,7 +1652,7 @@ fn build(html: &str, limits: &Limits, file: bool) -> Result<(Document, ImportRep
         path: Vec::new(),
         cur: None,
         keep: false,
-        space: false,
+        space: None,
         lists: Vec::new(),
         tables: 0,
         file,
@@ -1927,6 +1935,41 @@ mod tests {
         assert_eq!(names(ul), ["li", "li"]);
         let tr = root.child("table").unwrap().child("tr").unwrap();
         assert_eq!(names(tr), ["td", "td"]);
+    }
+
+    #[test]
+    fn a_space_keeps_the_formatting_it_had_where_it_appeared() {
+        let page = r#"<p>Go to <a href="https://example.invalid/">the site</a> or <b>this</b> now <a href="https://example.invalid/"> x</a></p>"#;
+        let (doc, _) = read_file(page.as_bytes()).unwrap();
+        let p = &doc.main.paras[0];
+        assert_eq!(p.text, "Go to the site or this now x");
+        let at = |i: usize| p.chp_of_char(i);
+        // The spaces on either side of the link are outside it.
+        assert_eq!(at(5).link, 0);
+        assert_eq!(at(5).underline, Underline::None);
+        assert_ne!(at(6).link, 0);
+        assert_eq!(at(14).link, 0);
+        // The space before the bold word is not bold.
+        assert!(!at(17).bold);
+        assert!(at(18).bold);
+        // Two spaces in a row, one outside the link and one inside, read as
+        // the first one, as a browser shows them.
+        assert_eq!(at(26).link, 0);
+        assert_ne!(at(27).link, 0);
+    }
+
+    #[test]
+    fn a_link_too_long_to_keep_reads_as_plain_text() {
+        let url = format!(
+            "https://example.invalid/{}",
+            "a".repeat(quill_core::link::MAX_URL_BYTES)
+        );
+        let page = format!(r#"<p><a href="{url}">too long</a></p>"#);
+        let (doc, _) = read_file(page.as_bytes()).unwrap();
+        let c = doc.main.paras[0].chp_of_char(0);
+        assert_eq!(c.link, 0);
+        assert_eq!(c.underline, Underline::None);
+        assert_ne!(c.color, quill_core::link::BROWSER_BLUE);
     }
 
     #[test]

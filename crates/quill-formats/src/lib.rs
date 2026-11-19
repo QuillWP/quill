@@ -204,9 +204,28 @@ pub fn load_reported_trusting(
     // and it's no bigger than Quill can save and open again.
     // A file with more tracked changes than the table can keep is refused
     // rather than opened with changes missing or re-dated.
-    let (mut doc, report) =
-        quill_core::revision::strict(|| read_any(path, interpret_rtf, trust_outside_pictures))?;
-    too_large(path, doc.size())?;
+    // A file that is read and then refused takes its links and changes out
+    // of the shared tables again, so it cannot fill them for the session.
+    let links = quill_core::link::mark();
+    let revisions = quill_core::revision::mark();
+    let dropped = quill_core::link::dropped();
+    let read =
+        quill_core::revision::strict(|| read_any(path, interpret_rtf, trust_outside_pictures))
+            .and_then(|(doc, report)| too_large(path, doc.size()).map(|()| (doc, report)));
+    let (mut doc, mut report) = match read {
+        Ok(read) => read,
+        Err(e) => {
+            quill_core::link::rollback(links);
+            quill_core::revision::rollback(revisions);
+            return Err(e);
+        }
+    };
+    // A link with too long an address, or one the table had no room for,
+    // came in as plain text. Say so, since saving over the file would make
+    // that permanent.
+    if quill_core::link::dropped() != dropped {
+        report.note(report::LINKS_DROPPED);
+    }
     doc.keep_in_bounds();
     Ok((doc, report))
 }

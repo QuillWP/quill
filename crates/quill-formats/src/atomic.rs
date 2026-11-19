@@ -14,6 +14,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// This is used for document backups, which may be too large to read into
 /// memory just to pass their bytes to [`write_atomic`].
 pub fn copy_atomic(source: &Path, destination: &Path) -> Result<(), String> {
+    let destination = &through_links(destination);
     let name = destination
         .file_name()
         .ok_or_else(|| format!("{} has no file name", destination.display()))?;
@@ -27,6 +28,15 @@ pub fn copy_atomic(source: &Path, destination: &Path) -> Result<(), String> {
     let tmp = cleanup.path.as_deref().unwrap();
     let file = cleanup.file.as_mut().unwrap();
     std::io::copy(&mut source_file, file).map_err(|e| file_error("copy to", tmp, e))?;
+    keep_metadata(
+        if destination.exists() {
+            destination
+        } else {
+            source
+        },
+        tmp,
+        file,
+    );
     if let Some(keep) = keep {
         file.set_permissions(keep)
             .map_err(|e| file_error("set permissions of", tmp, e))?;
@@ -52,6 +62,7 @@ pub(crate) fn write_atomic_with(
     bytes: &[u8],
     mut replace: impl FnMut(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(), String> {
+    let path = &through_links(path);
     let name = path
         .file_name()
         .ok_or_else(|| format!("{} has no file name", path.display()))?;
@@ -65,6 +76,9 @@ pub(crate) fn write_atomic_with(
     let file = cleanup.file.as_mut().unwrap();
     file.write_all(bytes)
         .map_err(|e| file_error("write", tmp, e))?;
+    if path.exists() {
+        keep_metadata(path, tmp, file);
+    }
     if let Some(keep) = keep {
         file.set_permissions(keep)
             .map_err(|e| file_error("set permissions of", tmp, e))?;
@@ -150,6 +164,71 @@ pub(crate) fn transient_windows_replace_error(error: &std::io::Error) -> bool {
     // Access denied, sharing violation, and lock violation. All other errors
     // (bad path, full disk, permissions) are immediately actionable.
     matches!(error.raw_os_error(), Some(5 | 32 | 33))
+}
+
+/// The file a save to `path` should replace. A symlink is followed to the
+/// file it names, so the link stays a link and its target gets the new
+/// contents, rather than the rename putting a plain file where the link
+/// was. A chain of links that never ends (a loop) is left as it is.
+pub(crate) fn through_links(path: &Path) -> PathBuf {
+    let mut at = path.to_path_buf();
+    // The same bound as the system's own (MAXSYMLINKS).
+    for _ in 0..32 {
+        match std::fs::symlink_metadata(&at) {
+            Ok(m) if m.file_type().is_symlink() => match std::fs::read_link(&at) {
+                // A relative target is relative to the link's folder.
+                Ok(target) => {
+                    at = match at.parent() {
+                        Some(folder) => folder.join(target),
+                        None => target,
+                    }
+                }
+                Err(_) => return path.to_path_buf(),
+            },
+            _ => return at,
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Give the temporary file what the file it replaces has besides its
+/// contents and mode: its owner and group, and on the Mac its extended
+/// attributes (Finder tags, comments, where it was downloaded from) and
+/// access control list. The modification time is not copied, since the
+/// file has changed. This is best effort: a file system without them, or
+/// an owner this user may not give, leaves the save as it was.
+#[allow(unused_variables)]
+pub(crate) fn keep_metadata(from: &Path, tmp: &Path, file: &std::fs::File) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(m) = std::fs::metadata(from)
+            && let Ok(own) = file.metadata()
+            && (m.uid(), m.gid()) != (own.uid(), own.gid())
+        {
+            let _ = std::os::unix::fs::fchown(file, Some(m.uid()), Some(m.gid()));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let (Ok(from), Ok(to)) = (
+            std::ffi::CString::new(from.as_os_str().as_bytes()),
+            std::ffi::CString::new(tmp.as_os_str().as_bytes()),
+        ) else {
+            return;
+        };
+        // SAFETY: both are valid NUL-terminated paths, and a null state is
+        // allowed. Only attributes and the ACL are copied, never data.
+        unsafe {
+            libc::copyfile(
+                from.as_ptr(),
+                to.as_ptr(),
+                std::ptr::null_mut(),
+                libc::COPYFILE_XATTR | libc::COPYFILE_ACL,
+            );
+        }
+    }
 }
 
 /// Create a unique temporary file without overwriting one left by a crashed
@@ -241,5 +320,127 @@ impl Drop for TempCleanup {
         if let Some(path) = self.path.take() {
             let _ = std::fs::remove_file(path);
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("quill-atomic-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn saving_through_a_symlink_replaces_its_target_and_keeps_the_link() {
+        let dir = scratch("link");
+        std::fs::create_dir(dir.join("real")).unwrap();
+        let target = dir.join("real/doc.qwp");
+        std::fs::write(&target, b"old").unwrap();
+        let link = dir.join("doc.qwp");
+        std::os::unix::fs::symlink("real/doc.qwp", &link).unwrap();
+        // A link to a link is followed to the end.
+        let second = dir.join("again.qwp");
+        std::os::unix::fs::symlink(&link, &second).unwrap();
+
+        write_atomic(&second, b"new").unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            std::fs::symlink_metadata(&second)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        // No temporary file is left in either folder.
+        for folder in [&dir, &dir.join("real")] {
+            let names: Vec<_> = std::fs::read_dir(folder)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert!(
+                names
+                    .iter()
+                    .all(|n| !n.to_string_lossy().contains("qwp-saving")),
+                "{names:?}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_link_loop_or_a_dangling_link_still_saves() {
+        let dir = scratch("loop");
+        let a = dir.join("a.qwp");
+        let b = dir.join("b.qwp");
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        std::os::unix::fs::symlink(&a, &b).unwrap();
+        assert_eq!(through_links(&a), a);
+        write_atomic(&a, b"x").unwrap();
+        assert_eq!(std::fs::read(&a).unwrap(), b"x");
+
+        // A link to a file not made yet makes that file.
+        let dangling = dir.join("c.qwp");
+        std::os::unix::fs::symlink("made.qwp", &dangling).unwrap();
+        write_atomic(&dangling, b"y").unwrap();
+        assert_eq!(std::fs::read(dir.join("made.qwp")).unwrap(), b"y");
+        assert!(
+            std::fs::symlink_metadata(&dangling)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_save_keeps_the_files_extended_attributes() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = scratch("xattr");
+        let path = dir.join("doc.qwp");
+        std::fs::write(&path, b"old").unwrap();
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let name = c"com.quill.test";
+        let value = b"kept";
+        // SAFETY: valid NUL-terminated strings and a buffer of the length given.
+        let set = unsafe {
+            libc::setxattr(
+                c_path.as_ptr(),
+                name.as_ptr(),
+                value.as_ptr().cast(),
+                value.len(),
+                0,
+                0,
+            )
+        };
+        assert_eq!(set, 0, "the scratch folder takes extended attributes");
+
+        write_atomic(&path, b"new").unwrap();
+
+        let mut buf = [0u8; 16];
+        // SAFETY: as above, with a buffer of `buf.len()` bytes.
+        let n = unsafe {
+            libc::getxattr(
+                c_path.as_ptr(),
+                name.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                0,
+                0,
+            )
+        };
+        assert_eq!(&buf[..n.max(0) as usize], value);
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

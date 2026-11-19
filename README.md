@@ -13,7 +13,7 @@
 
 <p align="center"><a href="https://quillwp.com">quillwp.com</a></p>
 
-**Status: alpha · version 0.25.0.** Alpha testers wanted.
+**Status: alpha · version 0.25.1.** Alpha testers wanted.
 **[Download a build](https://github.com/QuillWP/quill/releases)** from the releases page.
 
 **Word compatibility is a work in progress.** Quill opens and saves DOCX, and

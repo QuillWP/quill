@@ -6,6 +6,49 @@ I add a new release version, just to keep things readable.
 Versions 0.1.0 to 0.14.0 all share the same commit date, 2026-11-05, because
 that is when the public repository was created.
 
+## 0.25.1 - 2026-11-19
+
+A patch release with fixes from a review of the 0.25.0 code: links that were
+dropped without a word, saving through symlinks, Finder tags lost on save, and
+the cursor splitting emoji and accented letters.
+
+**Note:** Windows and Linux builds are still not being created or tested. The
+Mac Intel builds are built but not tested, since I do not have an Intel Mac.
+
+**Opening files**
+
+- A link whose address is too long to keep (over 16 KB), or one that meets a
+  full link table, now comes in as plain text with a warning when the file
+  opens. Before, it was dropped silently, and saving over the original made
+  the loss permanent.
+- A link dropped from an HTML file is plain text, not blue and underlined, so
+  it no longer looks like a link.
+- In HTML files and pasted web pages, the space before a link or styled text no
+  longer takes that text's formatting. It was underlined and part of the link,
+  or bold before bold text.
+- A file that is read and then refused for being too large no longer uses up
+  room in the shared link and tracked change tables for the rest of the
+  session.
+- Files may fill only part of the tracked change table, so there is always
+  room left for changes you type. Before, typing in a full table could go in
+  untracked while Track Changes was on.
+- Text files with classic Mac line endings (a return alone) are counted
+  correctly against the paragraph limit when opened or pasted.
+
+**Saving**
+
+- Saving a document opened through a symlink writes the file the link points
+  to and leaves the link in place. Before, the link was replaced with a copy.
+- A save keeps the file's owner and group and, on the Mac, its Finder tags,
+  other extended attributes and access control list.
+
+**Editing**
+
+- The arrow keys, Backspace and Delete move over whole characters as a reader
+  sees them: a letter with its accents, a flag, or a joined emoji like a
+  family, instead of splitting them into pieces. Emoji are still drawn with
+  plain fallback glyphs; color emoji are not supported yet.
+
 ## 0.25.0 - 2026-11-18
 
 Word-compatible index and contents entries in .docx, a quieter and more modern
