@@ -203,6 +203,8 @@ impl Unit {
 
 /// Quill remembers this many recent documents; the menu shows `recent_count`.
 pub const MAX_RECENT_DOCUMENTS: usize = 100;
+/// Quill remembers this many folders the person allowed it into.
+pub const MAX_ALLOWED_FOLDERS: usize = 50;
 /// How many colors Preferences saves for every document.
 pub const MAX_NAMED_COLORS: usize = 8;
 
@@ -287,6 +289,9 @@ pub struct Settings {
     /// stopped. Set false while it runs. Prompt asks to reopen the last
     /// session's documents only when this is false.
     pub quit_cleanly: bool,
+    /// Folders the person let Quill into from the App Sandbox, newest
+    /// first, so it can keep a Markdown file's pictures beside it.
+    pub allowed_folders: Vec<PathBuf>,
     // Default Font
     pub font: String,
     /// The Default Font's style: Bold and Italic choices from its menu.
@@ -368,7 +373,7 @@ fn section(out: &mut String, title: &str, about: Option<&str>) {
 
 /// A path on one line: `%`, line feeds and returns are written as `%25`,
 /// `%0A` and `%0D`.
-fn escape_path(path: &std::path::Path) -> String {
+pub(crate) fn escape_path(path: &std::path::Path) -> String {
     path.to_string_lossy()
         .replace('%', "%25")
         .replace('\n', "%0A")
@@ -376,7 +381,7 @@ fn escape_path(path: &std::path::Path) -> String {
         .replace('\t', "%09")
 }
 
-fn unescape_path(v: &str) -> PathBuf {
+pub(crate) fn unescape_path(v: &str) -> PathBuf {
     PathBuf::from(
         v.replace("%0A", "\n")
             .replace("%0D", "\r")
@@ -448,6 +453,7 @@ impl Default for Settings {
             foreign_as_quill: true,
             reopen: Reopen::Prompt,
             last_session: Vec::new(),
+            allowed_folders: Vec::new(),
             quit_cleanly: true,
             font: quill_core::default_font().into(),
             font_bold: false,
@@ -713,8 +719,6 @@ impl Settings {
         put(&mut out, "doc.gutter", d.gutter.to_string());
         put(&mut out, "doc.mirror_margins", b(d.mirror_margins));
         put(&mut out, "doc.default_tab", d.default_tab.to_string());
-        put(&mut out, "doc.widow_control", b(d.widow_control));
-        put(&mut out, "doc.print_hidden", b(d.print_hidden));
         put(&mut out, "doc.even_odd_headers", b(d.even_odd_headers));
         put(
             &mut out,
@@ -794,6 +798,12 @@ impl Settings {
         }
         for path in &self.last_session {
             put(&mut out, "last_session_document", escape_path(path));
+        }
+        if !self.allowed_folders.is_empty() {
+            section(&mut out, "Folders Quill May Use", None);
+        }
+        for path in &self.allowed_folders {
+            put(&mut out, "allowed_folder", escape_path(path));
         }
         out
     }
@@ -994,6 +1004,11 @@ impl Settings {
                         s.last_session.push(unescape_path(v));
                     }
                 }
+                "allowed_folder" => {
+                    if !v.is_empty() && s.allowed_folders.len() < MAX_ALLOWED_FOLDERS {
+                        s.allowed_folders.push(unescape_path(v));
+                    }
+                }
                 "reopen_documents" => {
                     s.reopen = Reopen::ALL
                         .into_iter()
@@ -1029,8 +1044,6 @@ impl Settings {
                 "doc.gutter" => d.gutter = num(d.gutter),
                 "doc.mirror_margins" => d.mirror_margins = flag,
                 "doc.default_tab" => d.default_tab = num(d.default_tab).max(1),
-                "doc.widow_control" => d.widow_control = flag,
-                "doc.print_hidden" => d.print_hidden = flag,
                 "doc.even_odd_headers" => d.even_odd_headers = flag,
                 "doc.footnote_position" => {
                     d.footnote_position = match v {
@@ -1421,6 +1434,7 @@ mod tests {
             font: "Times".into(),
             size: 20,
             recent_documents: vec![PathBuf::from("/Documents/100%\nfinal.qwp")],
+            allowed_folders: vec![PathBuf::from("/Users/pat/Notes\tand pictures")],
             ..Default::default()
         };
         s.document.margin_left = 2000;

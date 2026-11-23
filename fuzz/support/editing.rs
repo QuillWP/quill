@@ -5,6 +5,8 @@ use quill_core::{CharProps, Document, Position, Selection, StoryId};
 pub mod character_styles;
 #[path = "round_trip.rs"]
 pub(crate) mod round_trip;
+#[path = "sections.rs"]
+pub mod sections;
 const MAIN: StoryId = StoryId::Main;
 
 fn position(doc: &Document, a: u8, b: u8) -> Position {

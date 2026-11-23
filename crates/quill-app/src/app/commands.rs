@@ -226,11 +226,18 @@ impl App {
                     }
                     a => a,
                 };
+                let fits_visible_page = matches!(
+                    action,
+                    Action::Zoom(
+                        crate::app_menus::ZOOM_FILL_HORIZONTAL
+                            | crate::app_menus::ZOOM_FILL_VERTICAL
+                    )
+                );
                 let effect = w.st.act(action, clip);
                 if let Some(fonts) = self.fonts.as_mut() {
                     w.st.view.update_layout(fonts);
                 }
-                if !opens_preferences(&effect) {
+                if !fits_visible_page && !opens_preferences(&effect) {
                     w.st.view.scroll_to_caret();
                 }
                 w.window.request_redraw();

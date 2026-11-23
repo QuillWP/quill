@@ -1,6 +1,6 @@
 # Contributing
 
-Quill is alpha software and bug reports are the most useful help.
+Quill is beta software and bug reports are the most useful help.
 
 ## Reporting a bug
 
@@ -10,12 +10,17 @@ Quill is alpha software and bug reports are the most useful help.
 - what you did, what you expected and what happened;
 - if a document is involved, its format, and a small copy that shows the
   problem if you can share one (never your only copy);
-- after a crash, the crash log: `~/Library/Preferences/Quill Crash Log`
-  (`Quill Debug Crash Log` for the debug build);
+- after a crash, the crash log. The downloaded Mac release app runs in
+  the App Sandbox, so it is in its container:
+  `~/Library/Containers/com.quillwp.Quill/Data/Library/Preferences/Quill Crash Log`
+  The debug package is not sandboxed, and neither is a build from source: they
+  keep it in `~/Library/Preferences/` (`Quill Debug Crash Log` for debug);
 - after a freeze, which leaves no crash log: start Quill from a terminal with
   `quill --with-events`, make it freeze and send the end of `quill-events.log`
-  (written in the folder you started it from; `--events-file=PATH` picks another). `--with-events=all`
-  also records mouse moves, redraws and every wake of the event loop.
+  (written in the folder you started it from, or for the downloaded Mac app in
+  `~/Library/Containers/com.quillwp.Quill/Data/`; `--events-file=PATH` picks
+  another). `--with-events=all` also records mouse moves, redraws and every
+  wake of the event loop.
 
 Check [KNOWN-ISSUES.md](KNOWN-ISSUES.md) first.
 

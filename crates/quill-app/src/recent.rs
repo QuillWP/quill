@@ -44,6 +44,7 @@ pub fn note(paths: &mut Vec<PathBuf>, path: &Path) {
         controller.noteNewRecentDocumentURL(&NSURL::fileURLWithPath(&path));
     }
     crate::settings::update(|settings| settings.recent_documents = paths.clone());
+    crate::bookmarks::remember(path);
 }
 
 /// Take entry `index` out of the list. The system's own recent list has no

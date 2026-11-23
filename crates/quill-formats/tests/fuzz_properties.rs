@@ -20,6 +20,23 @@ fn generated_editing_programs_preserve_documents_and_history() {
 }
 
 #[test]
+fn generated_section_and_contents_programs_keep_text_and_save_in_every_format() {
+    for seed in 0..128u64 {
+        let mut state = seed + 1;
+        let program: Vec<u8> = (0..6 * 64)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        let result = std::panic::catch_unwind(|| editing::sections::exercise(&program));
+        assert!(result.is_ok(), "sections seed {seed}, program {program:?}");
+    }
+}
+
+#[test]
 fn generated_character_style_programs_preserve_documents_and_history() {
     for seed in 0..128u64 {
         let mut state = seed + 1;

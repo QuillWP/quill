@@ -56,10 +56,19 @@ pub fn confirm_private_paste(names: &[String]) -> bool {
     )
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_PASTE_CHOICE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
 /// Some(false) keeps the missing names, Some(true) pastes with them and then
 /// opens Replace Missing Fonts so each can be replaced, None cancels. The
 /// document has not changed when this is shown.
 pub fn confirm_paste(missing: &[String], replacement: &str) -> Option<bool> {
+    #[cfg(test)]
+    if let Some(choice) = TEST_PASTE_CHOICE.take() {
+        return Some(choice);
+    }
     let mut names = missing
         .iter()
         .take(10)

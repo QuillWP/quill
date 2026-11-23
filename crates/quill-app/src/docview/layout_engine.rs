@@ -24,8 +24,9 @@ impl DocView {
                 p.text_width() as f32 / 20.0
             },
             default_tab: p.default_tab as f32 / 20.0,
+            // Hidden text prints when View > Hidden Text shows it.
             show_hidden: if self.printing {
-                self.doc.props.print_hidden
+                crate::settings::with(|s| s.show_hidden)
             } else {
                 self.show_marks || crate::settings::with(|s| s.show_hidden)
             },
@@ -53,6 +54,9 @@ impl DocView {
 
     /// Bring the layout cache up to date with the document.
     pub fn update_layout(&mut self, fonts: &mut Fonts) {
+        // Break guides are drawn in the interface font, which drawing cannot
+        // load, so load it here.
+        fonts.resolve(quill_layout::fonts::UI_FONT, false, false);
         self.layout_pass(fonts);
         // Hyphenate All reads every paragraph's glyphs.
         if self.hyph_job.is_some() {
@@ -178,7 +182,7 @@ impl DocView {
         if self.outline {
             let toc_end = self.doc.existing_toc();
             for (i, w) in want.iter_mut().enumerate() {
-                if !paras[i].pap.in_table && toc_end.is_none_or(|end| i > end) {
+                if !paras[i].pap.in_table && toc_end.as_ref().is_none_or(|r| !r.contains(&i)) {
                     *w = (*w - self.outline_x(i).1).max(36.0);
                 }
             }
@@ -218,14 +222,7 @@ impl DocView {
             }
         } else {
             let p = &self.doc.props;
-            if self.laid_out_page
-                != (
-                    p.page_height,
-                    p.margin_top,
-                    p.margin_bottom,
-                    p.widow_control,
-                )
-            {
+            if self.laid_out_page != (p.page_height, p.margin_top, p.margin_bottom) {
                 self.repaginate();
                 self.toc_stale = true;
             }
@@ -429,16 +426,9 @@ impl DocView {
         if !self.page_view || self.pages.is_empty() || self.on_table_handle(wx, wy) {
             return None;
         }
-        let (pw, ph) = self.page_size();
-        let left = self.area.x + self.page_left();
-        if wx < left || wx > left + pw {
-            return None;
-        }
+        let (_, ph) = self.page_size();
+        let k = self.page_at_window(wx, wy)?;
         let vy = wy - self.area.y + self.scroll_y;
-        let k = ((vy - PAGE_GAP / 2.0) / (ph + PAGE_GAP)).floor().max(0.0) as usize;
-        if k >= self.pages.len() {
-            return None;
-        }
         let local = vy - self.page_top(k);
         let (h, f) = self.headers_for_page(k);
         let section = self.page_section_index(k);
@@ -921,6 +911,7 @@ impl DocView {
                 page_break_before: p.pap.page_break_before,
                 keep_with_next: p.pap.keep_with_next,
                 keep_together: p.pap.keep_together,
+                widow_control: p.pap.widow_control,
             })
             .collect();
         let text_width = p.text_width();
@@ -935,21 +926,10 @@ impl DocView {
                 spacing: s.column_spacing as f32 / 20.0,
             })
             .collect();
-        self.bands = paginate::paginate_sections(
-            &units,
-            &keeps,
-            &sections,
-            &page_heights,
-            p.widow_control,
-            notes::NOTE_SEP,
-        );
+        self.bands =
+            paginate::paginate_sections(&units, &keeps, &sections, &page_heights, notes::NOTE_SEP);
         self.pages = paginate::page_starts(&self.bands);
-        self.laid_out_page = (
-            p.page_height,
-            p.margin_top,
-            p.margin_bottom,
-            p.widow_control,
-        );
+        self.laid_out_page = (p.page_height, p.margin_top, p.margin_bottom);
     }
 }
 

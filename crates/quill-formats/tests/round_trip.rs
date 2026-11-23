@@ -204,6 +204,7 @@ fn kitchen_sink() -> Document {
         p.page_break_before = true;
         p.keep_with_next = true;
         p.keep_together = true;
+        p.widow_control = false;
         p.suppress_line_numbers = true;
         p.borders.top.style = BorderStyle::Single;
         p.borders.bottom.style = BorderStyle::Double;
@@ -417,11 +418,9 @@ fn kitchen_sink() -> Document {
     p.margin_bottom = 1800;
     p.top_exact = true;
     p.bottom_exact = true;
-    p.print_hidden = true;
     p.gutter = 360;
     p.mirror_margins = true;
     p.default_tab = 360;
-    p.widow_control = false;
     p.footnote_restart_each_page = true;
     p.footnote_start = 3;
     let s = &mut doc.summary;
@@ -966,7 +965,7 @@ fn a_live_table_of_contents_is_a_toc_field_in_docx() {
     let p = &mut doc.main.paras[0];
     p.mark = quill_core::Mark::SectionBreak;
     p.section = Some(Box::new(doc.section.clone()));
-    assert_eq!(doc.existing_toc(), Some(0));
+    assert_eq!(doc.existing_toc(), Some(0..1));
     let o = quill_core::contents::TocOptions {
         outline: true,
         entries: false,
@@ -988,6 +987,86 @@ fn a_live_table_of_contents_is_a_toc_field_in_docx() {
     let back = quill_formats::docx::read(&bytes).unwrap();
     assert_eq!(back.props.live_toc, Some(o));
     assert_eq!(back.main.paras[0].text, "Intro\t1");
+}
+
+/// Every kind of section break Insert > Break offers keeps its kind through
+/// every format that has sections.
+#[test]
+fn every_section_break_kind_survives_a_save() {
+    use quill_core::SectionStart::*;
+    let kinds = [NewPage, NoBreak, OddPage, EvenPage];
+    let mut doc = quill_core::text::from_plain_text("One\nTwo\nThree\nFour\nFive");
+    // Breaks after each of the first four paragraphs, last one first so the
+    // positions stay put, then a kind for each new section.
+    for para in (0..4).rev() {
+        doc.insert_section_break(Position::new(para, doc.main.paras[para].len()));
+    }
+    let breaks: Vec<usize> = (0..doc.main.paras.len())
+        .filter(|&i| doc.main.paras[i].mark == quill_core::Mark::SectionBreak)
+        .collect();
+    assert_eq!(breaks.len(), 4);
+    for (k, kind) in kinds.iter().enumerate() {
+        doc.format_sections(breaks[k] + 1, breaks[k] + 1, |s| s.start = *kind);
+    }
+    let starts =
+        |d: &quill_core::Document| (1..=4).map(|k| d.nth_section(k).start).collect::<Vec<_>>();
+    assert_eq!(starts(&doc), kinds);
+    let native = quill_formats::native::read(&quill_formats::native::write(&doc, 0)).unwrap();
+    assert_eq!(starts(&native), kinds, "native");
+    let docx = quill_formats::docx::read(&quill_formats::docx::write(&doc, 0)).unwrap();
+    assert_eq!(starts(&docx), kinds, "docx");
+    let rtf = quill_formats::rtf::read(&quill_formats::rtf::write(&doc)).unwrap();
+    assert_eq!(starts(&rtf), kinds, "rtf");
+}
+
+/// Widow Control is a paragraph setting: switched off for one paragraph it
+/// stays off for that paragraph, and on for the rest, in every format.
+#[test]
+fn widow_control_is_kept_per_paragraph() {
+    let mut doc = quill_core::text::from_plain_text("On\nOff\nOn again");
+    assert!(doc.main.paras.iter().all(|p| p.pap.widow_control));
+    doc.main.paras[1].pap.widow_control = false;
+    let native = quill_formats::native::read(&quill_formats::native::write(&doc, 0)).unwrap();
+    let docx = quill_formats::docx::read(&quill_formats::docx::write(&doc, 0)).unwrap();
+    let rtf = quill_formats::rtf::read(&quill_formats::rtf::write(&doc)).unwrap();
+    for (name, back) in [("native", native), ("docx", docx), ("rtf", rtf)] {
+        let got: Vec<bool> = back
+            .main
+            .paras
+            .iter()
+            .map(|p| p.pap.widow_control)
+            .collect();
+        assert_eq!(got, [true, false, true], "{name}");
+    }
+}
+
+/// A contents after a cover page is still a live TOC field in docx, and
+/// is found again when the file is read.
+#[test]
+fn a_live_table_of_contents_after_a_cover_page_stays_live_in_docx() {
+    let mut doc = quill_core::text::from_plain_text("Cover\nIntro\t1\nBody");
+    let toc1 = doc.styles.find("toc 1").unwrap();
+    doc.apply_style(StoryId::Main, 1, 1, toc1);
+    for para in [0, 1] {
+        let p = &mut doc.main.paras[para];
+        p.mark = quill_core::Mark::SectionBreak;
+        p.section = Some(Box::new(doc.section.clone()));
+    }
+    assert_eq!(doc.existing_toc(), Some(1..2));
+    let o = quill_core::contents::TocOptions {
+        outline: true,
+        entries: false,
+        page_numbers: true,
+        from: 1,
+        to: 3,
+    };
+    doc.props.live_toc = Some(o);
+    let bytes = quill_formats::docx::write(&doc, 1_760_000_000);
+    let back = quill_formats::docx::read(&bytes).unwrap();
+    assert_eq!(back.props.live_toc, Some(o));
+    assert_eq!(back.existing_toc(), Some(1..2));
+    assert_eq!(back.main.paras[0].text, "Cover");
+    assert_eq!(back.main.paras[1].text, "Intro\t1");
 }
 
 /// The same picture twice in a row shares one object but keeps one run per

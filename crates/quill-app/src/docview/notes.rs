@@ -516,14 +516,9 @@ impl DocView {
         if !self.page_view || self.pages.is_empty() {
             return None;
         }
-        let (pw, ph) = self.page_size();
-        let left = self.area.x + self.page_left();
-        if wx < left || wx > left + pw {
-            return None;
-        }
+        let k = self.page_at_window(wx, wy)?;
         let vy = wy - self.area.y + self.scroll_y;
-        let k = ((vy - PAGE_GAP / 2.0) / (ph + PAGE_GAP)).floor().max(0.0) as usize;
-        let lx = wx - self.area.x - self.text_x();
+        let lx = wx - self.area.x - self.text_x(k);
         let ly = vy - self.page_top(k) - self.page_body_top(k);
         for n in self.page_notes(k) {
             let w = self.column_twips(0) as f32 / 20.0;
@@ -531,7 +526,7 @@ impl DocView {
                 return Some(n.id);
             }
         }
-        let (_, y) = self.doc_at(lx, vy);
+        let (_, y) = self.doc_at(wx, wy);
         for e in &self.endnotes {
             let mut ny = e.y + NOTE_SEP;
             for &id in &e.ids {

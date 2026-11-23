@@ -173,6 +173,22 @@ pub fn changed(which: &mut Which, d: &mut Dialog, view: &DocView, id: &str) {
         Which::Character(_) => character_changed(d, id),
         Which::Border(st) if id == "applyto" => border_dialog::target_changed(st, d, view),
         Which::Border(st) => border_dialog::changed(st, d, id),
+        Which::Document if id == "mirror" => page_dialogs::mirror_toggled(d, &view.doc.props),
+        Which::Document if matches!(id, "paper" | "paper_w" | "paper_h") => {
+            let wide = view.doc.props.page_width > view.doc.props.page_height;
+            page_dialogs::paper_changed(d, id, wide, crate::settings::with(|s| s.unit))
+        }
+        Which::PageSetup if matches!(id, "paper" | "paper_w" | "paper_h" | "tall" | "wide") => {
+            let id = if matches!(id, "tall" | "wide") {
+                "paper"
+            } else {
+                id
+            };
+            {
+                let wide = d.is_on("wide");
+                page_dialogs::paper_changed(d, id, wide, crate::settings::with(|s| s.unit))
+            }
+        }
         Which::Section if id == "margin_numbers" => page_dialogs::margin_numbers_changed(d),
         Which::Toc | Which::Index => crate::contents_dialogs::level_changed(d, id),
         Which::Print => page_dialogs::print_changed(d, id),
@@ -688,7 +704,7 @@ pub fn paragraph(view: &DocView) -> (Dialog, Which) {
 }
 
 pub fn paragraph_properties(p: &ParaProps) -> Dialog {
-    let mut d = Dialog::new("Paragraph", 438.0, 232.0);
+    let mut d = Dialog::new("Paragraph", 438.0, 248.0);
     d.group("Spacing", 10.0, 4.0, 334.0, 70.0);
     d.text("Before:", 18.0, 24.0);
     d.field("before", &units::length(p.before), 84.0, 22.0, 66.0);
@@ -712,7 +728,7 @@ pub fn paragraph_properties(p: &ParaProps) -> Dialog {
     d.text("First:", 18.0, 152.0);
     d.field("first", &units::length(p.first), 70.0, 150.0, 70.0);
 
-    d.group("Pagination", 158.0, 80.0, 186.0, 76.0);
+    d.group("Pagination", 158.0, 80.0, 186.0, 98.0);
     d.check(
         "pagebreak",
         "Page Break Before",
@@ -728,11 +744,12 @@ pub fn paragraph_properties(p: &ParaProps) -> Dialog {
         134.0,
         p.keep_together,
     );
+    d.check("widow", "Widow Control", 166.0, 152.0, p.widow_control);
     d.check(
         "noline",
         "Suppress Line Numbers",
         166.0,
-        164.0,
+        184.0,
         p.suppress_line_numbers,
     );
     d.disable("noline");
@@ -762,6 +779,7 @@ pub fn read_paragraph(d: &Dialog, base: &ParaProps) -> Option<ParaProps> {
     p.page_break_before = d.is_on("pagebreak");
     p.keep_with_next = d.is_on("keepnext");
     p.keep_together = d.is_on("keeplines");
+    p.widow_control = d.is_on("widow");
     Some(p)
 }
 
@@ -836,7 +854,7 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
                 macro_rules! changed {
                     ($($f:ident),*) => { $( if target.$f != base.$f { p.$f = target.$f.clone(); } )* };
                 }
-                changed!(before, after, line, left, right, first, page_break_before, keep_with_next, keep_together);
+                changed!(before, after, line, left, right, first, page_break_before, keep_with_next, keep_together, widow_control);
             });
             true
         }

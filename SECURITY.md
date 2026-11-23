@@ -8,4 +8,4 @@ repository's Security tab, rather than in a public issue. Please attach the
 smallest file that shows the problem, say which format it is, and give the
 Quill version.
 
-Only the newest release is supported while Quill is in alpha.
+Only the newest release is supported while Quill is in beta.

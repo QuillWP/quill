@@ -445,6 +445,7 @@ fn pap(o: &mut Out, p: &ParaProps) {
         page_break_before,
         keep_with_next,
         keep_together,
+        widow_control,
         suppress_line_numbers,
         borders: b,
         shading_color,
@@ -498,6 +499,11 @@ fn pap(o: &mut Out, p: &ParaProps) {
     o.flag(11, *keep_with_next);
     o.flag(12, *keep_together);
     o.flag(13, *suppress_line_numbers);
+    // Stored upside down so that a paragraph with the default (on) writes
+    // nothing extra.
+    if !*widow_control {
+        o.flag(20, true);
+    }
     o.nest(14, |o| borders(o, b));
     if let Some(color) = shading_color {
         o.uint(19, color.0 as u64);
@@ -642,8 +648,6 @@ fn document_props(o: &mut Out, p: &DocumentProps) {
         gutter,
         mirror_margins,
         default_tab,
-        widow_control,
-        print_hidden,
         even_odd_headers,
         footnote_position,
         footnote_restart_each_page,
@@ -664,8 +668,6 @@ fn document_props(o: &mut Out, p: &DocumentProps) {
     o.int(9, *gutter as i64);
     o.flag(10, *mirror_margins);
     o.int(11, *default_tab as i64);
-    o.flag(12, *widow_control);
-    o.flag(13, *print_hidden);
     o.flag(14, *even_odd_headers);
     o.uint(
         15,
@@ -1153,6 +1155,7 @@ fn read_pap(b: &[u8]) -> Result<ParaProps, Damaged> {
             11 => p.keep_with_next = flag(f)?,
             12 => p.keep_together = flag(f)?,
             13 => p.suppress_line_numbers = flag(f)?,
+            20 => p.widow_control = !flag(f)?,
             14 => p.borders = read_borders(f)?,
             19 => p.shading_color = Some(Rgb(u32_of(f)? & 0xFF_FFFF)),
             16 => p.in_table = flag(f)?,
@@ -1302,8 +1305,6 @@ fn read_document_props(b: &[u8]) -> Result<DocumentProps, Damaged> {
             9 => p.gutter = i32_of(f)?,
             10 => p.mirror_margins = flag(f)?,
             11 => p.default_tab = i32_of(f)?,
-            12 => p.widow_control = flag(f)?,
-            13 => p.print_hidden = flag(f)?,
             14 => p.even_odd_headers = flag(f)?,
             15 => {
                 p.footnote_position = match uint(f)? {
@@ -1524,6 +1525,7 @@ fn read_body(
     budget: &mut crate::ReadBudget,
 ) -> Result<Document, Damaged> {
     let mut doc = Document::new();
+    let mut character_names = quill_core::character_styles::CharacterNames::of(&doc.styles);
     let mut fonts = Vec::new();
     let mut styles = Vec::new();
     let mut objects = Vec::new();
@@ -1543,9 +1545,9 @@ fn read_body(
                         _ => {}
                     }
                 }
-                if doc
-                    .styles
-                    .add_character(
+                if character_names
+                    .add(
+                        &mut doc.styles,
                         &name,
                         quill_core::character_styles::CharacterFormat::new(props, mask),
                     )

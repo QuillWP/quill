@@ -60,7 +60,7 @@ const AUTOSAVE: [(&str, u32); 6] = [
     ("Every 10 minutes", 600),
 ];
 /// How large the toolbars, ruler and dialogs are drawn, in percent.
-const INTERFACE_SIZES: [u16; 5] = [90, 100, 110, 125, 150];
+const INTERFACE_SIZES: [u16; 10] = [75, 80, 90, 100, 110, 115, 125, 135, 150, 175];
 /// The zooms Preferences > View offers for opening documents.
 const DOCUMENT_ZOOMS: [u16; 9] = [50, 75, 90, 100, 110, 125, 150, 175, 200];
 
@@ -135,22 +135,21 @@ pub fn preferences_with(
                 s.auto_lists,
             );
             d.text("Default Paper:", 11.0, 184.0);
-            let mut papers: Vec<&str> = crate::page_dialogs::PAPERS.iter().map(|p| p.0).collect();
-            let current = crate::page_dialogs::PAPERS.iter().position(|p| {
-                (p.1 - s.document.page_width.min(s.document.page_height)).abs() < 20
-                    && (p.2 - s.document.page_width.max(s.document.page_height)).abs() < 20
-            });
-            if current.is_none() {
-                papers.push("Custom");
-            }
-            d.popup(
-                "defaultpaper",
+            let papers = crate::page_dialogs::paper_choices(false);
+            let current = crate::page_dialogs::paper_row(
                 &papers,
-                current.unwrap_or(papers.len() - 1),
+                s.document.page_width,
+                s.document.page_height,
+            );
+            d.popup_owned(
+                "paper",
+                papers.into_iter().map(|x| x.0).collect(),
+                current,
                 139.0,
                 181.0,
                 160.0,
             );
+            crate::page_dialogs::custom_size_fields(&mut d, 306.0, 181.0, &s.document);
             d.note(
                 "paper_help",
                 "For new documents. Page Setup changes the current document.",
@@ -222,8 +221,9 @@ pub fn preferences_with(
             let names: Vec<String> = INTERFACE_SIZES.iter().map(|z| format!("{z}%")).collect();
             let at = INTERFACE_SIZES
                 .iter()
-                .position(|z| *z == s.interface_scale)
-                .unwrap_or(1);
+                .enumerate()
+                .min_by_key(|(_, z)| z.abs_diff(s.interface_scale))
+                .map_or(0, |(i, _)| i);
             d.popup_owned("ui_size", names, at, 110.0, 297.0, 90.0);
             d.check(
                 "recent",
@@ -729,7 +729,11 @@ pub fn folder_button(id: &str, s: &mut settings::Settings) {
 fn pick_font_folder(directory: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        crate::mac_dialog::pick_font_folder(directory)
+        let picked = crate::mac_dialog::pick_font_folder(directory);
+        if let Some(path) = &picked {
+            crate::bookmarks::remember(path);
+        }
+        picked
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -819,6 +823,13 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
         let z = SIZES[d.selected("sizes").min(SIZES.len() - 1)];
         d.set_field("size", z);
     }
+    if matches!(id, "paper" | "paper_w" | "paper_h") {
+        let wide = s.document.page_width > s.document.page_height;
+        crate::page_dialogs::paper_changed(d, id, wide, s.unit);
+        if let Some(size) = crate::page_dialogs::read_default_paper(d, &s.document) {
+            (s.document.page_width, s.document.page_height) = size;
+        }
+    }
     let on = |id| d.is_on(id);
     match panel {
         0 => {
@@ -827,14 +838,6 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
                 s.name = d.field_text("name");
                 s.initials = d.field_text("initials");
                 s.unit = unit;
-                if id == "defaultpaper"
-                    && let Some(&(_, w, h)) =
-                        crate::page_dialogs::PAPERS.get(d.selected("defaultpaper"))
-                {
-                    let landscape = s.document.page_width > s.document.page_height;
-                    (s.document.page_width, s.document.page_height) =
-                        if landscape { (h, w) } else { (w, h) };
-                }
                 s.auto_links = on("autolinks");
                 s.formatted_clipboard = on("fmtclip");
                 s.auto_lists = on("autolists");
@@ -857,7 +860,8 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
                 .copied()
                 .unwrap_or_default();
             if id == "ui_size" {
-                s.interface_scale = INTERFACE_SIZES[d.selected("ui_size").min(4)];
+                s.interface_scale =
+                    INTERFACE_SIZES[d.selected("ui_size").min(INTERFACE_SIZES.len() - 1)];
             }
             // Only a choice made here changes it: the list rounds an odd zoom
             // left by the toolbar to the nearest whole percent.
@@ -1454,10 +1458,12 @@ mod tests {
     #[test]
     fn interface_size_is_a_live_view_preference() {
         let mut d = preferences(1, &[]);
-        assert_eq!(d.selected("ui_size"), 1);
-        d.set_selected("ui_size", 3);
+        assert_eq!(d.selected_text("ui_size"), "100%");
+        let largest = INTERFACE_SIZES.len() - 1;
+        d.set_selected("ui_size", largest);
         changed(1, &mut d, "ui_size");
-        assert_eq!(settings::get().interface_scale, 125);
+        assert_eq!(settings::get().interface_scale, 175);
+        assert_eq!(preferences(1, &[]).selected_text("ui_size"), "175%");
         settings::update(|s| *s = settings::Settings::default());
     }
 
@@ -1526,8 +1532,8 @@ mod tests {
         settings::update(|s| *s = settings::Settings::default());
         let existing = settings::get().new_document();
         let mut d = preferences(0, &[]);
-        d.set_selected("defaultpaper", 2);
-        changed(0, &mut d, "defaultpaper");
+        d.set_selected("paper", 2);
+        changed(0, &mut d, "paper");
         let s = settings::get();
         assert_eq!(
             (s.document.page_width, s.document.page_height),

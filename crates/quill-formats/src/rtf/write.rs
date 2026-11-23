@@ -40,6 +40,20 @@ fn text(out: &mut String, s: &str) {
     }
 }
 
+/// A font name is table data, not document text. Keep control characters as
+/// Unicode escapes so they cannot disappear and join the text on either side
+/// into the name of a different font.
+fn font_name(out: &mut String, s: &str) {
+    for c in s.chars() {
+        if c.is_ascii_control() {
+            let _ = write!(out, "\\u{}?", c as i16);
+        } else {
+            let mut buf = [0; 4];
+            text(out, c.encode_utf8(&mut buf));
+        }
+    }
+}
+
 /// The tables runs refer to by number: colors, and the authors of
 /// tracked changes (`\\revtbl`, where 0 is "Unknown").
 struct Tables {
@@ -386,6 +400,12 @@ fn pap(out: &mut String, p: &ParaProps, tables: &Tables) {
         (p.page_break_before, "\\pagebb"),
         (p.suppress_line_numbers, "\\noline"),
     ];
+    // Every paragraph says which it is, as Word does.
+    out.push_str(if p.widow_control {
+        "\\widctlpar"
+    } else {
+        "\\nowidctlpar"
+    });
     for (on, word) in flags {
         if on {
             out.push_str(word);
@@ -918,7 +938,7 @@ pub fn write(doc: &Document) -> Vec<u8> {
             if k > 0 {
                 out.push_str("\\u59?");
             }
-            text(&mut out, part);
+            font_name(&mut out, part);
         }
         out.push_str(";}");
     }
@@ -1011,7 +1031,7 @@ pub fn write(doc: &Document) -> Vec<u8> {
     };
     let _ = write!(
         out,
-        "}}\n\\paperw{}\\paperh{}{}\\margl{}\\margr{}\\margt{top}\\margb{bottom}\\gutter{}\\deftab{}{}{}\n",
+        "}}\n\\paperw{}\\paperh{}{}\\margl{}\\margr{}\\margt{top}\\margb{bottom}\\gutter{}\\deftab{}\\widowctrl{}\n",
         p.page_width,
         p.page_height,
         if landscape { "\\landscape" } else { "" },
@@ -1019,11 +1039,6 @@ pub fn write(doc: &Document) -> Vec<u8> {
         p.margin_right,
         p.gutter,
         p.default_tab,
-        if p.widow_control {
-            "\\widowctrl"
-        } else {
-            "\\widowctrl0"
-        },
         if p.mirror_margins { "\\margmirror" } else { "" },
     );
     if let Some(view) = p.view {
@@ -1033,9 +1048,6 @@ pub fn write(doc: &Document) -> Vec<u8> {
             SavedView::PageLayout => 1,
         };
         let _ = writeln!(out, "\\viewkind{kind}");
-    }
-    if p.print_hidden {
-        out.push_str("\\printhidden");
     }
     if p.track_changes {
         out.push_str("\\revisions");

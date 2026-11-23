@@ -81,6 +81,49 @@ pub fn pick_font_folder(directory: Option<&std::path::Path>) -> Option<std::path
     })
 }
 
+/// Ask the person to let Quill into `folder`, with an Open panel showing it
+/// and `message` saying why. The App Sandbox grants what the panel returns:
+/// `folder` itself when Allow is clicked with nothing selected, or the
+/// folder chosen instead.
+pub fn allow_folder(folder: &std::path::Path, message: &str) -> Option<std::path::PathBuf> {
+    objc2::rc::autoreleasepool(|_| {
+        // SAFETY: called on AppKit's main thread, as pick_font_folder is.
+        unsafe {
+            let raw: *mut AnyObject = msg_send![class!(NSOpenPanel), openPanel];
+            let panel = Retained::retain(raw)?;
+            let panel = &*panel;
+            let message = NSString::from_str(message);
+            let prompt = NSString::from_str("Allow");
+            let _: () = msg_send![panel, setMessage: &*message];
+            let _: () = msg_send![panel, setPrompt: &*prompt];
+            let _: () = msg_send![panel, setCanChooseDirectories: true];
+            let _: () = msg_send![panel, setCanChooseFiles: false];
+            let _: () = msg_send![panel, setCanCreateDirectories: false];
+            let _: () = msg_send![panel, setAllowsMultipleSelection: false];
+            let path = NSString::from_str(&folder.to_string_lossy());
+            let url: *mut AnyObject =
+                msg_send![class!(NSURL), fileURLWithPath: &*path isDirectory: true];
+            let _: () = msg_send![panel, setDirectoryURL: url];
+            let response: isize = msg_send![panel, runModal];
+            if response != 1 {
+                return None;
+            }
+            let url: *mut AnyObject = msg_send![panel, URL];
+            if url.is_null() {
+                return None;
+            }
+            let path: *const c_char = msg_send![url, fileSystemRepresentation];
+            if path.is_null() {
+                return None;
+            }
+            use std::os::unix::ffi::OsStrExt;
+            Some(std::path::PathBuf::from(std::ffi::OsStr::from_bytes(
+                CStr::from_ptr(path).to_bytes(),
+            )))
+        }
+    })
+}
+
 static PROXY: OnceLock<Mutex<EventLoopProxy<UserEvent>>> = OnceLock::new();
 static ACTIONS: OnceLock<Mutex<Vec<ActionTarget>>> = OnceLock::new();
 static TABLES: OnceLock<Mutex<Vec<TableData>>> = OnceLock::new();
@@ -531,6 +574,8 @@ pub struct NativeDialog {
     title: String,
     modeless: bool,
     alert_message: Option<String>,
+    /// Tab visits the fields in item order (see `Dialog::tab_in_order`).
+    tab_in_order: bool,
 }
 
 impl NativeDialog {
@@ -778,7 +823,13 @@ impl NativeDialog {
             title: native_title(dialog).to_string(),
             modeless: dialog.modeless,
             alert_message: None,
+            tab_in_order: dialog.tab_in_order,
         };
+        if dialog.tab_in_order {
+            unsafe {
+                let _: () = msg_send![panel_ptr, setAutorecalculatesKeyViewLoop: false];
+            }
+        }
         result.sync_from_model(dialog);
         unsafe {
             let _: () = msg_send![panel_ptr, recalculateKeyViewLoop];
@@ -911,6 +962,7 @@ impl NativeDialog {
             title: dialog.title.clone(),
             modeless: false,
             alert_message: Some(message_text),
+            tab_in_order: false,
         })
     }
 
@@ -1006,6 +1058,12 @@ impl NativeDialog {
         for (control, item) in self.controls.iter().zip(&dialog.items) {
             let ptr = Retained::as_ptr(&control.object) as *mut AnyObject;
             unsafe {
+                // A hidden item is not drawn, as in the classic dialog.
+                let shown = control
+                    ._container
+                    .as_ref()
+                    .map_or(ptr, |c| Retained::as_ptr(c) as *mut AnyObject);
+                let _: () = msg_send![shown, setHidden: item.hidden];
                 if !matches!(control.kind, ControlKind::Group) {
                     let _: () = msg_send![ptr, setEnabled: item.enabled];
                 }
@@ -1099,7 +1157,30 @@ impl NativeDialog {
                 }
             }
         }
+        if self.tab_in_order {
+            self.chain_fields(dialog);
+        }
         self.sync_popover(dialog);
+    }
+
+    /// Make Tab go through the text fields in the order they were added,
+    /// skipping those that are hidden or off, and round again.
+    fn chain_fields(&self, dialog: &Dialog) {
+        let fields: Vec<*mut AnyObject> = self
+            .controls
+            .iter()
+            .zip(&dialog.items)
+            .filter(|(c, item)| {
+                matches!(c.kind, ControlKind::Field) && item.enabled && !item.hidden
+            })
+            .map(|(c, _)| Retained::as_ptr(&c.object) as *mut AnyObject)
+            .collect();
+        for (i, &field) in fields.iter().enumerate() {
+            let next = fields[(i + 1) % fields.len()];
+            unsafe {
+                let _: () = msg_send![field, setNextKeyView: next];
+            }
+        }
     }
 
     /// Open, change or close the panel popped out beside a control to match

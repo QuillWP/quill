@@ -1207,6 +1207,7 @@ impl Reader {
                 }
                 "keepNext" => p.keep_with_next = x.on(),
                 "keepLines" => p.keep_together = x.on(),
+                "widowControl" => p.widow_control = x.on(),
                 "pageBreakBefore" => p.page_break_before = x.on(),
                 "suppressLineNumbers" => p.suppress_line_numbers = x.on(),
                 "pBdr" => p.borders = read_borders(x, &p.borders),
@@ -1233,9 +1234,6 @@ impl Reader {
             if let Some(ppr) = d.child("pPrDefault").and_then(|r| r.child("pPr")) {
                 let ppr = ppr.clone();
                 self.apply_ppr(&ppr, &mut base_pap);
-                if ppr.child("widowControl").is_some_and(|w| !w.on()) {
-                    self.doc.props.widow_control = false;
-                }
             }
         }
         let mut raw: HashMap<String, RawStyle> = HashMap::new();
@@ -1321,6 +1319,7 @@ impl Reader {
         }
         let mut character_names: Vec<_> = char_raw.keys().cloned().collect();
         character_names.sort();
+        let mut taken = quill_core::character_styles::CharacterNames::of(&self.doc.styles);
         // Keep a real definition as well as the XML layers used to resolve runs.
         for xml_id in character_names {
             let layers = self.char_styles[&xml_id].clone();
@@ -1332,7 +1331,7 @@ impl Reader {
             }
             let format = quill_core::character_styles::CharacterFormat::new(props, mask);
             let name = &char_raw[&xml_id].name;
-            if let Some(id) = self.doc.styles.add_character(name, format) {
+            if let Some(id) = taken.add(&mut self.doc.styles, name, format) {
                 self.character_ids.insert(xml_id, id);
             } else {
                 self.report.note(notes::CHARACTER_STYLES);
@@ -1456,8 +1455,6 @@ impl Reader {
         self.doc.props.even_odd_headers = e.child("evenAndOddHeaders").is_some_and(|x| x.on());
         self.doc.props.mirror_margins = e.child("mirrorMargins").is_some_and(|x| x.on());
         self.doc.props.track_changes = e.child("trackRevisions").is_some_and(|x| x.on());
-        // Quill's own (quill: namespace).
-        self.doc.props.print_hidden = e.child("printHiddenText").is_some();
         read_note_properties(e, &mut self.doc.props);
     }
 
@@ -1557,7 +1554,8 @@ impl Reader {
             after,
             line,
             keep_with_next,
-            keep_together
+            keep_together,
+            widow_control
         );
         under!(
             chp, tc, dc, font, size, bold, italic, underline, strike, small_caps, all_caps, color

@@ -8,6 +8,7 @@ mod advanced_dialog;
 mod alerts;
 mod app;
 mod bars;
+mod bookmarks;
 mod border_dialog;
 mod build_info;
 mod canvas;
@@ -24,6 +25,7 @@ mod docview;
 mod events;
 mod file_dialog;
 mod find_dialog;
+mod folder_access;
 mod font_names;
 mod frame_dialog;
 mod icon;
@@ -77,6 +79,7 @@ mod paste_special;
 mod pdf;
 mod pdf_font;
 mod picture_dialog;
+mod system_paper;
 use quill_formats::png;
 mod app_menus;
 mod format_dialogs;
@@ -101,6 +104,14 @@ mod win_dialog;
 mod win_print;
 
 use winit::event_loop::EventLoop;
+
+/// Native host services are unavailable in CI and in the coding agent's
+/// restricted process sandbox. Integration tests for them still run from an
+/// ordinary developer shell and in the release checks that exercise the app.
+#[cfg(test)]
+fn unrestricted_host_services() -> bool {
+    std::env::var_os("CI").is_none() && std::env::var_os("CODEX_CI").is_none()
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -135,9 +146,16 @@ fn main() {
         snapshot(&args[i + 1..]);
         return;
     }
+    // Saves make their temporary copy where the system says, which is what
+    // lets them work in the App Sandbox.
+    #[cfg(target_os = "macos")]
+    quill_formats::set_save_folder(mac_save::replacement_folder);
     crate::ev!("loading settings");
     settings::load();
     crate::ev!("settings loaded");
+    // Before the fonts, dictionary and documents the settings name are read.
+    bookmarks::restore();
+    crate::ev!("bookmarks restored");
     crash_log::install();
     // Finding the installed fonts can take a moment on a cold start, so do
     // it while the window system starts up.

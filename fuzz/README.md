@@ -12,7 +12,10 @@ cargo +nightly fuzz run docx
 
 The targets cover ZIP containers, XML, DOCX, ODT, RTF, HTML, native .qwp files,
 image identification and decoding, settings, print-merge data and
-Markdown, plus `editing`, `character_styles` and `clipboard`, described below.
+Markdown, plus `editing`, `sections`, `character_styles` and `clipboard`, described below.
+The `sections` target runs programs of section breaks of every kind, changing a break's
+kind, putting a table of contents in at any point, deleting across breaks, and Undo and
+Redo, checking the text, the contents and every save format after each.
 
 ## Overnight campaign
 
@@ -55,8 +58,10 @@ Each campaign has an ignored `fuzz/runs/<timestamp>/` directory containing
 `report.md` (updated every thirty seconds and finalized on completion),
 `status.json`, build and per-target logs, exact commands, source snapshot,
 and saved failure inputs. `fuzz/runs/latest.txt` identifies the latest run.
-The report distinguishes incomplete runs from completed targets; saved failures
-still need reproduction and minimization before they are treated as confirmed bugs.
+The report distinguishes failures, unusually slow inputs and incomplete runs.
+Saved failures still need reproduction and minimization before they are treated
+as confirmed bugs. Slow inputs need replay and measurement first; a large valid
+document can be slow because a target deliberately checks several export formats.
 
 ## Save integrity and editing properties
 

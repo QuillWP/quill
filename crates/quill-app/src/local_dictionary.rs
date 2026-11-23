@@ -144,6 +144,7 @@ pub fn choose_file(create: bool) -> Result<Option<PathBuf>, String> {
     };
     if let Some(path) = &chosen {
         prepare_file(path, create)?;
+        crate::bookmarks::remember(path);
     }
     Ok(chosen)
 }

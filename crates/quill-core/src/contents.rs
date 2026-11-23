@@ -190,12 +190,22 @@ pub fn marked_entry_spans(p: &Paragraph) -> Vec<EntrySpan> {
 
 impl Document {
     /// The paragraphs of a table of contents made earlier: the first
-    /// section, if it holds nothing else.
-    pub fn existing_toc(&self) -> Option<usize> {
+    /// section that holds nothing but contents paragraphs and has text
+    /// after it, wherever it is in the document.
+    pub fn existing_toc(&self) -> Option<std::ops::Range<usize>> {
         let paras = &self.main.paras;
-        let end = paras.iter().position(|p| p.mark == Mark::SectionBreak)?;
         let toc = |p: &Paragraph| self.styles.toc_level(p.pap.style).is_some();
-        (end + 1 < paras.len() && paras[..=end].iter().all(toc)).then_some(end)
+        let mut start = 0;
+        for (i, p) in paras.iter().enumerate() {
+            if p.mark != Mark::SectionBreak {
+                continue;
+            }
+            if i + 1 < paras.len() && paras[start..=i].iter().all(toc) {
+                return Some(start..i + 1);
+            }
+            start = i + 1;
+        }
+        None
     }
 
     /// The paragraphs of an index made earlier: the last section that holds
@@ -223,9 +233,9 @@ impl Document {
     /// The paragraphs a table of contents or index may draw from: not
     /// those of the ones already there.
     fn body_paras(&self) -> impl Iterator<Item = usize> + '_ {
-        let first = self.existing_toc().map_or(0, |e| e + 1);
+        let toc = self.existing_toc().unwrap_or(0..0);
         let index = self.existing_index().unwrap_or(0..0);
-        (first..self.main.paras.len()).filter(move |i| !index.contains(i))
+        (0..self.main.paras.len()).filter(move |i| !toc.contains(i) && !index.contains(i))
     }
 
     /// What the table of contents lists.
@@ -443,24 +453,73 @@ impl Document {
         out
     }
 
-    /// Put a table of contents at the start of the document, in a section
-    /// of its own, in place of any made before. Returns the paragraphs it
-    /// takes.
-    pub fn place_toc(&mut self, mut paras: Vec<Paragraph>) -> usize {
+    /// Put a table of contents in a section of its own, in place of any
+    /// made before. A new one goes at `at`: the text before it ends a
+    /// section, and the text after it is in the section that follows.
+    /// Returns the paragraphs it takes.
+    pub fn place_toc(&mut self, mut paras: Vec<Paragraph>, at: Position) -> std::ops::Range<usize> {
         if paras.is_empty() {
             paras.push(self.styled("toc 1", "No table of contents entries found."));
         }
-        let old = self.existing_toc().map_or(0, |e| e + 1);
-        let body = self.section_props_at(old).clone();
+        let n = paras.len();
+        let old = self.existing_toc();
+        // The contents section is laid out as one column, with the
+        // settings of the section after it.
+        let body = match &old {
+            Some(r) => self.section_props_at(r.end).clone(),
+            None => self.section_props_at(at.para).clone(),
+        };
         let last = paras.last_mut().unwrap();
         last.mark = Mark::SectionBreak;
         last.section = Some(Box::new(crate::document::SectionProps {
             columns: 1,
-            ..body
+            ..body.clone()
         }));
-        let n = paras.len();
-        self.splice(StoryId::Main, 0, old, paras);
-        n
+        if let Some(r) = old {
+            let start = r.start;
+            self.splice(StoryId::Main, start, r.len(), paras);
+            return start..start + n;
+        }
+        // The text before it is a section that ends where the contents begin.
+        let mut before = Vec::new();
+        let mut tail = None;
+        let para = &self.main.paras[at.para];
+        if at.offset > 0 {
+            let mut head = para.clone();
+            tail = Some(head.split_off(at.offset));
+            head.mark = Mark::SectionBreak;
+            head.section = Some(Box::new(body.clone()));
+            before.push(head);
+        } else if at.para > 0 {
+            let prev = &self.main.paras[at.para - 1];
+            match prev.mark {
+                Mark::SectionBreak => {}
+                Mark::Paragraph => {
+                    let mut p = prev.clone();
+                    p.mark = Mark::SectionBreak;
+                    p.section = Some(Box::new(body.clone()));
+                    self.splice(StoryId::Main, at.para - 1, 1, vec![p]);
+                }
+                // After a table: a paragraph of its own ends the section.
+                _ => {
+                    let mut p = Paragraph::new(para.pap.clone(), para.mark_chp);
+                    p.mark = Mark::SectionBreak;
+                    p.section = Some(Box::new(body.clone()));
+                    before.push(p);
+                }
+            }
+        }
+        let start = at.para + before.len();
+        let mut new = before;
+        new.extend(paras);
+        match tail {
+            Some(tail) => {
+                new.push(tail);
+                self.splice(StoryId::Main, at.para, 1, new);
+            }
+            None => self.splice(StoryId::Main, at.para, 0, new),
+        }
+        start..start + n
     }
 
     /// Put an index at the end of the document, in a section of its own
@@ -576,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn toc_from_headings_goes_first_and_replaces_itself() {
+    fn toc_from_headings_goes_where_asked_and_replaces_itself() {
         let mut d = doc(&["Chapter One", "text", "Part A", "Chapter Two", "end"]);
         let entries = d.toc_entries(&TocOptions::default());
         let texts: Vec<_> = entries.iter().map(|e| (e.level, e.text.as_str())).collect();
@@ -586,9 +645,9 @@ mod tests {
         );
         let with: Vec<_> = entries.into_iter().map(|e| (e, "1".to_string())).collect();
         let paras = d.toc_paragraphs(&with, true);
-        d.place_toc(paras);
+        d.place_toc(paras, Position::new(0, 0));
         assert_eq!(d.main.paras[0].text, "Chapter One\t1");
-        assert_eq!(d.existing_toc(), Some(2));
+        assert_eq!(d.existing_toc(), Some(0..3));
         assert_eq!(d.main.paras[3].text, "Chapter One");
         // Made again, it replaces the first one.
         let again = d.toc_entries(&TocOptions {
@@ -598,8 +657,8 @@ mod tests {
         assert_eq!(again.len(), 2);
         let with: Vec<_> = again.into_iter().map(|e| (e, "2".to_string())).collect();
         let paras = d.toc_paragraphs(&with, true);
-        d.place_toc(paras);
-        assert_eq!(d.existing_toc(), Some(1));
+        d.place_toc(paras, Position::new(0, 0));
+        assert_eq!(d.existing_toc(), Some(0..2));
         assert_eq!(d.main.paras[2].text, "Chapter One");
     }
 

@@ -23,7 +23,10 @@ pub mod zip;
 mod atomic;
 #[allow(unused_imports)]
 use atomic::*;
-pub use atomic::{copy_atomic, write_atomic};
+pub use atomic::{copy_atomic, set_save_folder, write_atomic};
+/// Base64 as pictures use it in HTML and ODT, for the app's own small files.
+pub use export::base64;
+pub use odt_read::base64_decode;
 
 use quill_core::Document;
 use quill_core::limits::Size;
@@ -131,6 +134,20 @@ impl Format {
         Format::Text,
     ];
 
+    /// The formats Save As offers: all but Markdown. Saving Markdown is on
+    /// hold while its round trip is looked at again (a document saved as
+    /// Markdown and used in a window loses its fonts), so it is not offered.
+    /// Markdown still opens, a Markdown file still saves as itself with Save,
+    /// and the writer is unchanged.
+    pub const SAVE_AS: [Format; 6] = [
+        Format::Quill,
+        Format::Docx,
+        Format::Rtf,
+        Format::Odt,
+        Format::Html,
+        Format::Text,
+    ];
+
     /// The name the Save As dialog shows.
     pub fn name(self) -> &'static str {
         match self {
@@ -156,19 +173,62 @@ impl Format {
         }
     }
 
-    /// The format a file name implies, if any.
+    /// The format a file name implies, if any. A backup is the format it
+    /// is a copy of: Report.docx-backup is a .docx.
     pub fn from_path(path: &Path) -> Option<Format> {
         let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        let ext = ext.strip_suffix(BACKUP_SUFFIX).unwrap_or(&ext);
         Format::ALL
             .into_iter()
-            .find(|f| f.extensions().contains(&ext.as_str()))
+            .find(|f| f.extensions().contains(&ext))
     }
 }
 
-/// Every extension Open can read.
+/// What a backup adds to the extension of the document it copies.
+pub const BACKUP_SUFFIX: &str = "-backup";
+
+/// Where the backup of `document` goes: beside it, with "-backup" after its
+/// extension (Report.qwp-backup). The name differs from the document's only
+/// in its extension, which is what lets the Mac's App Sandbox allow it as a
+/// related file of the document. None for a document that is itself a
+/// backup, or a name with no extension Quill saves.
+pub fn backup_path(document: &Path) -> Option<std::path::PathBuf> {
+    let ext = document.extension()?.to_str()?;
+    if ext.to_ascii_lowercase().ends_with(BACKUP_SUFFIX) {
+        return None;
+    }
+    Format::from_path(document)?;
+    Some(document.with_extension(format!("{ext}{BACKUP_SUFFIX}")))
+}
+
+/// Every extension Open can read, backups included.
 pub const READABLE: &[&str] = &[
-    "qwp", "docx", "docm", "dotx", "dotm", "rtf", "odt", "ott", "odm", "fodt", "html", "htm", "md",
-    "markdown", "txt", "text",
+    "qwp",
+    "docx",
+    "docm",
+    "dotx",
+    "dotm",
+    "rtf",
+    "odt",
+    "ott",
+    "odm",
+    "fodt",
+    "html",
+    "htm",
+    "md",
+    "markdown",
+    "txt",
+    "text",
+    "qwp-backup",
+    "docx-backup",
+    "rtf-backup",
+    "odt-backup",
+    "html-backup",
+    "htm-backup",
+    "md-backup",
+    "markdown-backup",
+    "txt-backup",
+    "text-backup",
 ];
 
 /// Open a file, deciding the format from its contents first and its name
@@ -566,24 +626,58 @@ pub fn read_file_with_limit(path: &Path, limit: u64) -> Result<Vec<u8>, String> 
 /// Save a document. Writes a temporary file next to the target and
 /// renames it into place, so a failed save never damages the old file.
 pub fn save(doc: &Document, path: &Path, format: Format) -> Result<(), String> {
-    save_reading_back(doc, path, format, false).map(drop)
+    save_reading_back(doc, path, format, false, &mut false).map(drop)
+}
+
+/// A save that failed, and whether the failure was the system refusing
+/// access to the folder a Markdown file keeps its pictures in.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SaveFailure {
+    pub message: String,
+    /// Making, looking at or writing into the pictures folder beside a
+    /// Markdown file was refused. In the Mac's App Sandbox that means the
+    /// person has not allowed the file's folder yet. Never set for a
+    /// failure of the file itself or of anything else.
+    pub picture_folder_denied: bool,
+}
+
+impl From<String> for SaveFailure {
+    fn from(message: String) -> Self {
+        SaveFailure {
+            message,
+            picture_folder_denied: false,
+        }
+    }
+}
+
+/// `save`, saying which way it failed.
+pub fn save_checked(doc: &Document, path: &Path, format: Format) -> Result<(), SaveFailure> {
+    let mut denied = false;
+    save_reading_back(doc, path, format, false, &mut denied)
+        .map(drop)
+        .map_err(|message| SaveFailure {
+            message,
+            picture_folder_denied: denied,
+        })
 }
 
 /// Save as .qwp even though the file does not read back exactly as the
 /// document is (see `native_check`). The file must still open. Returns
 /// the document as it reads back, which is what the file now holds.
 pub fn save_anyway(doc: &Document, path: &Path) -> Result<Document, String> {
-    save_reading_back(doc, path, Format::Quill, true)
+    save_reading_back(doc, path, Format::Quill, true, &mut false)
         .map(|back| back.expect("a .qwp save reads back"))
 }
 
 /// `save`, and for .qwp the document as it reads back. With `accept_loss`
-/// a .qwp is saved even when that differs from `doc`.
+/// a .qwp is saved even when that differs from `doc`. `picture_denied` is
+/// set when the system refused access to a Markdown file's pictures folder.
 fn save_reading_back(
     doc: &Document,
     path: &Path,
     format: Format,
     accept_loss: bool,
+    picture_denied: &mut bool,
 ) -> Result<Option<Document>, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -677,9 +771,15 @@ fn save_reading_back(
         // The pictures go in first, so the Markdown never names a file that
         // is not there.
         let folder = path.with_file_name(markdown_pictures_folder(path));
-        std::fs::create_dir_all(&folder).map_err(|e| file_error("create", &folder, e))?;
+        std::fs::create_dir_all(&folder).map_err(|e| {
+            *picture_denied |= refused(&e);
+            file_error("create", &folder, e)
+        })?;
         if !std::fs::symlink_metadata(&folder)
-            .map_err(|e| file_error("inspect", &folder, e))?
+            .map_err(|e| {
+                *picture_denied |= refused(&e);
+                file_error("inspect", &folder, e)
+            })?
             .file_type()
             .is_dir()
         {
@@ -689,7 +789,7 @@ fn save_reading_back(
             ));
         }
         for picture in &pictures {
-            write_picture_file(&folder.join(&picture.name), &picture.bytes)?;
+            write_picture_file(&folder.join(&picture.name), &picture.bytes, picture_denied)?;
         }
     }
     write_atomic(path, &bytes)?;
@@ -823,7 +923,7 @@ fn story_loss(a: &[quill_core::Paragraph], b: &[quill_core::Paragraph]) -> Optio
 
 // Assets are immutable once published: even an unlikely checksum collision
 // or a user-owned file must not overwrite pictures used by an older save.
-fn write_picture_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+fn write_picture_file(path: &Path, bytes: &[u8], denied: &mut bool) -> Result<(), String> {
     let file = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -847,11 +947,15 @@ fn write_picture_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
                 path.display()
             ));
         }
-        Err(e) => return Err(file_error("create", path, e)),
+        Err(e) => {
+            *denied |= refused(&e);
+            return Err(file_error("create", path, e));
+        }
     };
     let mut cleanup = TempCleanup {
         path: Some(path.to_path_buf()),
         file: Some(file),
+        folder: None,
     };
     let file = cleanup.file.as_mut().unwrap();
     file.write_all(bytes)
@@ -860,6 +964,12 @@ fn write_picture_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
     drop(cleanup.file.take());
     cleanup.path = None;
     sync_parent(path)
+}
+
+/// Whether the system refused access (permission denied, or the App
+/// Sandbox's "operation not permitted").
+fn refused(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::PermissionDenied
 }
 
 /// The folder a Markdown file's pictures are saved in, beside it: its name

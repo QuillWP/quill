@@ -147,6 +147,7 @@ pub fn losses(doc: &Document, paper: &quill_core::DocumentProps) -> Vec<&'static
         }
         if p.pap.keep_with_next != style.pap.keep_with_next
             || p.pap.keep_together != style.pap.keep_together
+            || p.pap.widow_control != style.pap.widow_control
         {
             note(&mut found, BREAKS);
         }

@@ -1,19 +1,28 @@
 # Known issues
 
-Quill is alpha software. Keep backups of important documents. This list is
+Quill is beta software. Keep backups of important documents. This list is
 what is missing or different today, so you do not have to find it yourself.
 
 ## Platforms
 
-- The published builds are for Apple Silicon Macs (macOS 11 or later) only.
-  There is no Intel or universal build.
+- The published builds are for Macs with macOS 11 or later. The Intel builds
+  are made on an Apple Silicon Mac and have not been tested on Intel hardware.
+  There is no universal build.
 - Windows and Linux builds exist in the source but are not supported. The
   Windows build is unreliable and the Linux build is untested.
-- Alpha builds are not signed or notarized. See the README for the one-time
+- Beta builds are not signed or notarized. See the README for the one-time
   steps to open one.
+- The regular Mac app runs in the App Sandbox (a build from source or the
+  debug package does not), so settings from versions before it
+  start fresh. It asks once for the folder of a Markdown file with pictures,
+  or of a Print Merge data document. Pictures a Markdown file names in other
+  folders are not loaded.
 
 ## Not there yet
 
+- Saving a document as Markdown, and the Markdown Source and WYSIWYG views, are
+  on hold: no menu offers them. Markdown files still open, and one you opened
+  still saves as itself.
 - Accessibility: screen readers (VoiceOver) cannot read the document area.
 - Text shaping: letters are placed one at a time with kerning. There are no
   ligatures, and right-to-left and complex scripts (Arabic, Hebrew, Indic) do
@@ -28,7 +37,7 @@ what is missing or different today, so you do not have to find it yourself.
 - Some RTF features are dropped on import: shapes and text boxes, highlight,
   bookmarks, nested tables (flattened) and double-byte code pages. Old `.doc`
   files are refused.
-- The `.qwp` format may change during the alpha.
+- The `.qwp` format may still change during the beta.
 
 ## Different from other Mac apps
 

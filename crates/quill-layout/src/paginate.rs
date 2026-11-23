@@ -22,11 +22,24 @@ pub struct PageStart {
 }
 
 /// The paragraph settings pagination cares about.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Keeps {
     pub page_break_before: bool,
     pub keep_with_next: bool,
     pub keep_together: bool,
+    /// Don't leave a lone first or last line on a page.
+    pub widow_control: bool,
+}
+
+impl Default for Keeps {
+    fn default() -> Self {
+        Keeps {
+            page_break_before: false,
+            keep_with_next: false,
+            keep_together: false,
+            widow_control: true,
+        }
+    }
 }
 
 /// One thing pagination places: a line of a paragraph, or a whole table
@@ -79,25 +92,19 @@ pub fn paginate(
     tops: &[f32],
     keeps: &[Keeps],
     height: f32,
-    widow_control: bool,
 ) -> Vec<PageStart> {
     let units: Vec<Unit> = layouts
         .iter()
         .enumerate()
         .flat_map(|(p, l)| line_units(p, l, tops[p]))
         .collect();
-    paginate_units(&units, keeps, height, widow_control)
+    paginate_units(&units, keeps, height)
 }
 
 /// Paginate units in order down the column into pages `height` tall.
-pub fn paginate_units(
-    units: &[Unit],
-    keeps: &[Keeps],
-    height: f32,
-    widow_control: bool,
-) -> Vec<PageStart> {
+pub fn paginate_units(units: &[Unit], keeps: &[Keeps], height: f32) -> Vec<PageStart> {
     let one = [SectionLayout::default()];
-    let bands = paginate_sections(units, keeps, &one, &[height], widow_control, 0.0);
+    let bands = paginate_sections(units, keeps, &one, &[height], 0.0);
     page_starts(&bands)
 }
 
@@ -165,7 +172,6 @@ fn column_end(
     first: usize,
     end: usize,
     height: f32,
-    widow_control: bool,
     note_sep: f32,
 ) -> (usize, End) {
     let first_of = |i: usize| {
@@ -195,7 +201,7 @@ fn column_end(
                 .count();
             if keep.keep_together && !u.first {
                 b = para_first;
-            } else if widow_control && lines_in_para > 1 {
+            } else if keep.widow_control && lines_in_para > 1 {
                 if u.line == 1 {
                     // Don't leave the first line alone (an orphan).
                     b = para_first;
@@ -241,7 +247,6 @@ pub fn paginate_sections(
     keeps: &[Keeps],
     sections: &[SectionLayout],
     page_heights: &[f32],
-    widow_control: bool,
     note_sep: f32,
 ) -> Vec<Band> {
     let page_height = |page: usize| {
@@ -315,7 +320,6 @@ pub fn paginate_sections(
                             i,
                             page,
                             page_height(page),
-                            widow_control,
                             note_sep,
                         );
                     }
@@ -345,15 +349,7 @@ pub fn paginate_sections(
             }
         }
         loop {
-            let (next, why) = column_end(
-                units,
-                keeps,
-                i,
-                end,
-                page_height(page) - top,
-                widow_control,
-                note_sep,
-            );
+            let (next, why) = column_end(units, keeps, i, end, page_height(page) - top, note_sep);
             bands.push(band(
                 i,
                 next,
@@ -389,7 +385,6 @@ fn balance(
     end: usize,
     page: usize,
     height: f32,
-    widow_control: bool,
     note_sep: f32,
 ) {
     let Some(last) = bands.last().copied() else {
@@ -406,7 +401,7 @@ fn balance(
         let mut out = Vec::new();
         let mut j = first.unit;
         for _ in 0..cols {
-            let (next, why) = column_end(units, keeps, j, end, h, widow_control, note_sep);
+            let (next, why) = column_end(units, keeps, j, end, h, note_sep);
             out.push((j, next));
             j = next;
             if j >= end || why == End::Page {
@@ -512,7 +507,7 @@ mod tests {
             y += p.height;
         }
         let refs: Vec<&ParaLayout> = paras.iter().collect();
-        paginate(&refs, &tops, keeps, height, true)
+        paginate(&refs, &tops, keeps, height)
             .iter()
             .map(|p| (p.para, p.line))
             .collect()
@@ -538,14 +533,7 @@ mod tests {
             .enumerate()
             .flat_map(|(i, layout)| line_units(i, layout, tops[i]))
             .collect();
-        let bands = paginate_sections(
-            &units,
-            &[],
-            &[SectionLayout::default()],
-            &[40.0, 60.0],
-            true,
-            0.0,
-        );
+        let bands = paginate_sections(&units, &[], &[SectionLayout::default()], &[40.0, 60.0], 0.0);
         assert_eq!(
             bands.iter().map(|band| band.para).collect::<Vec<_>>(),
             [0, 4, 10]
@@ -559,6 +547,12 @@ mod tests {
         // A paragraph starting on the last line moves whole.
         let paras = [para(3), para(3)];
         assert_eq!(run(&paras, &[], 40.0), [(0, 0), (1, 0)]);
+        // A paragraph with widow control off splits wherever the page ends.
+        let off = [Keeps {
+            widow_control: false,
+            ..Keeps::default()
+        }];
+        assert_eq!(run(&[para(5)], &off, 40.0), [(0, 0), (0, 4)]);
     }
 
     #[test]
@@ -621,7 +615,7 @@ mod tests {
             .enumerate()
             .flat_map(|(i, l)| line_units(i, l, tops[i]))
             .collect();
-        paginate_sections(&units, &[], secs, &[height], true, 0.0)
+        paginate_sections(&units, &[], secs, &[height], 0.0)
     }
 
     fn cols(first_para: usize, start: SectionStart, columns: usize) -> SectionLayout {

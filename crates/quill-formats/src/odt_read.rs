@@ -9,7 +9,7 @@
 use crate::report::{self as notes, ImportReport};
 use crate::xml::{self, Element, Node};
 use crate::zip::Archive;
-use quill_core::character_styles::CharacterFormat;
+use quill_core::character_styles::{CharacterFormat, CharacterNames};
 use quill_core::document::FootnotePosition;
 use quill_core::notes::{AnnotationInfo, NoteKind};
 use quill_core::para::{Mark, Paragraph, chars};
@@ -583,11 +583,18 @@ fn borders(e: &Element) -> Borders {
     }
 }
 
-fn format_number(n: i32, fmt: &str) -> String {
+fn format_number(n: i32, fmt: &str, letter_sync: bool) -> String {
     match fmt {
         "" => String::new(),
-        "a" => crate::numfmt::letters(n, false),
-        "A" => crate::numfmt::letters(n, true),
+        "a" | "A" if letter_sync => crate::numfmt::letters(n, fmt == "A"),
+        "a" | "A" if n > 0 => {
+            let letters = quill_core::tools::alphabetic_number(n as u32);
+            if fmt == "A" {
+                letters.to_ascii_uppercase()
+            } else {
+                letters
+            }
+        }
         "i" => crate::numfmt::roman(n).to_lowercase(),
         "I" => crate::numfmt::roman(n),
         _ => n.to_string(),
@@ -641,7 +648,7 @@ fn quill_style_name(display: &str) -> String {
     display.to_string()
 }
 
-pub(crate) fn base64_decode(text: &str) -> Option<Vec<u8>> {
+pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() * 3 / 4);
     let mut acc = 0u32;
     let mut bits = 0;
@@ -1007,6 +1014,7 @@ impl<'a> Reader<'a> {
             .map(|(_, n)| *n)
             .collect();
         names.sort();
+        let mut taken = CharacterNames::of(&self.doc.styles);
         for name in names {
             let style = self.st.named[&("text", name)];
             if let (Some(encoded), Some(font)) =
@@ -1021,7 +1029,7 @@ impl<'a> Reader<'a> {
                     if display.trim().is_empty()
                         || display.chars().count() > 255
                         || self.doc.styles.characters.len() >= u16::MAX as usize
-                        || self.doc.styles.find_character(display).is_some()
+                        || taken.contains(display)
                     {
                         self.report.note(notes::CHARACTER_STYLES);
                         continue;
@@ -1033,7 +1041,7 @@ impl<'a> Reader<'a> {
                         }
                         format.props.font = self.doc.font_id(font);
                     }
-                    if let Some(id) = self.doc.styles.add_character(display, format) {
+                    if let Some(id) = taken.add(&mut self.doc.styles, display, format) {
                         self.characters.insert(name, id);
                     } else {
                         self.report.note(notes::CHARACTER_STYLES);
@@ -1049,13 +1057,13 @@ impl<'a> Reader<'a> {
                 if display.trim().is_empty()
                     || display.chars().count() > 255
                     || self.doc.styles.characters.len() >= u16::MAX as usize
-                    || self.doc.styles.find_character(&display).is_some()
+                    || taken.contains(&display)
                 {
                     self.report.note(notes::CHARACTER_STYLES);
                     continue;
                 }
                 let format = self.foreign_character_format(name);
-                match self.doc.styles.add_character(&display, format) {
+                match taken.add(&mut self.doc.styles, &display, format) {
                     Some(id) => {
                         self.characters.insert(name, id);
                     }
@@ -1953,7 +1961,11 @@ impl<'a> Reader<'a> {
                 } else {
                     e.and_then(|e| e.attr("num-format")).unwrap_or("1")
                 };
-                let s = format_number(value, f);
+                let letter_sync = matches!(
+                    e.and_then(|e| e.attr("num-letter-sync")),
+                    Some("true" | "1")
+                );
+                let s = format_number(value, f, letter_sync);
                 if !s.is_empty() {
                     parts.push(s);
                 }
@@ -2455,6 +2467,7 @@ impl<'a> Reader<'a> {
         let mut header_space = None;
         let mut footer_space = None;
         if let Some(layout) = layout {
+            self.doc.props.mirror_margins = layout.attr("page-usage") == Some("mirrored");
             if let Some(pp) = layout.child("page-layout-properties") {
                 let p = &mut self.doc.props;
                 let len = |n: &str| pp.attr(n).and_then(length);
@@ -2573,6 +2586,22 @@ mod tests {
     fn read_content(body: &str, auto: &str) -> Document {
         let c = xml::parse(content(body, auto).as_bytes()).unwrap();
         build(&c, None, None, None, &|_| None).unwrap().0
+    }
+
+    #[test]
+    fn alphabetic_lists_follow_the_letter_sync_setting() {
+        let body = r#"<text:list text:style-name="L"><text:list-item><text:p>Item</text:p></text:list-item></text:list>"#;
+        for (attribute, expected) in [
+            ("", "ab.\tItem"),
+            (r#"style:num-letter-sync="false""#, "ab.\tItem"),
+            (r#"style:num-letter-sync="true""#, "bb.\tItem"),
+        ] {
+            let styles = format!(
+                r#"<text:list-style style:name="L"><text:list-level-style-number text:level="1" text:start-value="28" style:num-format="a" style:num-suffix="." {attribute}/></text:list-style>"#
+            );
+            let doc = read_content(body, &styles);
+            assert_eq!(doc.main.paras[0].text, expected);
+        }
     }
 
     #[test]

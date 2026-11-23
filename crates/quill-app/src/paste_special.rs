@@ -30,7 +30,8 @@ pub const MAX_PICTURE_BYTES: u64 = 64 << 20;
 
 const IDS: [&str; 3] = ["form0", "form1", "form2"];
 
-/// The dialog, offering `forms` (at least one) with the first chosen.
+/// The dialog, offering `forms` with the first chosen. With none, it says
+/// the Clipboard is empty and Paste is dimmed.
 pub fn dialog(forms: &[Form]) -> Dialog {
     let h = 100.0 + 22.0 * forms.len() as f32;
     let mut d = Dialog::new("Paste Special", 300.0, h.max(96.0));
@@ -42,6 +43,10 @@ pub fn dialog(forms: &[Form]) -> Dialog {
         ("cancel", "Cancel", 78.0, false),
         ("ok", "Paste", 78.0, true),
     ]);
+    if forms.is_empty() {
+        d.text("The Clipboard is empty.", 20.0, 36.0);
+        d.disable("ok");
+    }
     d
 }
 

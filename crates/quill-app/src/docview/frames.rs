@@ -270,30 +270,6 @@ impl DocView {
         } else {
             paginate::page_at(&self.pages, y)
         };
-        // Inside and Outside depend on which side of a spread the page is:
-        // page 1 is a right-hand page.
-        let right_hand = page % 2 == 0;
-        let (lo, hi) = match f.h_rel {
-            FrameRel::Page => {
-                let left = pt(props.margin_left + props.gutter);
-                (-left, pt(props.page_width) - left)
-            }
-            _ => (0.0, column),
-        };
-        let x = if f.drop_lines > 0 && f.in_margin {
-            -w - pt(f.from_text)
-        } else {
-            match f.h {
-                FrameH::Left => lo,
-                FrameH::Right => hi - w,
-                FrameH::Center => (lo + hi - w) / 2.0,
-                FrameH::Inside if right_hand => lo,
-                FrameH::Inside => hi - w,
-                FrameH::Outside if right_hand => hi - w,
-                FrameH::Outside => lo,
-                FrameH::At(t) => lo + pt(t),
-            }
-        };
         let fy = if f.drop_lines > 0 {
             y
         } else if f.v == FrameV::InLine || f.v_rel == FrameRel::Column {
@@ -316,6 +292,31 @@ impl DocView {
                 self.page_body_top(page),
             );
             self.doc_y_on_page(page, local)
+        };
+        let (page, column_x, _) = self.on_page(fy);
+        // Inside and Outside depend on which side of a spread the page is:
+        // page 1 is a right-hand page.
+        let right_hand = page % 2 == 0;
+        let (lo, hi) = match f.h_rel {
+            FrameRel::Page => {
+                let left = pt(props.page_margins(page).0) + column_x;
+                (-left, pt(props.page_width) - left)
+            }
+            _ => (0.0, column),
+        };
+        let x = if f.drop_lines > 0 && f.in_margin {
+            -w - pt(f.from_text)
+        } else {
+            match f.h {
+                FrameH::Left => lo,
+                FrameH::Right => hi - w,
+                FrameH::Center => (lo + hi - w) / 2.0,
+                FrameH::Inside if right_hand => lo,
+                FrameH::Inside => hi - w,
+                FrameH::Outside if right_hand => hi - w,
+                FrameH::Outside => lo,
+                FrameH::At(t) => lo + pt(t),
+            }
         };
         Some(FrameBox {
             first: i,
@@ -386,7 +387,7 @@ impl DocView {
             return Vec::new();
         }
         let p = &self.doc.props;
-        let left = (p.margin_left + p.gutter) as f32 / 20.0;
+        let left = p.page_margins(k).0 as f32 / 20.0;
         self.frames
             .iter()
             .enumerate()
@@ -428,7 +429,7 @@ impl DocView {
 
     pub fn frame_position_point(&self, page: usize, x: f32, y: f32) -> (f32, f32) {
         (
-            x - self.area.x - self.page_left(),
+            x - self.area.x - self.page_left(page),
             y - self.area.y + self.scroll_y - self.page_top(page),
         )
     }
@@ -437,13 +438,11 @@ impl DocView {
         if !self.page_view || !self.area.contains(x, y) {
             return None;
         }
-        let page = self.visible_page();
-        for page in page..(page + 2).min(self.pages.len()) {
-            let (px, py) = self.frame_position_point(page, x, y);
-            for (index, rect) in self.page_frames(page) {
-                if rect.contains(px, py) {
-                    return Some((index, page, rect, px, py));
-                }
+        let page = self.page_at_window(x, y)?;
+        let (px, py) = self.frame_position_point(page, x, y);
+        for (index, rect) in self.page_frames(page) {
+            if rect.contains(px, py) {
+                return Some((index, page, rect, px, py));
             }
         }
         None
@@ -451,7 +450,7 @@ impl DocView {
 
     pub fn frame_target_rect(&self, page: usize, target: Rect) -> Rect {
         Rect::new(
-            self.area.x + self.page_left() + target.x,
+            self.area.x + self.page_left(page) + target.x,
             self.area.y + self.page_top(page) - self.scroll_y + target.y,
             target.w,
             target.h,

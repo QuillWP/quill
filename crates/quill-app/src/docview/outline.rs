@@ -316,7 +316,15 @@ impl DocView {
         match view {
             SavedView::Normal => {}
             SavedView::Outline => self.set_outline(true),
-            SavedView::PageLayout => self.page_view = true,
+            SavedView::PageLayout => {
+                self.page_view = true;
+                // With facing pages on a narrow window, start on the first
+                // page rather than the empty slot beside it. Layout clamps
+                // for wider windows.
+                if self.doc.props.mirror_margins {
+                    self.scroll_x = self.page_size().0;
+                }
+            }
         }
     }
 

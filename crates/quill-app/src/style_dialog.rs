@@ -855,6 +855,12 @@ fn describe_component(
         bp.keep_together,
         "Keep Lines Together",
     );
+    flag(
+        &mut parts,
+        pap.widow_control,
+        bp.widow_control,
+        "Widow Control",
+    );
     if pap.tabs != bp.tabs && !pap.tabs.is_empty() {
         let tabs: Vec<String> = pap
             .tabs

@@ -203,6 +203,8 @@ pub struct WinState {
     pane: Option<Pane>,
     /// A print job the Print dialog asked for, for the application to run.
     pub pending_print: Option<crate::page_dialogs::PrintJob>,
+    /// A command effect produced while accepting a dialog.
+    pending_dialog_effect: Option<Effect>,
     /// Merged letters to print in place of the window's document.
     pub print_doc: Option<quill_core::Document>,
     /// A document to open in a window of its own (merged letters).
@@ -388,6 +390,7 @@ impl WinState {
             last_ruler_click: None,
             pane: None,
             pending_print: None,
+            pending_dialog_effect: None,
             print_doc: None,
             pending_window: None,
             form_letters: 0,
@@ -688,6 +691,9 @@ impl WinState {
             Action::ToggleMissingFonts => crate::settings::update(|s| {
                 s.highlight_missing_fonts = !s.highlight_missing_fonts;
             }),
+            Action::ToggleHidden => {
+                crate::settings::update(|s| s.show_hidden = !s.show_hidden);
+            }
             Action::ToggleFullScreen => return Effect::FullScreen,
         }
         Effect::None
@@ -2603,7 +2609,17 @@ const RECOVERED: &str = " - Recovered";
 fn strip_ext(title: &str) -> &str {
     let title = title.strip_suffix(RECOVERED).unwrap_or(title);
     match title.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() && ext.len() <= 4 => stem,
+        // A backup's name loses its whole extension: Report.qwp-backup is Report.
+        Some((stem, ext))
+            if !stem.is_empty()
+                && ext
+                    .strip_suffix(quill_formats::BACKUP_SUFFIX)
+                    .unwrap_or(ext)
+                    .len()
+                    <= 4 =>
+        {
+            stem
+        }
         _ => title,
     }
 }

@@ -156,13 +156,10 @@ impl WinState {
             DialogId::Index => (crate::contents_dialogs::index(), Which::Index),
             DialogId::Renumber => (crate::tool_dialogs::renumber(), Which::Renumber),
             DialogId::PasteSpecial => {
-                // The window passes Quill's own clipboard in through
-                // `open_paste_special`; this is the system's alone.
-                let forms = Clipboard::new().forms();
-                (
-                    crate::paste_special::dialog(&forms),
-                    Which::PasteSpecial(forms),
-                )
+                // Which forms to offer depends on the clipboard, which only
+                // the caller has: see `open_dialog_with_clipboard`.
+                debug_assert!(false, "open Paste Special with open_dialog_with_clipboard");
+                return;
             }
             DialogId::ShowClipboard => (
                 crate::tool_dialogs::clipboard(),
@@ -207,7 +204,7 @@ impl WinState {
                 Which::PageSetup,
             ),
             DialogId::Section => (crate::page_dialogs::section(&self.view), Which::Section),
-            DialogId::Print => (crate::page_dialogs::print(self.main_view()), Which::Print),
+            DialogId::Print => (crate::page_dialogs::print(), Which::Print),
             DialogId::Preferences => (
                 crate::prefs_dialog::preferences(0, env.font_families),
                 Which::Preferences {
@@ -632,13 +629,24 @@ impl WinState {
         }
     }
 
+    /// `open_dialog` for the dialogs that show what the Clipboard holds:
+    /// Paste Special offers its forms and Show Clipboard its text. The
+    /// window's menu and the snapshot script both open them this way.
+    pub fn open_dialog_with_clipboard(&mut self, id: DialogId, env: &Env, clip: &mut Clipboard) {
+        match id {
+            DialogId::PasteSpecial => self.open_paste_special(clip.forms()),
+            DialogId::ShowClipboard => {
+                self.open_dialog(id, env);
+                let text = clip.fragment().map(|f| f.plain_text()).unwrap_or_default();
+                self.set_clipboard_text(text);
+            }
+            _ => self.open_dialog(id, env),
+        }
+    }
+
     pub fn open_paste_special(&mut self, forms: Vec<crate::paste_special::Form>) {
         self.menu = None;
-        let mut d = crate::paste_special::dialog(&forms);
-        if forms.is_empty() {
-            d.text("The Clipboard is empty.", 20.0, 36.0);
-            d.disable("ok");
-        }
+        let d = crate::paste_special::dialog(&forms);
         self.dialogs.push((Which::PasteSpecial(forms), d));
     }
 
@@ -1328,12 +1336,7 @@ impl WinState {
         match o {
             Outcome::Ok | Outcome::Button("savepdf") if matches!(which, Which::Print) => {
                 let pdf = o == Outcome::Button("savepdf");
-                // The dialog is borrowed, so reach the main view by its fields.
-                let main = match &mut self.pane {
-                    Some(p) if p.focused => &mut p.other,
-                    _ => &mut self.view,
-                };
-                let job = crate::page_dialogs::print_job(d, main, pdf);
+                let job = crate::page_dialogs::print_job(d, pdf);
                 if let Some(job) = job {
                     self.pending_print = Some(job);
                     self.dialogs.pop();
@@ -1344,7 +1347,8 @@ impl WinState {
                     && let Some(form) = crate::paste_special::chosen(d, forms)
                 {
                     self.dialogs.pop();
-                    self.view.paste_as(form, clip);
+                    let effect = self.view.paste_as(form, clip);
+                    self.pending_dialog_effect = (effect != Effect::None).then_some(effect);
                 }
             }
             Outcome::Ok => {
@@ -1483,6 +1487,15 @@ impl WinState {
                 let editor =
                     crate::character_style_dialog::editor(&self.view, &self.font_families, None);
                 self.dialogs.push((Which::CharacterStyleEdit(None), editor));
+            }
+            // Manage Custom Sizes…: the system's Page Setup panel is where
+            // those are kept. Leave this dialog and open it; its Document
+            // Setup… button comes back here.
+            Outcome::Changed("paper")
+                if matches!(which, Which::Document) && crate::page_dialogs::manage_picked(d) =>
+            {
+                self.dialogs.pop();
+                self.pending_dialog_effect = Some(Effect::Dialog(DialogId::PageSetup));
             }
             Outcome::Changed(id) => format_dialogs::changed(which, d, &self.view, id),
             Outcome::Clicked(..) | Outcome::Swatch { .. } => {}

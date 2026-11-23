@@ -135,6 +135,18 @@ impl App {
                     continue;
                 }
             };
+            crate::ev!("read with notes: {:?}", report.notes());
+            // In the App Sandbox the pictures beside a Markdown file need the
+            // person's leave for their folder, asked for once.
+            if report
+                .notes()
+                .contains(&quill_formats::report::MARKDOWN_PICTURES)
+                && Format::from_path(path) == Some(Format::Markdown)
+                && crate::folder_access::ask_for_folder_of(path, "show the pictures of")
+                && let Ok(again) = quill_formats::load_reported(path, rtf)
+            {
+                (doc, report) = again;
+            }
             if !report.outside_pictures.is_empty()
                 && ask_to_load_outside_pictures(&file_name(path), &report.outside_pictures)
                 && let Ok(trusted) = quill_formats::load_reported_trusting(path, rtf, true)
@@ -345,9 +357,17 @@ impl App {
             crate::settings::with(|s| s.foreign_as_quill),
         );
         let mut chosen = false;
+        let own_path = w.st.main_view().path.clone();
         let path = match known {
             Some(path) if direct => path,
             _ => {
+                // Save As does not offer Markdown (see Format::SAVE_AS): a
+                // Markdown file's panel starts on Quill's own format.
+                let initial = if Format::SAVE_AS.contains(&initial) {
+                    initial
+                } else {
+                    Format::Quill
+                };
                 let filename = format!(
                     "{}.{}",
                     strip_ext(&w.st.main_view().title),
@@ -371,7 +391,7 @@ impl App {
                         .set_title("Save As")
                         .set_file_name(&filename);
                     for format in std::iter::once(initial)
-                        .chain(Format::ALL.into_iter().filter(|f| *f != initial))
+                        .chain(Format::SAVE_AS.into_iter().filter(|f| *f != initial))
                     {
                         dialog = dialog.add_filter(format.name(), format.extensions());
                     }
@@ -385,11 +405,14 @@ impl App {
                 };
                 chosen = true;
                 match selected {
-                    Some(path) if Format::from_path(&path).is_some() => path,
+                    Some(path) if savable_by_save_as(&path, own_path.as_deref()) => path,
                     Some(path) => {
                         // Quill does not write this kind of file, so the
                         // name changes. Say so, and say when that name is
                         // taken, since the save panel asked about the other.
+                        // The Mac's panel allows only the format's own
+                        // extensions, so this is for the other systems'
+                        // dialogs; the App Sandbox would refuse the new name.
                         let renamed = path.with_extension("qwp");
                         let replaces = if renamed.exists() {
                             " That file already exists and will be replaced."
@@ -416,88 +439,31 @@ impl App {
             }
         };
         let format = Format::from_path(&path).unwrap_or(Format::Quill);
-        if chosen && format == Format::Docx {
-            let losses = docx_word_rewrite_losses(&w.st.main_view().doc);
-            if !losses.is_empty() {
-                let answer = super::message_box(
-                    rfd::MessageLevel::Warning,
-                    "Some Settings May Be Lost",
-                    format!(
-                        "Microsoft Word may remove these Quill-only settings when it resaves this file:\n\n{}\n\nSave a .qwp copy to preserve them. Save as a Word document anyway?",
-                        losses.join("\n")
-                    ),
-                    rfd::MessageButtons::YesNo,
+        let confirmed = match confirm_save(w.st.main_view(), &path, format, chosen, &mut Dialogs) {
+            Ok(confirmed) => confirmed,
+            Err(SaveStop::Cancelled) => return false,
+            Err(SaveStop::Failed(error)) => {
+                alert(
+                    &format!("Quill could not save \u{201c}{}\u{201d}.", file_name(&path)),
+                    &error,
                 );
-                if answer != rfd::MessageDialogResult::Yes {
-                    return false;
-                }
-            }
-        }
-        if format == Format::Markdown && !w.st.main_view().in_markdown_source() {
-            let view = w.st.main_view_mut();
-            let lost = quill_formats::markdown::losses(
-                &view.doc,
-                &crate::settings::with(|s| s.document.clone()),
-            );
-            let unwarned = lost.iter().any(|l| !view.md_warned.contains(l));
-            if (chosen && !lost.is_empty()) || unwarned {
-                let answer = super::message_box(
-                    rfd::MessageLevel::Warning,
-                    "Some Features Will Be Left Out",
-                    format!(
-                        "Markdown cannot carry these, so the saved file will leave them out:\n\n{}\n\nThe document you're editing keeps them, but the next time you open the file they will be gone. Save a .qwp copy to keep them. Save as Markdown anyway?",
-                        super::markdown::bullet_list(&lost)
-                    ),
-                    rfd::MessageButtons::YesNo,
-                );
-                if answer != rfd::MessageDialogResult::Yes {
-                    return false;
-                }
-            }
-            view.md_warned = lost;
-        }
-        let warning = {
-            let view = w.st.main_view();
-            let formatted = view.markdown_document();
-            save_format_warning(formatted.as_ref().unwrap_or(&view.doc), format, chosen)
-        };
-        if let Some(warning) = warning {
-            let answer = super::message_box(
-                rfd::MessageLevel::Warning,
-                "Some Features Will Be Left Out",
-                warning,
-                rfd::MessageButtons::YesNo,
-            );
-            if answer != rfd::MessageDialogResult::Yes {
                 return false;
             }
-        }
-        if changed_on_disk(w.st.main_view(), &path)
-            && !super::ask(
+        };
+        if crate::settings::with(|settings| settings.make_backup)
+            && path.exists()
+            && let Err(error) = make_backup(&path)
+        {
+            alert(
                 &format!(
-                    "\u{201c}{}\u{201d} has been changed by something else since you opened or saved it.",
+                    "Quill could not make a backup of \u{201c}{}\u{201d}.",
                     file_name(&path)
                 ),
-                "Saving now replaces those changes with this window's version. Turn on backups in Preferences to keep a copy of the file you replace.",
-                "Replace File",
-            )
-        {
+                &format!(
+                    "{error}\n\nThe document was not saved, so its previous saved version is unchanged."
+                ),
+            );
             return false;
-        }
-        if crate::settings::with(|settings| settings.make_backup) && path.exists() {
-            let backup = path.with_file_name(format!("Backup of {}", file_name(&path)));
-            if let Err(error) = quill_formats::copy_atomic(&path, &backup) {
-                alert(
-                    &format!(
-                        "Quill could not make a backup of \u{201c}{}\u{201d}.",
-                        file_name(&path)
-                    ),
-                    &format!(
-                        "{error}\n\nThe document was not saved, so its previous saved version is unchanged."
-                    ),
-                );
-                return false;
-            }
         }
         // The next time it opens, it opens in this view.
         let view = w.st.main_view_mut();
@@ -505,17 +471,19 @@ impl App {
         // In Markdown source view the text is the file for Markdown, and
         // every other format gets the document the text stands for.
         crate::ev!("writing {path:?} as {format:?}");
-        let saved = {
-            let view = w.st.main_view();
-            match (view.markdown_text(), format) {
-                (Some(text), Format::Markdown) => quill_formats::save_markdown_text(&text, &path),
-                (Some(_), _) => match view.markdown_document() {
-                    Some(doc) => quill_formats::save(&doc, &path, format),
-                    None => Err("The Markdown could not be read back.".into()),
-                },
-                (None, _) => quill_formats::save(&view.doc, &path, format),
-            }
-        };
+        let write =
+            |view: &DocView| write_document(view, confirmed.prepared.as_ref(), &path, format);
+        let mut saved = write(w.st.main_view());
+        // In the App Sandbox a Markdown file's pictures folder needs the
+        // person's leave, asked for once. Only a refusal at that folder asks:
+        // a failure of the file itself is shown as it is.
+        if let Err(failure) = &saved
+            && failure.picture_folder_denied
+            && crate::folder_access::ask_for_folder_of(&path, "save the pictures of")
+        {
+            saved = write(w.st.main_view());
+        }
+        let saved = saved.map_err(|failure| failure.message);
         crate::ev!("written: {:?}", saved.as_ref().map(|_| ()));
         if let Err(error) = saved {
             let check = (format == Format::Quill && w.st.main_view().markdown_text().is_none())
@@ -538,7 +506,7 @@ impl App {
                 w.window.request_redraw();
             }
             let keeps_undo = view.doc.can_match_saved(&back);
-            let backup = format!("Backup of {name}");
+            let backup = quill_formats::backup_path(&path);
             let detail = format!(
                 "{error}{}\n\nSave Anyway saves the document as Quill reads it back. The file \
                  will open, and this window then shows what it holds, so you can check it and \
@@ -553,10 +521,12 @@ impl App {
                 } else {
                     "This clears Undo, because the fonts or pictures changed."
                 },
-                if path.exists() {
-                    format!(" The file as it was is kept as \u{201c}{backup}\u{201d}.")
-                } else {
-                    String::new()
+                match &backup {
+                    Some(backup) if path.exists() => format!(
+                        " The file as it was is kept as \u{201c}{}\u{201d}.",
+                        file_name(backup)
+                    ),
+                    _ => String::new(),
                 },
             );
             if !super::ask(
@@ -571,7 +541,7 @@ impl App {
             let backed_up = crate::settings::with(|settings| settings.make_backup);
             if !backed_up
                 && path.exists()
-                && let Err(error) = quill_formats::copy_atomic(&path, &path.with_file_name(&backup))
+                && let Err(error) = make_backup(&path)
             {
                 alert(
                     &format!("Quill could not make a backup of \u{201c}{name}\u{201d}."),
@@ -608,6 +578,7 @@ impl App {
         }
         let w = &mut self.windows[i].1;
         record_saved_file(w.st.main_view_mut(), &path, chosen);
+        confirmed.remember(w.st.main_view_mut());
         crate::recovery::remove(w.recovery.take());
         crate::recovery::discard(w.recovery_opening.take());
         w.window.request_redraw();
@@ -659,6 +630,182 @@ impl App {
 }
 
 /// Warn before adopting a format that cannot keep the whole document.
+/// The questions a save asks before it writes anything. The app shows
+/// dialogs; tests answer from a script. Each returns true to go on.
+trait SavePrompts {
+    fn docx_losses(&mut self, losses: &[&'static str]) -> bool;
+    fn markdown_losses(&mut self, lost: &[&'static str]) -> bool;
+    fn format_warning(&mut self, warning: String) -> bool;
+    fn replace_changed_file(&mut self, name: &str) -> bool;
+}
+
+/// The message boxes the app shows.
+struct Dialogs;
+
+impl SavePrompts for Dialogs {
+    fn docx_losses(&mut self, losses: &[&'static str]) -> bool {
+        super::message_box(
+            rfd::MessageLevel::Warning,
+            "Some Settings May Be Lost",
+            format!(
+                "Microsoft Word may remove these Quill-only settings when it resaves this file:\n\n{}\n\nSave a .qwp copy to preserve them. Save as a Word document anyway?",
+                losses.join("\n")
+            ),
+            rfd::MessageButtons::YesNo,
+        ) == rfd::MessageDialogResult::Yes
+    }
+
+    fn markdown_losses(&mut self, lost: &[&'static str]) -> bool {
+        super::message_box(
+            rfd::MessageLevel::Warning,
+            "Some Features Will Be Left Out",
+            format!(
+                "Markdown cannot carry these, so the saved file will leave them out:\n\n{}\n\nThe document you're editing keeps them, but the next time you open the file they will be gone. Save a .qwp copy to keep them. Save as Markdown anyway?",
+                super::markdown::bullet_list(lost)
+            ),
+            rfd::MessageButtons::YesNo,
+        ) == rfd::MessageDialogResult::Yes
+    }
+
+    fn format_warning(&mut self, warning: String) -> bool {
+        super::message_box(
+            rfd::MessageLevel::Warning,
+            "Some Features Will Be Left Out",
+            warning,
+            rfd::MessageButtons::YesNo,
+        ) == rfd::MessageDialogResult::Yes
+    }
+
+    fn replace_changed_file(&mut self, name: &str) -> bool {
+        super::ask(
+            &format!(
+                "\u{201c}{name}\u{201d} has been changed by something else since you opened or saved it."
+            ),
+            "Saving now replaces those changes with this window's version. Turn on backups in Preferences to keep a copy of the file you replace.",
+            "Replace File",
+        )
+    }
+}
+
+/// Why a save stopped before writing.
+enum SaveStop {
+    /// The person said no to one of the questions.
+    Cancelled,
+    /// The document could not be prepared; the reason.
+    Failed(String),
+}
+
+/// What a save settled before writing.
+struct Confirmed {
+    /// The formatted document to write, in Markdown Source view.
+    prepared: Option<quill_core::Document>,
+    /// What Markdown cannot carry that the person has now been told of. Kept
+    /// here until the file is written: a save that is cancelled later, or
+    /// fails, has told the person nothing that should stop the next warning.
+    md_warned: Option<Vec<&'static str>>,
+}
+
+impl Confirmed {
+    /// The file was written: remember what the person was told.
+    fn remember(&self, view: &mut DocView) {
+        if let Some(lost) = &self.md_warned {
+            view.md_warned = lost.clone();
+        }
+    }
+}
+
+/// Prepare the document a save writes and ask every question it needs
+/// answered first: Word settings that may be lost, Markdown's losses, what
+/// the format leaves out, and a file changed by something else.
+fn confirm_save(
+    view: &DocView,
+    path: &Path,
+    format: Format,
+    chosen: bool,
+    prompts: &mut dyn SavePrompts,
+) -> Result<Confirmed, SaveStop> {
+    // In Markdown Source view the window holds only the text; the other
+    // formats are written from the formatted document it stands for, so
+    // the warnings below and the write all use that one document.
+    let prepared = export_document(view, format).map_err(SaveStop::Failed)?;
+    let mut md_warned = None;
+    if chosen && format == Format::Docx {
+        let losses = docx_word_rewrite_losses(prepared.as_ref().unwrap_or(&view.doc));
+        if !losses.is_empty() && !prompts.docx_losses(&losses) {
+            return Err(SaveStop::Cancelled);
+        }
+    }
+    if format == Format::Markdown && !view.in_markdown_source() {
+        let lost = quill_formats::markdown::losses(
+            &view.doc,
+            &crate::settings::with(|s| s.document.clone()),
+        );
+        let unwarned = lost.iter().any(|l| !view.md_warned.contains(l));
+        if ((chosen && !lost.is_empty()) || unwarned) && !prompts.markdown_losses(&lost) {
+            return Err(SaveStop::Cancelled);
+        }
+        md_warned = Some(lost);
+    }
+    if let Some(warning) =
+        save_format_warning(prepared.as_ref().unwrap_or(&view.doc), format, chosen)
+        && !prompts.format_warning(warning)
+    {
+        return Err(SaveStop::Cancelled);
+    }
+    if changed_on_disk(view, path) && !prompts.replace_changed_file(&file_name(path)) {
+        return Err(SaveStop::Cancelled);
+    }
+    Ok(Confirmed {
+        prepared,
+        md_warned,
+    })
+}
+
+/// Write the document a save settled on. In Markdown Source view the text is
+/// the file for Markdown, and every other format is written from the
+/// formatted document the text stands for (`prepared`).
+fn write_document(
+    view: &DocView,
+    prepared: Option<&quill_core::Document>,
+    path: &Path,
+    format: Format,
+) -> Result<(), quill_formats::SaveFailure> {
+    match (view.markdown_text(), format) {
+        (Some(text), Format::Markdown) => Ok(quill_formats::save_markdown_text(&text, path)?),
+        (Some(_), _) => match prepared {
+            Some(doc) => quill_formats::save_checked(doc, path, format),
+            None => Err("The Markdown could not be read back.".to_string().into()),
+        },
+        (None, _) => quill_formats::save_checked(&view.doc, path, format),
+    }
+}
+
+/// Whether Save As may write `path`: a format Quill writes, except Markdown
+/// (on hold, see Format::SAVE_AS) unless it is the document's own file.
+fn savable_by_save_as(path: &Path, own: Option<&Path>) -> bool {
+    match Format::from_path(path) {
+        None => false,
+        Some(Format::Markdown) => own == Some(path),
+        Some(_) => true,
+    }
+}
+
+/// The formatted document a save writes when the window is in Markdown
+/// Source view, where the window's own document is only the text: the one
+/// the text stands for, prepared once so every warning and the writer see
+/// the same thing. None outside Source view. When the text cannot be read
+/// back, a save to another format fails with the reason, before anything is
+/// replaced; a save to Markdown writes the text as it is and needs no such
+/// document.
+fn export_document(view: &DocView, format: Format) -> Result<Option<quill_core::Document>, String> {
+    match view.markdown_document() {
+        None => Ok(None),
+        Some(Ok(doc)) => Ok(Some(doc)),
+        Some(Err(_)) if format == Format::Markdown => Ok(None),
+        Some(Err(error)) => Err(error),
+    }
+}
+
 fn save_format_warning(doc: &quill_core::Document, format: Format, chosen: bool) -> Option<String> {
     // Only Quill's own format keeps a paragraph style's link to a character
     // style; the others keep the formatting it gives.
@@ -706,6 +853,20 @@ fn select_paragraph(view: &mut DocView, para: usize) {
         quill_core::Position::new(para, end),
     ));
     view.scroll_to_caret();
+}
+
+/// Copy `document` to its backup beside it (Report.qwp-backup) before a
+/// save replaces it. A document that is itself a backup gets none.
+fn make_backup(document: &Path) -> Result<(), String> {
+    let Some(backup) = quill_formats::backup_path(document) else {
+        return Ok(());
+    };
+    // The App Sandbox allows the backup only as a related file of the
+    // document, written while the system coordinates the two.
+    #[cfg(target_os = "macos")]
+    return crate::mac_save::copy_related(document, &backup);
+    #[cfg(not(target_os = "macos"))]
+    quill_formats::copy_atomic(document, &backup)
 }
 
 fn record_saved_file(view: &mut DocView, path: &Path, chosen: bool) {
@@ -758,23 +919,13 @@ fn docx_word_rewrite_losses(doc: &quill_core::Document) -> Vec<&'static str> {
     if (0..sections).any(|section| doc.nth_section(section).margin_page_numbers) {
         settings.push("• Margin page numbers");
     }
-    if doc.props.print_hidden {
-        settings.push("• Print Hidden Text");
-    }
-    let stories = [
-        StoryId::Main,
-        StoryId::Header,
-        StoryId::Footer,
-        StoryId::FirstHeader,
-        StoryId::FirstFooter,
-        StoryId::EvenHeader,
-        StoryId::EvenFooter,
-        StoryId::Notes,
-        StoryId::Annotations,
-    ];
-    let paragraphs = stories
+    // Every stored story: `doc.story` would show only the headers of the
+    // section the header pane is on.
+    let stories = [StoryId::Main, StoryId::Notes, StoryId::Annotations]
         .into_iter()
-        .flat_map(|story| doc.story(story).paras.iter());
+        .map(|story| doc.story(story))
+        .chain(doc.stored_header_stories());
+    let paragraphs = stories.flat_map(|story| story.paras.iter());
     let (mut margin_frame, mut latent_table_indent) = (false, false);
     for paragraph in paragraphs {
         margin_frame |= paragraph
@@ -800,7 +951,7 @@ fn docx_word_rewrite_losses(doc: &quill_core::Document) -> Vec<&'static str> {
 fn missing_fonts(doc: &quill_core::Document, fonts: &quill_layout::Fonts) -> Vec<(String, String)> {
     let mut used: Vec<u16> = Vec::new();
     let stories = std::iter::once(&doc.main)
-        .chain(doc.headers.iter())
+        .chain(doc.stored_header_stories())
         .chain([&doc.notes, &doc.annotations]);
     for story in stories {
         for p in &story.paras {
@@ -880,7 +1031,7 @@ fn page_list(pages: &[usize]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{docx_word_rewrite_losses, record_saved_file, save_policy};
+    use super::{docx_word_rewrite_losses, export_document, record_saved_file, save_policy};
     use crate::docview::DocView;
     use quill_core::{Document, Position, StoryId};
     use quill_formats::Format;
@@ -1129,11 +1280,7 @@ mod tests {
         assert!(docx_word_rewrite_losses(&doc).is_empty());
 
         doc.section.margin_page_numbers = true;
-        doc.props.print_hidden = true;
-        assert_eq!(
-            docx_word_rewrite_losses(&doc),
-            ["• Margin page numbers", "• Print Hidden Text"]
-        );
+        assert_eq!(docx_word_rewrite_losses(&doc), ["• Margin page numbers"]);
 
         doc.main.paras[0].pap.frame = Some(quill_core::Frame {
             v: quill_core::FrameV::At(720),
@@ -1148,5 +1295,332 @@ mod tests {
         let losses = docx_word_rewrite_losses(&doc);
         assert!(losses.contains(&"• Frame positions relative to the vertical margin"));
         assert!(losses.contains(&"• Stored indents on centered or right-aligned table rows"));
+    }
+
+    #[test]
+    fn docx_warning_and_write_use_one_document_in_markdown_source_view() {
+        let mut doc = Document::new();
+        doc.section.margin_page_numbers = true;
+        let mut view = DocView::new(doc, "Report.md".into());
+        // Formatted view: the window's own document is the one written.
+        assert!(export_document(&view, Format::Docx).unwrap().is_none());
+        let formatted = docx_word_rewrite_losses(&view.doc);
+        assert_eq!(formatted, ["• Margin page numbers"]);
+
+        // Source view: the window holds only the text. The warning must
+        // inspect the formatted document the writer will use.
+        view.show_markdown_source();
+        assert!(docx_word_rewrite_losses(&view.doc).is_empty());
+        let prepared = export_document(&view, Format::Docx).unwrap().unwrap();
+        assert_eq!(docx_word_rewrite_losses(&prepared), formatted);
+        // Accepting writes that same document: the setting is in the file.
+        let dir = std::env::temp_dir().join(format!("quill-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Report.docx");
+        quill_formats::save(&prepared, &path, Format::Docx).unwrap();
+        let back = quill_formats::load(&path).unwrap();
+        assert!(back.section.margin_page_numbers);
+        std::fs::remove_dir_all(&dir).unwrap();
+        // A Markdown save still gets the formatted document for its own
+        // warning, and the text is what it writes.
+        assert!(export_document(&view, Format::Markdown).unwrap().is_some());
+    }
+
+    #[test]
+    fn source_that_cannot_be_read_back_stops_every_export_but_markdown() {
+        let mut view = DocView::new(Document::new(), "Big.md".into());
+        view.show_markdown_source();
+        // More paragraphs than a document may have.
+        let big = "a\n\n".repeat(quill_core::limits::MAX_PARAGRAPHS + 1);
+        view.doc = quill_formats::markdown::source_document(&big);
+        assert!(view.source_edited());
+        for format in [Format::Docx, Format::Quill, Format::Text] {
+            let error = export_document(&view, format).unwrap_err();
+            assert!(error.contains("too large"), "{error}");
+        }
+        assert!(export_document(&view, Format::Markdown).unwrap().is_none());
+    }
+
+    /// Answers a save's questions from a script and counts each question.
+    #[derive(Default)]
+    struct Script {
+        markdown: std::collections::VecDeque<bool>,
+        replace: std::collections::VecDeque<bool>,
+        markdown_asked: usize,
+        replace_asked: usize,
+    }
+
+    impl super::SavePrompts for Script {
+        fn docx_losses(&mut self, _: &[&'static str]) -> bool {
+            panic!("no Word question expected");
+        }
+        fn markdown_losses(&mut self, _: &[&'static str]) -> bool {
+            self.markdown_asked += 1;
+            self.markdown
+                .pop_front()
+                .expect("an answer for the Markdown question")
+        }
+        fn format_warning(&mut self, _: String) -> bool {
+            panic!("no format question expected");
+        }
+        fn replace_changed_file(&mut self, _: &str) -> bool {
+            self.replace_asked += 1;
+            self.replace
+                .pop_front()
+                .expect("an answer for Replace File")
+        }
+    }
+
+    #[test]
+    fn markdown_losses_are_remembered_only_by_a_save_that_happened() {
+        let dir = std::env::temp_dir().join(format!("quill-md-warned-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Notes.md");
+        std::fs::write(&path, "one").unwrap();
+        let mut view = DocView::new(Document::new(), "Notes.md".into());
+        view.path = Some(path.clone());
+        view.disk_stamp = super::disk_stamp(&path);
+        // A feature Markdown cannot carry, added to a document that had none.
+        view.doc.summary.title = "Draft".into();
+        let md = Format::Markdown;
+
+        // Accept the Markdown warning, but something else has changed the
+        // file and the person cancels Replace File: nothing was saved.
+        std::fs::write(&path, "changed elsewhere").unwrap();
+        let mut ask = Script::default();
+        ask.markdown.push_back(true);
+        ask.replace.push_back(false);
+        assert!(super::confirm_save(&view, &path, md, false, &mut ask).is_err());
+        assert_eq!((ask.markdown_asked, ask.replace_asked), (1, 1));
+
+        // Saving again must warn again: the first attempt wrote nothing.
+        let mut ask = Script::default();
+        ask.markdown.push_back(true);
+        ask.replace.push_back(true);
+        let confirmed = super::confirm_save(&view, &path, md, false, &mut ask)
+            .ok()
+            .expect("accepted both");
+        assert_eq!(
+            (ask.markdown_asked, ask.replace_asked),
+            (1, 1),
+            "the warning came back after a cancelled save"
+        );
+
+        // The save happened, as save() records it: now the same losses are
+        // not asked about again.
+        record_saved_file(&mut view, &path, false);
+        confirmed.remember(&mut view);
+        let mut ask = Script::default();
+        assert!(super::confirm_save(&view, &path, md, false, &mut ask).is_ok());
+        assert_eq!((ask.markdown_asked, ask.replace_asked), (0, 0));
+        // A newly added unsupported feature is a new loss and asks again.
+        view.doc.section.columns = 2;
+        let mut ask = Script::default();
+        ask.markdown.push_back(true);
+        assert!(super::confirm_save(&view, &path, md, false, &mut ask).is_ok());
+        assert_eq!(ask.markdown_asked, 1);
+        // And a person who declines is not asked a second thing.
+        let mut ask = Script::default();
+        ask.markdown.push_back(false);
+        assert!(super::confirm_save(&view, &path, md, false, &mut ask).is_err());
+        assert_eq!(ask.replace_asked, 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A two-section document, the first with text in an installed font,
+    /// whose second section owns its headers and footers. `fill` changes the
+    /// second section's header story.
+    fn second_section_owns_its_header(
+        fill: impl FnOnce(&mut Document, &mut quill_core::Story),
+    ) -> Document {
+        let mut doc = Document::new();
+        let times = doc.font_id("Times");
+        let chp = quill_core::CharProps {
+            font: times,
+            ..doc.styles.get(0).chp
+        };
+        doc.main.paras[0].insert(0, "Body text", chp);
+        doc.insert_section_break(Position::new(0, 4));
+        let mut header = quill_core::text::from_plain_text("").main;
+        fill(&mut doc, &mut header);
+        let mut set = vec![quill_core::text::from_plain_text("").main; 6];
+        set[0] = header;
+        doc.section.headers = Some(std::sync::Arc::new(set));
+        doc
+    }
+
+    #[test]
+    fn a_font_only_in_a_section_owned_header_is_reported_missing() {
+        let fonts = quill_layout::Fonts::new(quill_layout::Catalog::from_files(&[(
+            "Times",
+            std::path::PathBuf::from("unused.ttf"),
+            0,
+            400,
+            false,
+        )]));
+        let doc = second_section_owns_its_header(|doc, header| {
+            let zapfino = doc.font_id("Zapfino");
+            let chp = quill_core::CharProps {
+                font: zapfino,
+                ..doc.styles.get(0).chp
+            };
+            header.paras[0].insert(0, "Chapter two", chp);
+        });
+        assert_eq!(
+            super::missing_fonts(&doc, &fonts),
+            [("Zapfino".to_string(), "Times".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_margin_frame_only_in_a_section_owned_header_is_named_by_the_docx_warning() {
+        let doc = second_section_owns_its_header(|_, header| {
+            header.paras[0].pap.frame = Some(quill_core::Frame {
+                v: quill_core::FrameV::At(720),
+                v_rel: quill_core::FrameRel::Margin,
+                ..Default::default()
+            });
+        });
+        assert_eq!(
+            docx_word_rewrite_losses(&doc),
+            ["• Frame positions relative to the vertical margin"]
+        );
+    }
+
+    #[test]
+    fn replacing_a_font_found_in_a_section_owned_header_can_be_undone() {
+        let fonts = quill_layout::Fonts::new(quill_layout::Catalog::from_files(&[(
+            "Times",
+            std::path::PathBuf::from("unused.ttf"),
+            0,
+            400,
+            false,
+        )]));
+        let mut doc = second_section_owns_its_header(|doc, header| {
+            let zapfino = doc.font_id("Zapfino");
+            let chp = quill_core::CharProps {
+                font: zapfino,
+                ..doc.styles.get(0).chp
+            };
+            header.paras[0].insert(0, "Chapter two", chp);
+        });
+        let missing = super::missing_fonts(&doc, &fonts);
+        assert_eq!(missing.len(), 1);
+        let (zapfino, times) = (doc.font_id("Zapfino"), doc.font_id("Times"));
+        let sel = quill_core::Selection::default();
+        doc.begin("Replace Fonts", sel);
+        doc.replace_font(&[zapfino], times);
+        doc.commit(sel);
+        assert!(super::missing_fonts(&doc, &fonts).is_empty());
+        doc.undo();
+        assert_eq!(super::missing_fonts(&doc, &fonts), missing);
+    }
+
+    #[test]
+    fn linked_headers_are_reported_once() {
+        let fonts = quill_layout::Fonts::new(quill_layout::Catalog::from_files(&[(
+            "Times",
+            std::path::PathBuf::from("unused.ttf"),
+            0,
+            400,
+            false,
+        )]));
+        // Three sections; the headers in the first are shown by the others
+        // (Same As Previous), so they are stored once.
+        let mut doc = Document::new();
+        let times = doc.font_id("Times");
+        let zapfino = doc.font_id("Zapfino");
+        let body = quill_core::CharProps {
+            font: times,
+            ..doc.styles.get(0).chp
+        };
+        doc.main.paras[0].insert(0, "Body text", body);
+        doc.insert_section_break(Position::new(0, 2));
+        doc.insert_section_break(Position::new(1, 1));
+        let chp = quill_core::CharProps {
+            font: zapfino,
+            ..doc.styles.get(0).chp
+        };
+        doc.headers[0].paras[0].insert(0, "Running head", chp);
+        doc.headers[0].paras[0].pap.frame = Some(quill_core::Frame {
+            v: quill_core::FrameV::At(720),
+            v_rel: quill_core::FrameRel::Margin,
+            ..Default::default()
+        });
+        assert_eq!(doc.sections().len(), 3);
+        assert_eq!(
+            super::missing_fonts(&doc, &fonts),
+            [("Zapfino".to_string(), "Times".to_string())]
+        );
+        assert_eq!(
+            docx_word_rewrite_losses(&doc),
+            ["• Frame positions relative to the vertical margin"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_markdown_save_asks_for_the_pictures_folder_only_when_that_was_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let dir = std::env::temp_dir().join(format!("quill-md-denied-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        if std::fs::write(dir.join("probe"), b"x").is_ok() {
+            // Running as a user who can write anywhere: nothing to refuse.
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let path = dir.join("Notes.md");
+        let md = Format::Markdown;
+        // Formatted view with a picture: the pictures folder is refused.
+        let (doc, _) = quill_formats::markdown::read(
+            &format!("One ![a][d].\n\n[d]: data:image/png;base64,{png}\n"),
+            None,
+        );
+        let mut view = DocView::new(doc, "Notes.md".into());
+        let failure = super::write_document(&view, None, &path, md).unwrap_err();
+        assert!(failure.picture_folder_denied, "{}", failure.message);
+        // Source view saves only the text: when the file itself is refused,
+        // that is the error, and no folder is asked for.
+        view.show_markdown_source();
+        let failure = super::write_document(&view, None, &path, md).unwrap_err();
+        assert!(!failure.picture_folder_denied);
+        assert!(failure.message.contains("Notes.md"), "{}", failure.message);
+        // A formatted document without pictures has no pictures folder.
+        let mut plain = DocView::new(Document::new(), "Notes.md".into());
+        plain.type_text("Just text");
+        let failure = super::write_document(&plain, None, &path, md).unwrap_err();
+        assert!(!failure.picture_folder_denied);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_as_refuses_a_typed_markdown_name_unless_it_is_the_documents_own_file() {
+        use super::savable_by_save_as;
+        use std::path::Path;
+        let md = Path::new("/d/Notes.md");
+        // Markdown is on hold: not for a document of another format, nor
+        // another Markdown file.
+        assert!(!savable_by_save_as(md, None));
+        assert!(!savable_by_save_as(md, Some(Path::new("/d/Notes.qwp"))));
+        assert!(!savable_by_save_as(md, Some(Path::new("/d/Other.md"))));
+        // A Markdown document saving over itself is its own file.
+        assert!(savable_by_save_as(md, Some(md)));
+        // The other formats, and names Quill does not write.
+        for name in [
+            "Notes.qwp",
+            "Notes.docx",
+            "Notes.rtf",
+            "Notes.odt",
+            "Notes.html",
+            "Notes.txt",
+        ] {
+            assert!(savable_by_save_as(Path::new(name), None), "{name}");
+        }
+        assert!(!savable_by_save_as(Path::new("Notes.pages"), None));
     }
 }

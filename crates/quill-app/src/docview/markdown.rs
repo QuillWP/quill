@@ -62,12 +62,14 @@ impl DocView {
 
     /// The formatted document the source stands for: the one it was made
     /// from if the text is as it was, else the text read as Markdown.
-    pub fn markdown_document(&self) -> Option<Document> {
+    /// None outside Source view, and an error when edited source cannot be
+    /// read back (it is too large, say).
+    pub fn markdown_document(&self) -> Option<Result<Document, String>> {
         let s = self.md_source.as_ref()?;
         if !self.source_edited() {
-            return Some(s.original.compact_for_save());
+            return Some(Ok(s.original.compact_for_save()));
         }
-        self.read_source().ok().map(|(doc, _)| doc)
+        Some(self.read_source().map(|(doc, _)| doc))
     }
 
     /// What a crash recovery copy should hold. Outside Source view, the
@@ -370,7 +372,7 @@ mod tests {
         assert_eq!(markdown::source_text(&view.doc), "Red text\n");
         // Left alone, the color survives the round trip.
         assert!(view.losses_on_return().is_empty());
-        let back = view.markdown_document().unwrap();
+        let back = view.markdown_document().unwrap().unwrap();
         assert_eq!(
             back.main.paras[0].chp_at(0).color,
             quill_core::Rgb(0xFF0000)
@@ -387,10 +389,11 @@ mod tests {
     }
 
     #[test]
-    fn the_view_menu_has_a_markdown_submenu_that_follows_the_mode() {
+    fn no_menu_offers_the_markdown_views_while_markdown_is_on_hold() {
         use crate::app_menus::{Action, MenuContext, build};
+        use crate::commands::Cmd;
         let mut view = view_of("x\n");
-        let find = |view: &DocView| {
+        let check = |view: &DocView| {
             let cx = MenuContext {
                 view,
                 font_families: &[],
@@ -403,28 +406,18 @@ mod tests {
             };
             let (menus, actions) = build(&cx);
             let view_menu = menus.into_iter().find(|m| m.title == "View").unwrap();
-            let sub = view_menu
-                .items
-                .into_iter()
-                .find(|i| i.label == "Markdown")
-                .and_then(|i| i.submenu)
-                .unwrap();
-            sub.items
-                .iter()
-                .map(|i| (i.label.clone(), i.checked, actions[i.id as usize].clone()))
-                .collect::<Vec<_>>()
+            assert!(view_menu.items.iter().all(|i| i.label != "Markdown"));
+            // Nor does any menu run the commands that switch the view.
+            assert!(
+                !actions
+                    .iter()
+                    .any(|a| matches!(a, Action::Cmd(Cmd::MarkdownSource | Cmd::MarkdownWysiwyg)))
+            );
         };
-        use crate::commands::Cmd;
-        assert_eq!(
-            find(&view),
-            [
-                ("Source".into(), false, Action::Cmd(Cmd::MarkdownSource)),
-                ("WYSIWYG".into(), true, Action::Cmd(Cmd::MarkdownWysiwyg)),
-            ]
-        );
+        check(&view);
+        // A window recovered in Source view is the only way to be in it.
         view.show_markdown_source();
-        let now = find(&view);
-        assert!(now[0].1 && !now[1].1);
+        check(&view);
     }
 
     #[test]

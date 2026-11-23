@@ -53,7 +53,7 @@ pub struct WordCount {
     pub characters: usize,
     /// Runs of characters between spaces, tabs and marks.
     pub words: usize,
-    /// Paragraphs, including table cells, row ends and empty paragraphs.
+    /// Paragraphs containing something other than whitespace.
     pub paragraphs: usize,
 }
 
@@ -82,7 +82,11 @@ pub fn word_count(doc: &Document) -> WordCount {
     WordCount {
         characters: story.char_count(),
         words,
-        paragraphs: story.paras.len(),
+        paragraphs: story
+            .paras
+            .iter()
+            .filter(|p| p.text.chars().any(|c| !c.is_whitespace()))
+            .count(),
     }
 }
 
@@ -110,7 +114,7 @@ mod tests {
     }
 
     /// The same document counted by the original: 100
-    /// characters, 17 words, 10 paragraphs.
+    /// characters, 17 words, 7 nonblank paragraphs.
     #[test]
     fn matches_original_count() {
         let mut doc = from_plain_text(
@@ -135,7 +139,15 @@ mod tests {
         doc.main.paras.extend(table);
         let wc = word_count(&doc);
         assert_eq!(wc.words, 17);
-        assert_eq!(wc.paragraphs, 10);
+        assert_eq!(wc.paragraphs, 7);
         assert_eq!(wc.characters, 100);
+    }
+
+    #[test]
+    fn blank_and_whitespace_only_paragraphs_do_not_count() {
+        let doc = from_plain_text("One\n\n \t\u{a0}\nTwo");
+        let wc = word_count(&doc);
+        assert_eq!(wc.words, 2);
+        assert_eq!(wc.paragraphs, 2);
     }
 }

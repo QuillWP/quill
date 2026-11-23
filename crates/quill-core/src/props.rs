@@ -452,6 +452,8 @@ pub struct ParaProps {
     pub page_break_before: bool,
     pub keep_with_next: bool,
     pub keep_together: bool,
+    /// Don't leave a lone first or last line of the paragraph on a page.
+    pub widow_control: bool,
     pub suppress_line_numbers: bool,
     pub borders: Borders,
     /// The background color.
@@ -554,6 +556,7 @@ impl Default for ParaProps {
             page_break_before: false,
             keep_with_next: false,
             keep_together: false,
+            widow_control: true,
             suppress_line_numbers: false,
             borders: Borders::default(),
             shading_color: None,

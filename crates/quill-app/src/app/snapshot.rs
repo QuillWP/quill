@@ -6,7 +6,8 @@ use super::*;
 /// separated by `|`: `type:some text` types, `scroll:300` scrolls to that many points down, `cmd:Bold` runs a command
 /// (names as in `Cmd`), `shift:Left` runs a movement command extending the
 /// selection, `click:x,y`, `down:x,y`, `move:x,y` and `up:x,y` work the
-/// mouse. For tests and for checking the look without a screen.
+/// mouse, `pdf:path` writes every page as PDF and `save:path` saves the
+/// document. For tests and for checking the look without a screen.
 pub fn snapshot(
     out: &std::path::Path,
     width: u32,
@@ -127,12 +128,7 @@ pub fn snapshot(
                 } else {
                     st.act(Action::Cmd(c), &mut clip)
                 } {
-                    Effect::Dialog(DialogId::ShowClipboard) => {
-                        st.open_dialog(DialogId::ShowClipboard, &env);
-                        let text = clip.fragment().map(|f| f.plain_text()).unwrap_or_default();
-                        st.set_clipboard_text(text);
-                    }
-                    Effect::Dialog(d) => st.open_dialog(d, &env),
+                    Effect::Dialog(d) => st.open_dialog_with_clipboard(d, &env, &mut clip),
                     Effect::FindAgain => st.find_again(),
                     Effect::Split => st.toggle_split(),
                     Effect::Pane(story) => st.open_pane(story),
@@ -212,6 +208,17 @@ pub fn snapshot(
                 let start = crate::palette::parse_hex(arg).unwrap_or(quill_core::props::Rgb::BLACK);
                 let (d, es) = crate::palette::editor(start, crate::palette::Target::Add);
                 st.dialogs.push((Which::EditColor(es), d));
+            }
+            "save" => {
+                // Save the document in the format its extension names:
+                // save:/path/out.qwp. For building documents with Quill's own
+                // commands, and for tests that check what a save keeps.
+                let path = std::path::Path::new(arg);
+                let format =
+                    quill_formats::Format::from_path(path).unwrap_or(quill_formats::Format::Quill);
+                if let Err(e) = quill_formats::save(&st.main_view().doc, path, format) {
+                    eprintln!("quill: cannot save {arg}: {e}");
+                }
             }
             "pdf" => {
                 // Write every page to a PDF file: pdf:/path/out.pdf.

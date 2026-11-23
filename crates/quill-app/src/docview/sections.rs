@@ -233,6 +233,23 @@ impl DocView {
         self.bands.iter().filter(move |b| b.page == k)
     }
 
+    /// The first paragraph of the section whose break mark is at view point
+    /// (`x`, `y`), in Normal view, where the marks are drawn.
+    pub fn section_mark_at(&self, _x: f32, y: f32) -> Option<usize> {
+        if self.page_view || self.outline || self.captions {
+            return None;
+        }
+        let oy = self.area.y + TEXT_TOP - self.scroll_y;
+        self.secs
+            .iter()
+            .skip(1)
+            .map(|(first, _)| *first)
+            .find(|&first| {
+                let mark = oy + self.tops[first] - SECTION_PAD / 2.0;
+                (y - mark).abs() <= SECTION_PAD / 2.0
+            })
+    }
+
     /// Normal view's section mark: a double dotted line across the window
     /// under the paragraph that ends the section.
     #[allow(clippy::too_many_arguments)]
@@ -250,12 +267,7 @@ impl DocView {
             return;
         }
         let label = section_break_label(self.doc.section_props_at(para + 1).start);
-        let face = self.layouts[para]
-            .as_ref()
-            .and_then(|l| l.glyphs.last())
-            .map(|g| g.face)
-            .unwrap_or_default();
-        super::drawing::draw_break_rule(c, fonts, cache, face, x0, x1, y, label, true);
+        super::drawing::draw_break_rule(c, fonts, cache, x0, x1, y, label, true);
     }
 }
 
@@ -310,6 +322,91 @@ mod tests {
             v.exec(Cmd::Undo, false, clip);
             assert_eq!(v.doc.main.paras, before);
         }
+    }
+
+    #[test]
+    fn each_kind_of_section_break_starts_the_new_section_that_way() {
+        use quill_core::SectionStart::*;
+        for (cmd, start, label) in [
+            (
+                Cmd::SectionBreakNextPage,
+                NewPage,
+                "Section Break (Next Page)",
+            ),
+            (
+                Cmd::SectionBreakContinuous,
+                NoBreak,
+                "Section Break (Continuous)",
+            ),
+            (
+                Cmd::SectionBreakOddPage,
+                OddPage,
+                "Section Break (Odd Page)",
+            ),
+            (
+                Cmd::SectionBreakEvenPage,
+                EvenPage,
+                "Section Break (Even Page)",
+            ),
+        ] {
+            let mut v = DocView::new(Document::new(), "T".into());
+            let clip = &mut Clipboard::new();
+            v.type_text("Head");
+            v.exec(cmd, false, clip);
+            v.type_text("Body");
+            assert_eq!(v.doc.section_props_at(1).start, start, "{cmd:?}");
+            assert_eq!(section_break_label(start), label);
+            // The text before the break keeps its own start.
+            assert_eq!(v.doc.section_props_at(0).start, NoBreak);
+            // One undo takes the whole break away.
+            v.exec(Cmd::Undo, false, clip);
+            v.exec(Cmd::Undo, false, clip);
+            assert!(
+                v.doc
+                    .main
+                    .paras
+                    .iter()
+                    .all(|p| p.mark != Mark::SectionBreak)
+            );
+        }
+    }
+
+    #[test]
+    fn right_clicking_a_break_mark_changes_the_kind_it_makes() {
+        use quill_core::SectionStart::*;
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut v = DocView::new(Document::new(), "T".into());
+        let clip = &mut Clipboard::new();
+        v.area = crate::canvas::Rect::new(0.0, 0.0, 600.0, 400.0);
+        v.type_text("Head");
+        v.exec(Cmd::SectionBreakNextPage, false, clip);
+        v.type_text("Body");
+        v.update_layout(&mut fonts);
+        // The mark sits in the room under the paragraph that ends the section.
+        let mark = v.area.y + TEXT_TOP - v.scroll_y + v.tops[1] - SECTION_PAD / 2.0;
+        assert_eq!(v.section_mark_at(10.0, mark), Some(1));
+        assert_eq!(v.section_mark_at(10.0, mark + 40.0), None);
+        // The menu puts the caret in the section it starts and checks its kind.
+        v.sel = quill_core::Selection::caret(quill_core::Position::new(1, 0));
+        v.break_menu = true;
+        let (menu, _) = crate::app_menus::context_menu(&v, false, false);
+        let checked: Vec<_> = menu
+            .items
+            .iter()
+            .filter(|i| i.checked)
+            .map(|i| i.label.clone())
+            .collect();
+        assert_eq!(checked, ["Next Page"]);
+        v.exec(Cmd::ChangeBreakOddPage, false, clip);
+        assert_eq!(v.doc.section_props_at(1).start, OddPage);
+        assert_eq!(v.doc.section_props_at(0).start, NoBreak);
+        v.exec(Cmd::Undo, false, clip);
+        assert_eq!(v.doc.section_props_at(1).start, NewPage);
+        // No marks are drawn in Page Layout view, so none can be hit.
+        v.page_view = true;
+        assert_eq!(v.section_mark_at(10.0, mark), None);
     }
 
     #[test]

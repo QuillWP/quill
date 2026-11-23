@@ -45,10 +45,7 @@ pub struct BorderDrag {
 impl DocView {
     /// The document point under a window point.
     fn doc_point(&self, wx: f32, wy: f32) -> (f32, f32) {
-        self.doc_at(
-            wx - self.area.x - self.text_x(),
-            wy - self.area.y + self.scroll_y,
-        )
+        self.doc_at(wx, wy)
     }
 
     /// The row geometry of the row whose first paragraph is `first`.

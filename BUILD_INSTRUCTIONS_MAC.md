@@ -145,7 +145,12 @@ the processor in the name:
 
 `dist/Quill.app` is the app for your own Mac. Add `--debug` to make the debug
 versions of both. The packages are signed ad hoc, so macOS shows the warning
-described in the README when someone opens them. The Intel build is made on an
+described in the README when someone opens them. The release package runs in
+the App Sandbox (`tools/Quill.entitlements`), which is the build most people
+should use. The debug package and the apps built without `--dist` do not run
+in the sandbox, so you can build Quill from source and open any file you can
+reach. `python3 tools/package.py --sandbox` makes a separate sandboxed test
+app beside the build. The Intel build is made on an
 Apple Silicon Mac and has not been run on Intel hardware yet.
 
 To build for just one processor, set it yourself:

@@ -100,7 +100,7 @@ impl App {
                     None => 0..n,
                 };
                 let progress = proxy.clone();
-                let bytes = crate::pdf::write_with_progress(
+                let bytes = crate::pdf::write_sheets_with_progress(
                     &mut view,
                     &mut fonts,
                     &mut cache,

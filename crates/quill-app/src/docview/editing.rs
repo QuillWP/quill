@@ -544,6 +544,14 @@ impl DocView {
             }
             Hyphenation => return Effect::Dialog(DialogId::Hyphenation),
             Thesaurus => return Effect::Dialog(DialogId::Thesaurus),
+            // Contents are a section of their own, which can't go inside a
+            // table cell. Ones already made are replaced where they are.
+            InsertToc
+                if self.doc.existing_toc().is_none()
+                    && self.doc.main.paras[focus.para].pap.in_table =>
+            {
+                self.status = Some("A table of contents can't go inside a table.".into());
+            }
             InsertToc => return Effect::Dialog(DialogId::Toc),
             InsertIndex => return Effect::Dialog(DialogId::Index),
             IndexEntry => self.insert_entry('i'),
@@ -742,7 +750,14 @@ impl DocView {
             LineBreak => self.type_special(chars::LINE_BREAK),
             // A break can't go inside a table cell: say so rather than
             // do nothing, or break only the line.
-            PageBreak | SectionBreak if self.doc.main.paras[focus.para].pap.in_table => {
+            PageBreak
+            | SectionBreak
+            | SectionBreakNextPage
+            | SectionBreakContinuous
+            | SectionBreakOddPage
+            | SectionBreakEvenPage
+                if self.doc.main.paras[focus.para].pap.in_table =>
+            {
                 self.status = Some(format!(
                     "A {} can't go inside a table.",
                     if cmd == PageBreak {
@@ -767,10 +782,42 @@ impl DocView {
                     .insert_text(MAIN, at, &chars::PAGE_BREAK.to_string(), chp);
                 self.finish_edit(Selection::caret(end));
             }
-            SectionBreak => {
+            ChangeBreakNextPage
+            | ChangeBreakContinuous
+            | ChangeBreakOddPage
+            | ChangeBreakEvenPage => {
+                use quill_core::SectionStart;
+                let start = match cmd {
+                    ChangeBreakNextPage => SectionStart::NewPage,
+                    ChangeBreakContinuous => SectionStart::NoBreak,
+                    ChangeBreakOddPage => SectionStart::OddPage,
+                    _ => SectionStart::EvenPage,
+                };
+                // The caret is in the section the break starts.
+                self.format_sections(|s| s.start = start);
+            }
+            SectionBreak
+            | SectionBreakNextPage
+            | SectionBreakContinuous
+            | SectionBreakOddPage
+            | SectionBreakEvenPage => {
+                use quill_core::SectionStart;
+                // The new section starts as the kind asked for; plain
+                // Section Break leaves it as the section before has it.
+                let start = match cmd {
+                    SectionBreakNextPage => Some(SectionStart::NewPage),
+                    SectionBreakContinuous => Some(SectionStart::NoBreak),
+                    SectionBreakOddPage => Some(SectionStart::OddPage),
+                    SectionBreakEvenPage => Some(SectionStart::EvenPage),
+                    _ => None,
+                };
                 self.doc.begin("Section Break", self.sel);
                 let at = self.delete_selection();
                 let at = self.doc.insert_section_break(at);
+                if let Some(start) = start {
+                    self.doc
+                        .format_sections(at.para, at.para, |s| s.start = start);
+                }
                 self.finish_edit(Selection::caret(at));
             }
             Tab | PrevCell if self.doc.main.paras[focus.para].pap.in_table => {
@@ -925,7 +972,9 @@ impl DocView {
                 }
             }
             PasteSpecial => return Effect::Dialog(DialogId::PasteSpecial),
-            PasteText => self.paste_as(crate::paste_special::Form::Unformatted, clip),
+            PasteText => {
+                self.paste_as(crate::paste_special::Form::Unformatted, clip);
+            }
             Clear => {
                 if !self.sel.is_empty() {
                     self.doc.begin("Clear", self.sel);
@@ -935,7 +984,7 @@ impl DocView {
             }
             NormalView | PageLayoutView => {
                 self.set_outline(false);
-                self.page_view = cmd == PageLayoutView;
+                self.page_view = cmd != NormalView;
                 self.scroll_to_caret();
                 return Effect::None;
             }
@@ -1490,12 +1539,7 @@ impl DocView {
             .unwrap_or(row.cells.len() - 1);
         let (_, _, x0, x1) = row.cells[k];
         let pad = row.props.gap as f32 / 40.0;
-        let dx = if self.page_view {
-            self.on_page(b.top).1
-        } else {
-            0.0
-        };
-        let wx = |x: f32| self.area.x + self.text_x() + dx + x;
+        let wx = |x: f32| self.to_window(x, b.top).0;
         let mut edges: Vec<f32> = row.cells.iter().map(|c| wx(c.2)).collect();
         edges.push(wx(row.cells.last().map_or(0.0, |c| c.3)));
         Some((wx(x0 + pad), (x1 - x0 - 2.0 * pad).max(1.0), edges))

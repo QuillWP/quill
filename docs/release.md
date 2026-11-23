@@ -32,6 +32,9 @@ currently built and published by hand from the maintainer's Mac.
       under 10 MB, package under 10 MB, no measure more than 10% over the
       baseline in docs/footprint.json. Record a new baseline with
       `--record` only when the growth is understood and worth it.
+- [ ] The latest overnight run (`tests/overnight/runs/latest.txt`) is on the
+      commit being released, and its report shows nothing worse and no
+      failures, or each is understood.
 - [ ] The version in the workspace Cargo.toml is the one being released.
 - [ ] The README's status line says what works.
 - [ ] License files: the crates say "MIT OR Apache-2.0"; LICENSE-MIT and
@@ -60,7 +63,12 @@ currently built and published by hand from the maintainer's Mac.
       each document opened, for checking).
 - [ ] macOS (.dmg): the app opens from /Applications, finds its language
       data (Tools > Spelling works), opens and saves .docx, .rtf and .txt,
-      prints. Confirm `codesign --verify --deep --strict Quill.app`,
+      prints. The release package runs in the App Sandbox (the debug package does
+      not; its settings are in `~/Library/Preferences`): `codesign -d --entitlements -
+      Quill.app` shows `com.apple.security.app-sandbox`, and its settings
+      appear under `~/Library/Containers/com.quillwp.Quill`. Saving makes a
+      `.qwp-backup` beside the document when backups are on, and a Markdown
+      file with pictures asks once for its folder. Confirm `codesign --verify --deep --strict Quill.app`,
       `spctl --assess --type execute Quill.app`, and `xcrun stapler validate`
       all succeed for the public package.
 - [ ] Windows (.zip): unzip anywhere, run quill.exe, Spelling works, Open

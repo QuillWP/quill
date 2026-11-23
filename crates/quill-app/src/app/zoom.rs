@@ -1,5 +1,6 @@
 //! Editable toolbar zoom and one-shot fitting of the visible page.
 use super::*;
+use crate::app_menus::{ZOOM_FILL_HORIZONTAL, ZOOM_FILL_VERTICAL};
 use crate::canvas::round_rect;
 
 const WIDTH: f32 = 112.0;
@@ -213,12 +214,22 @@ impl WinState {
             self.begin_zoom_edit();
             return;
         }
+        let horizontal = match choice {
+            ZOOM_FILL_HORIZONTAL => true,
+            ZOOM_FILL_VERTICAL => false,
+            _ => return,
+        };
         let current = self.main_view().visible_page();
         let v = self.main_view();
         let (pw, ph) = v.page_size();
-        let space =
-            if choice == 6 { v.area.w } else { v.area.h } as f64 * self.document_zoom as f64;
-        let page = if choice == 6 { pw } else { ph } as f64;
+        let space = if horizontal { v.area.w } else { v.area.h } as f64 * self.document_zoom as f64;
+        let page = if horizontal && v.page_view {
+            v.page_row_width()
+        } else if horizontal {
+            pw
+        } else {
+            ph
+        } as f64;
         let n = space / (page + 2.0 * crate::docview::PAGE_GAP as f64) * 100.0;
         self.apply_zoom(n);
         let v = self.main_view_mut();
@@ -254,7 +265,7 @@ impl WinState {
         let mut items = Vec::new();
         let mut actions = Vec::new();
         for (i, name) in labels.iter().enumerate() {
-            if i == 6 {
+            if i == ZOOM_FILL_HORIZONTAL as usize {
                 items.push(menu::Item::separator());
             }
             items.push(
@@ -412,7 +423,7 @@ mod tests {
         let expected = (550.0 / (height as f64 + 2.0 * crate::docview::PAGE_GAP as f64) * 10000.0)
             .round()
             / 100.0;
-        state.choose_zoom(7);
+        state.act(Action::Zoom(ZOOM_FILL_VERTICAL), &mut Clipboard::new());
         assert!((state.document_zoom as f64 * 100.0 - expected).abs() < 0.0001);
         assert_eq!(
             percent_text(state.document_zoom as f64 * 100.0),
@@ -427,7 +438,7 @@ mod tests {
         let expected = (500.0 / (width as f64 + 2.0 * crate::docview::PAGE_GAP as f64) * 10000.0)
             .round()
             / 100.0;
-        state.choose_zoom(6);
+        state.act(Action::Zoom(ZOOM_FILL_HORIZONTAL), &mut Clipboard::new());
         assert!((state.document_zoom as f64 * 100.0 - expected).abs() < 0.0001);
         assert_eq!(state.view.visible_page(), 3);
     }

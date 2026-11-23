@@ -23,7 +23,10 @@ extern "C" fn format_changed(panel: *mut AnyObject, _: Sel, popup: *mut AnyObjec
     // SAFETY: AppKit invokes this action on the save panel with our popup.
     unsafe {
         let index: isize = msg_send![popup, indexOfSelectedItem];
-        let Some(format) = usize::try_from(index).ok().and_then(|i| Format::ALL.get(i)) else {
+        let Some(format) = usize::try_from(index)
+            .ok()
+            .and_then(|i| Format::SAVE_AS.get(i))
+        else {
             return;
         };
         let name: *mut AnyObject = msg_send![panel, nameFieldStringValue];
@@ -34,10 +37,26 @@ extern "C" fn format_changed(panel: *mut AnyObject, _: Sel, popup: *mut AnyObjec
         let name = CStr::from_ptr(utf8).to_string_lossy();
         let path = format_path(Path::new(name.as_ref()), *format);
         let name = NSString::from_str(&path.to_string_lossy());
-        let ext = NSString::from_str(format.extensions()[0]);
-        let types: *mut AnyObject = msg_send![class!(NSArray), arrayWithObject: &*ext];
-        let _: () = msg_send![panel, setAllowedFileTypes: types];
+        allow_only(panel, *format);
         let _: () = msg_send![panel, setNameFieldStringValue: &*name];
+    }
+}
+
+/// Let the panel give only names ending in one of `format`'s extensions.
+/// With other types refused, macOS settles the name in the panel itself
+/// (offering to use the right extension), so the file Quill writes is the
+/// one the panel granted, which is all the App Sandbox lets it write.
+///
+/// SAFETY: `panel` is a live NSSavePanel, used on the main thread.
+unsafe fn allow_only(panel: *mut AnyObject, format: Format) {
+    // SAFETY: as the caller promises; plain Foundation collection calls.
+    unsafe {
+        let types: *mut AnyObject = msg_send![class!(NSMutableArray), array];
+        for ext in format.extensions() {
+            let ext = NSString::from_str(ext);
+            let _: () = msg_send![types, addObject: &*ext];
+        }
+        let _: () = msg_send![panel, setAllowedFileTypes: types];
     }
 }
 
@@ -260,6 +279,179 @@ unsafe fn run_sheet(panel: *mut AnyObject, parent: *mut AnyObject) -> isize {
     }
 }
 
+/// A new, empty folder on the same volume as `document` to make its next
+/// saved copy in before renaming it over the document: the system's
+/// NSItemReplacementDirectory, which the App Sandbox lets Quill write in.
+/// Quill removes the folder after the save. Given to quill_formats at start.
+pub fn replacement_folder(document: &Path) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    // An existing document is named itself; a new one by its folder.
+    let (target, is_folder) = if document.exists() {
+        (document, false)
+    } else {
+        (document.parent()?, true)
+    };
+    let target = NSString::from_str(target.to_str()?);
+    autoreleasepool(|_| {
+        // SAFETY: Foundation class and instance methods with their documented
+        // argument types (NSSearchPathDirectory and NSSearchPathDomainMask are
+        // NSUInteger). Every returned object is checked for nil before use.
+        unsafe {
+            let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: &*target isDirectory: Bool::new(is_folder)];
+            if url.is_null() {
+                return None;
+            }
+            const ITEM_REPLACEMENT_DIRECTORY: usize = 99;
+            const USER_DOMAIN_MASK: usize = 1;
+            let manager: *mut AnyObject = msg_send![class!(NSFileManager), defaultManager];
+            let mut error: *mut AnyObject = std::ptr::null_mut();
+            let folder: *mut AnyObject = msg_send![manager,
+                URLForDirectory: ITEM_REPLACEMENT_DIRECTORY
+                inDomain: USER_DOMAIN_MASK
+                appropriateForURL: url
+                create: Bool::YES
+                error: &mut error];
+            if folder.is_null() {
+                return None;
+            }
+            let path: *mut AnyObject = msg_send![folder, path];
+            if path.is_null() {
+                return None;
+            }
+            let utf8: *const c_char = msg_send![path, fileSystemRepresentation];
+            if utf8.is_null() {
+                return None;
+            }
+            let bytes = CStr::from_ptr(utf8).to_bytes();
+            Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+        }
+    })
+}
+
+/// The document and the related file being written for it, while
+/// `copy_related` runs. The presenter's methods read it, from any thread.
+static RELATED: Mutex<Option<(PathBuf, PathBuf)>> = Mutex::new(None);
+
+/// An NSURL for one of the paths in RELATED, or nil.
+fn related_url(pick: fn(&(PathBuf, PathBuf)) -> &PathBuf) -> *mut AnyObject {
+    let related = RELATED.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(text) = related.as_ref().and_then(|r| pick(r).to_str()) else {
+        return std::ptr::null_mut();
+    };
+    let text = NSString::from_str(text);
+    // SAFETY: a Foundation class method; the URL is autoreleased, as a
+    // getter's result should be.
+    unsafe { msg_send![class!(NSURL), fileURLWithPath: &*text] }
+}
+
+extern "C" fn presented_item_url(_: *mut AnyObject, _: Sel) -> *mut AnyObject {
+    related_url(|r| &r.1)
+}
+
+extern "C" fn primary_presented_item_url(_: *mut AnyObject, _: Sel) -> *mut AnyObject {
+    related_url(|r| &r.0)
+}
+
+extern "C" fn presented_item_operation_queue(_: *mut AnyObject, _: Sel) -> *mut AnyObject {
+    // SAFETY: a Foundation class method.
+    unsafe { msg_send![class!(NSOperationQueue), mainQueue] }
+}
+
+/// An NSFilePresenter for a file that belongs with a document: its
+/// presentedItemURL is the related file and its primaryPresentedItemURL the
+/// document.
+fn presenter_class() -> &'static AnyClass {
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    CLASS.get_or_init(|| {
+        let mut builder = ClassBuilder::new("QuillRelatedFilePresenter", class!(NSObject)).unwrap();
+        if let Some(protocol) = objc2::runtime::AnyProtocol::get("NSFilePresenter") {
+            builder.add_protocol(protocol);
+        }
+        type Getter = extern "C" fn(*mut AnyObject, Sel) -> *mut AnyObject;
+        // SAFETY: each signature is the NSFilePresenter property getter's.
+        unsafe {
+            builder.add_method(sel!(presentedItemURL), presented_item_url as Getter);
+            builder.add_method(
+                sel!(primaryPresentedItemURL),
+                primary_presented_item_url as Getter,
+            );
+            builder.add_method(
+                sel!(presentedItemOperationQueue),
+                presented_item_operation_queue as Getter,
+            );
+        }
+        builder.register()
+    })
+}
+
+/// Copy `document` to `related`, a file beside it with the same name and
+/// another extension that Info.plist declares as a related item (a backup).
+/// The App Sandbox allows that file only while a file presenter names the
+/// document as its primary item and the write is coordinated. Outside the
+/// sandbox the same steps simply copy the file.
+pub fn copy_related(document: &Path, related: &Path) -> Result<(), String> {
+    use block2::StackBlock;
+    use objc2_06::msg_send as send;
+    use objc2_06::runtime::AnyObject as Object;
+    use std::cell::RefCell;
+    use std::os::unix::ffi::OsStrExt;
+
+    let Some(text) = related.to_str() else {
+        return quill_formats::copy_atomic(document, related);
+    };
+    *RELATED.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((document.to_path_buf(), related.to_path_buf()));
+    let result: RefCell<Option<Result<(), String>>> = RefCell::new(None);
+    let text = NSString::from_str(text);
+    autoreleasepool(|_| {
+        // SAFETY: Foundation methods with their documented argument types.
+        // The coordinator runs the accessor before it returns, so the block
+        // and what it borrows outlive it; the presenter is removed after.
+        unsafe {
+            let presenter: Retained<AnyObject> = msg_send_id![presenter_class(), new];
+            let _: () = msg_send![class!(NSFileCoordinator), addFilePresenter: &*presenter];
+            let raw: *mut AnyObject = msg_send![class!(NSFileCoordinator), alloc];
+            let raw: *mut AnyObject = msg_send![raw, initWithFilePresenter: &*presenter];
+            if let Some(coordinator) = Retained::from_raw(raw) {
+                let url: *mut AnyObject = msg_send![class!(NSURL), fileURLWithPath: &*text];
+                let accessor = StackBlock::new(|given: *mut Object| {
+                    let path = if given.is_null() {
+                        related.to_path_buf()
+                    } else {
+                        let path: *mut Object = send![given, path];
+                        let utf8: *const c_char = send![path, fileSystemRepresentation];
+                        if utf8.is_null() {
+                            related.to_path_buf()
+                        } else {
+                            PathBuf::from(std::ffi::OsStr::from_bytes(
+                                CStr::from_ptr(utf8).to_bytes(),
+                            ))
+                        }
+                    };
+                    *result.borrow_mut() = Some(quill_formats::copy_atomic(document, &path));
+                });
+                // NSFileCoordinatorWritingForReplacing.
+                const FOR_REPLACING: usize = 1 << 3;
+                let mut error: *mut Object = std::ptr::null_mut();
+                let coordinator = Retained::as_ptr(&coordinator) as *mut Object;
+                let _: () = send![coordinator,
+                    coordinateWritingItemAtURL: url.cast::<Object>(),
+                    options: FOR_REPLACING,
+                    error: &mut error,
+                    byAccessor: &*accessor];
+            }
+            let _: () = msg_send![class!(NSFileCoordinator), removeFilePresenter: &*presenter];
+        }
+    });
+    *RELATED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    result.into_inner().unwrap_or_else(|| {
+        Err(format!(
+            "The system would not let Quill write \u{201c}{}\u{201d}.",
+            related.display()
+        ))
+    })
+}
+
 pub fn save_file(window: &Window, name: &str, directory: Option<&Path>) -> Option<PathBuf> {
     autoreleasepool(|_| {
         // SAFETY: called on the app thread. Every alloc/init result below is
@@ -299,14 +491,18 @@ pub fn save_file(window: &Window, name: &str, directory: Option<&Path>) -> Optio
             let raw: *mut AnyObject = msg_send![raw, initWithFrame: NSRect::new(NSPoint::new(90., 8.), NSSize::new(280., 26.)) pullsDown: false];
             let popup = Retained::from_raw(raw)?;
             let popup = Retained::as_ptr(&popup) as *mut AnyObject;
-            for format in Format::ALL {
+            for format in Format::SAVE_AS {
                 let title =
                     NSString::from_str(&format!("{} (.{})", format.name(), format.extensions()[0]));
                 let _: () = msg_send![popup, addItemWithTitle: &*title];
             }
             let initial = Format::from_path(Path::new(name)).unwrap_or(Format::Quill);
-            let index = Format::ALL.iter().position(|f| *f == initial).unwrap_or(0);
+            let index = Format::SAVE_AS
+                .iter()
+                .position(|f| *f == initial)
+                .unwrap_or(0);
             let _: () = msg_send![popup, selectItemAtIndex: index as isize];
+            allow_only(panel, initial);
             let _: () = msg_send![popup, setTarget: panel];
             let _: () = msg_send![popup, setAction: sel!(quillSaveFormatChanged:)];
             let caption = NSString::from_str("Format:");
@@ -359,6 +555,51 @@ pub fn save_file(window: &Window, name: &str, directory: Option<&Path>) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_related_copy_is_made_and_replaced_beside_the_document() {
+        if !crate::unrestricted_host_services() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("quill-related-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let document = dir.join("Report.qwp");
+        let backup = dir.join("Report.qwp-backup");
+        for version in ["first", "second"] {
+            std::fs::write(&document, version).unwrap();
+            copy_related(&document, &backup).unwrap();
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), version);
+        }
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["Report.qwp", "Report.qwp-backup"]);
+        assert!(RELATED.lock().unwrap().is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_replacement_folder_is_new_and_on_the_documents_volume() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = std::env::temp_dir().join(format!("quill-replacement-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let existing = dir.join("Report.qwp");
+        std::fs::write(&existing, b"x").unwrap();
+        let volume = std::fs::metadata(&dir).unwrap().dev();
+        // An existing document, and a new one not saved yet.
+        for document in [existing.clone(), dir.join("New.qwp")] {
+            let folder = replacement_folder(&document).expect("a folder");
+            let meta = std::fs::metadata(&folder).unwrap();
+            assert!(meta.is_dir(), "{}", folder.display());
+            assert_eq!(meta.dev(), volume, "{}", folder.display());
+            assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0);
+            std::fs::remove_dir(&folder).unwrap();
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn the_remembered_panel_size_is_read_as_macos_writes_it() {

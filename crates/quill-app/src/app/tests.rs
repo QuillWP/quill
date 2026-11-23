@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn formatted_paste_special_requests_replacement_after_pasting() {
+    use crate::paste_special::Form;
+    use quill_core::{CharProps, Position, StoryId};
+
+    crate::font_names::set(&quill_layout::Catalog::scan_system());
+    let mut copied = Document::new();
+    let missing = "Quill Test Font That Does Not Exist";
+    let font = copied.font_id(missing);
+    let style = copied.styles.get(0).chp;
+    copied.insert_plain(
+        StoryId::Main,
+        Position::new(0, 0),
+        "Pasted words",
+        CharProps { font, ..style },
+    );
+    let mut clip = Clipboard::with_test_external_text(copied);
+    let mut state = WinState::new(DocView::new(Document::new(), "Paste Special".into()));
+    state.open_paste_special(clip.forms());
+    assert!(
+        matches!(state.dialogs.last(), Some((Which::PasteSpecial(forms), _)) if forms[0] == Form::Formatted)
+    );
+
+    crate::replace_fonts::TEST_PASTE_CHOICE.set(Some(true));
+    state.dialog_key(DKey::Return, None, &mut clip);
+
+    assert!(state.dialogs.is_empty());
+    assert_eq!(
+        state.pending_dialog_effect.take(),
+        Some(Effect::ReplaceFonts)
+    );
+    let doc = &state.view.doc;
+    assert_eq!(doc.main.paras[0].text, "Pasted words");
+    assert_eq!(
+        doc.font_name(doc.main.paras[0].chp_of_char(0).font),
+        missing
+    );
+}
+
+#[test]
 fn the_window_icon_picture_decodes_to_a_square_with_alpha() {
     // Windows and Linux windows build their icon from this file.
     let png = include_bytes!("../../../../assets/quill-64.png");
@@ -601,6 +640,7 @@ fn a_recovered_window_is_saved_under_its_own_name() {
     assert_eq!(strip_ext(&title), "Long");
     assert_eq!(strip_ext(&format!("Untitled1{RECOVERED}")), "Untitled1");
     assert_eq!(strip_ext("Notes.docx"), "Notes");
+    assert_eq!(strip_ext("Notes.docx-backup"), "Notes");
 }
 
 fn paint_editor(state: &mut WinState, width: u32, height: u32, fonts: &mut Fonts) {
@@ -2651,4 +2691,75 @@ fn right_clicking_a_tables_handle_selects_the_table_not_the_line_above() {
     assert_eq!(ts.rows.len(), 2, "the whole table is selected");
     assert_eq!((ts.from, ts.to), (0, 1));
     assert!(state.view.sel.start().para >= first_table_para);
+}
+
+/// The choices, the enabled state and the labels of the front dialog.
+fn paste_special_summary(
+    state: &WinState,
+) -> (Vec<crate::paste_special::Form>, Vec<(String, bool)>) {
+    let (which, d) = state.dialogs.last().expect("a dialog");
+    let Which::PasteSpecial(forms) = which else {
+        panic!("not Paste Special");
+    };
+    (
+        forms.clone(),
+        d.items
+            .iter()
+            .map(|i| (i.label.clone(), i.enabled))
+            .collect(),
+    )
+}
+
+#[test]
+fn paste_special_opens_alike_from_the_menu_and_from_a_script() {
+    use quill_core::{CharProps, Position, StoryId};
+
+    let env = Env {
+        font_names: &[],
+        font_families: &[],
+        recent: &[],
+        windows: &[],
+    };
+    let mut copied = Document::new();
+    let style = copied.styles.get(0).chp;
+    copied.insert_plain(
+        StoryId::Main,
+        Position::new(0, 0),
+        "Words",
+        CharProps { ..style },
+    );
+    for mut clip in [
+        Clipboard::without_system(),
+        Clipboard::with_test_external_text(copied),
+    ] {
+        // What the window opens for its clipboard ...
+        let mut menu = WinState::new(DocView::new(Document::new(), "Menu".into()));
+        menu.open_paste_special(clip.forms());
+        // ... is what the menu command and --snapshot's cmd step open.
+        let mut script = WinState::new(DocView::new(Document::new(), "Script".into()));
+        script.open_dialog_with_clipboard(DialogId::PasteSpecial, &env, &mut clip);
+        assert_eq!(paste_special_summary(&menu), paste_special_summary(&script));
+        // Choosing Paste does the same in both.
+        crate::replace_fonts::TEST_PASTE_CHOICE.set(Some(false));
+        let mut pasted = Vec::new();
+        for state in [&mut menu, &mut script] {
+            state.dialog_key(DKey::Return, None, &mut clip);
+            pasted.push(state.view.doc.main.paras[0].text.clone());
+        }
+        assert_eq!(pasted[0], pasted[1]);
+        // An empty clipboard pastes nothing; the other pastes its words.
+        assert_eq!(pasted[0].is_empty(), clip.forms().is_empty());
+    }
+}
+
+#[test]
+fn an_empty_clipboard_says_so_and_cannot_paste() {
+    let mut clip = Clipboard::without_system();
+    let mut state = WinState::new(DocView::new(Document::new(), "Empty".into()));
+    state.open_paste_special(clip.forms());
+    let (forms, items) = paste_special_summary(&state);
+    assert!(forms.is_empty());
+    assert!(items.iter().any(|(l, _)| l == "The Clipboard is empty."));
+    let (_, d) = state.dialogs.last().unwrap();
+    assert!(!d.is_enabled("ok"));
 }

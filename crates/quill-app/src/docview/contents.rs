@@ -36,19 +36,26 @@ impl DocView {
         self.doc.toc_paragraphs(&entries, o.page_numbers)
     }
 
-    /// Start in the Table of Contents dialog: the contents go at the start
-    /// of the document. Its page numbers are worked out again once the
-    /// contents' own pages are laid out.
+    /// Start in the Table of Contents dialog: the contents go at the
+    /// insertion point, or in place of the ones already there. Its page
+    /// numbers are worked out again once the contents' own pages are laid
+    /// out.
     pub fn insert_toc(&mut self, o: TocOptions) {
+        if self.doc.existing_toc().is_none()
+            && self.doc.main.paras[self.sel.start().para].pap.in_table
+        {
+            self.status = Some("A table of contents can't go inside a table.".into());
+            return;
+        }
         let paras = self.toc_paragraphs(&o);
         self.doc.begin("Table of Contents", self.sel);
-        self.doc.place_toc(paras);
+        let placed = self.doc.place_toc(paras, self.sel.start());
         self.doc.change_document_props(quill_core::DocumentProps {
             live_toc: Some(o),
             ..self.doc.props.clone()
         });
         self.toc_refresh = Some(o);
-        self.sel = Selection::caret(Position::new(0, 0));
+        self.sel = Selection::caret(Position::new(placed.start, 0));
     }
 
     /// The second pass of `insert_toc`, from `update_layout`. Returns true
@@ -58,19 +65,24 @@ impl DocView {
             return false;
         };
         let paras = self.toc_paragraphs(&o);
-        let old = self.doc.existing_toc().map_or(0, |e| e + 1);
-        let same = paras.len() == old
+        let old = self.doc.existing_toc().unwrap_or(0..0);
+        let same = paras.len() == old.len()
             && paras
                 .iter()
-                .zip(&self.doc.main.paras)
+                .zip(&self.doc.main.paras[old.clone()])
                 .all(|(a, b)| a.text == b.text);
         if !same {
-            self.doc.place_toc(paras);
+            self.doc.place_toc(paras, Position::new(old.start, 0));
         }
-        let sel = Selection::caret(Position::new(0, 0));
+        let start = self.doc.existing_toc().map_or(0, |r| r.start);
+        let sel = Selection::caret(Position::new(start, 0));
         self.doc.commit(sel);
         self.set_selection(sel);
-        self.scroll_y = 0.0;
+        // Show the contents, wherever they were put.
+        self.scroll_y = self
+            .tops
+            .get(start)
+            .map_or(0.0, |t| (*t - TEXT_TOP).max(0.0));
         !same
     }
 
@@ -83,7 +95,7 @@ impl DocView {
         let Some(o) = self.doc.props.live_toc else {
             return false;
         };
-        let Some(end) = self.doc.existing_toc() else {
+        let Some(range) = self.doc.existing_toc() else {
             self.doc.continue_last("Table of Contents", self.sel);
             self.doc.change_document_props(quill_core::DocumentProps {
                 live_toc: None,
@@ -93,14 +105,17 @@ impl DocView {
             return false;
         };
         let paras = self.toc_paragraphs(&o);
-        let same = paras.len() == end + 1
-            && paras.iter().zip(&self.doc.main.paras).all(|(a, b)| {
-                a.text == b.text
-                    && a.pap.style == b.pap.style
-                    && a.run_bounds()
-                        .map(|r| *r.2)
-                        .eq(b.run_bounds().map(|r| *r.2))
-            });
+        let same = paras.len() == range.len()
+            && paras
+                .iter()
+                .zip(&self.doc.main.paras[range.clone()])
+                .all(|(a, b)| {
+                    a.text == b.text
+                        && a.pap.style == b.pap.style
+                        && a.run_bounds()
+                            .map(|r| *r.2)
+                            .eq(b.run_bounds().map(|r| *r.2))
+                });
         if same {
             return false;
         }
@@ -112,13 +127,15 @@ impl DocView {
             );
         }
         self.doc.continue_last("Table of Contents", self.sel);
-        let n = self.doc.place_toc(paras);
+        let new = self.doc.place_toc(paras, Position::new(range.start, 0));
         // Keep the selection on the same text after the contents.
         let shift = |p: Position| {
-            if p.para > end {
-                Position::new(p.para + n - (end + 1), p.offset)
+            if p.para >= range.end {
+                Position::new(p.para + new.len() - range.len(), p.offset)
+            } else if p.para >= range.start {
+                Position::new(new.start, 0)
             } else {
-                Position::new(0, 0)
+                p
             }
         };
         let sel = Selection::new(shift(self.sel.anchor), shift(self.sel.focus));
@@ -133,7 +150,7 @@ impl DocView {
             && self
                 .doc
                 .existing_toc()
-                .is_some_and(|end| self.sel.start().para <= end)
+                .is_some_and(|range| range.contains(&self.sel.start().para))
     }
 
     /// Update Table of Contents: make it again now, with the settings it
@@ -141,14 +158,14 @@ impl DocView {
     /// What was typed into one made editable goes to its headings first,
     /// in the same undo step.
     pub fn update_toc(&mut self) {
-        let Some(end) = self.doc.existing_toc() else {
+        let Some(range) = self.doc.existing_toc() else {
             return;
         };
         // Lines added to or removed from an editable one cannot be matched
         // to headings, so Update throws them away: say so first.
         if self.doc.props.live_toc.is_none() {
-            let o = self.options_of_toc(end);
-            if self.doc.toc_entries(&o).len() != end + 1 && !confirm_toc_update() {
+            let o = self.options_of_toc(range.clone());
+            if self.doc.toc_entries(&o).len() != range.len() && !confirm_toc_update() {
                 return;
             }
         }
@@ -156,8 +173,8 @@ impl DocView {
         let (o, told) = match self.doc.props.live_toc {
             Some(o) => (o, None),
             None => {
-                let o = self.options_of_toc(end);
-                (o, self.headings_from_toc(&o, end))
+                let o = self.options_of_toc(range.clone());
+                (o, self.headings_from_toc(&o, range))
             }
         };
         self.insert_toc(o);
@@ -189,8 +206,8 @@ impl DocView {
     /// The settings an editable table of contents was made with, which it
     /// no longer holds, as its lines show them: the levels of its styles,
     /// and page numbers if a line has a tab.
-    fn options_of_toc(&self, end: usize) -> TocOptions {
-        let paras = &self.doc.main.paras[..=end];
+    fn options_of_toc(&self, range: std::ops::Range<usize>) -> TocOptions {
+        let paras = &self.doc.main.paras[range];
         let level = |p: &Paragraph| self.doc.styles.toc_level(p.pap.style);
         let levels = || paras.iter().filter_map(level);
         TocOptions {
@@ -206,12 +223,16 @@ impl DocView {
     /// hidden text in a heading stays. Lines and headings are matched in
     /// order, so with lines added or removed nothing can be matched and
     /// the headings stay. Returns what to tell the person, if anything.
-    fn headings_from_toc(&mut self, o: &TocOptions, end: usize) -> Option<String> {
+    fn headings_from_toc(
+        &mut self,
+        o: &TocOptions,
+        range: std::ops::Range<usize>,
+    ) -> Option<String> {
         let entries = self.doc.toc_entries(o);
-        if entries.len() != end + 1 {
+        if entries.len() != range.len() {
             return Some("Lines were added or removed, so the headings were left alone.".into());
         }
-        let lines: Vec<String> = self.doc.main.paras[..=end]
+        let lines: Vec<String> = self.doc.main.paras[range]
             .iter()
             .map(|p| match p.text.rsplit_once(chars::TAB) {
                 Some((text, _)) if o.page_numbers => text.trim().to_string(),
@@ -465,7 +486,7 @@ mod tests {
                 ..TocOptions::default()
             });
             v.update_layout(&mut fonts);
-            assert_eq!(v.doc.existing_toc(), Some(5), "title_case={title_case}");
+            assert_eq!(v.doc.existing_toc(), Some(0..6), "title_case={title_case}");
             v.make_toc_editable();
             for level in 1..=6 {
                 let para = level - 1;
@@ -525,6 +546,139 @@ mod tests {
     }
 
     #[test]
+    fn contents_go_where_the_insertion_point_is_after_a_cover_page() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut doc = quill_core::text::from_plain_text("Cover\nChapter One\ntext");
+        let h1 = doc.styles.find("heading 1").unwrap();
+        doc.apply_style(MAIN, 1, 1, h1);
+        doc.forget_history();
+        let mut v = DocView::new(doc, "T".into());
+        v.update_layout(&mut fonts);
+        // After the cover, at the start of the next paragraph.
+        v.set_selection(Selection::caret(Position::new(1, 0)));
+        v.insert_toc(TocOptions::default());
+        v.update_layout(&mut fonts);
+        let texts: Vec<&str> = v.doc.main.paras.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(texts[0], "Cover", "{texts:?}");
+        assert!(texts[1].starts_with("Chapter One\t"), "{texts:?}");
+        assert_eq!(texts[2], "Chapter One");
+        assert_eq!(v.doc.existing_toc(), Some(1..2));
+        // The cover is a section of its own, ended by a break.
+        assert_eq!(v.doc.main.paras[0].mark, quill_core::Mark::SectionBreak);
+        assert_eq!(v.doc.main.paras[1].mark, quill_core::Mark::SectionBreak);
+        // Updating it keeps it where it is, and the heading it lists is not
+        // the contents line itself.
+        v.update_toc();
+        v.update_layout(&mut fonts);
+        assert_eq!(v.doc.existing_toc(), Some(1..2));
+        assert_eq!(v.doc.main.paras[0].text, "Cover");
+        v.exec(crate::commands::Cmd::Undo, false, &mut Clipboard::new());
+        assert!(v.doc.existing_toc().is_none() || v.doc.main.paras[0].text == "Cover");
+    }
+
+    #[test]
+    fn contents_in_the_middle_of_a_paragraph_split_it() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut doc = quill_core::text::from_plain_text("CoverTitle\nChapter One");
+        let h1 = doc.styles.find("heading 1").unwrap();
+        doc.apply_style(MAIN, 1, 1, h1);
+        doc.forget_history();
+        let mut v = DocView::new(doc, "T".into());
+        v.update_layout(&mut fonts);
+        v.set_selection(Selection::caret(Position::new(0, 5)));
+        v.insert_toc(TocOptions::default());
+        v.update_layout(&mut fonts);
+        let texts: Vec<&str> = v.doc.main.paras.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(texts[0], "Cover");
+        assert!(texts[1].starts_with("Chapter One\t"));
+        assert_eq!(texts[2], "Title");
+        assert_eq!(v.doc.existing_toc(), Some(1..2));
+    }
+
+    #[test]
+    fn contents_at_the_very_start_or_end_and_made_twice() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        for at_end in [false, true] {
+            let mut doc = quill_core::text::from_plain_text("Chapter One\ntext");
+            let h1 = doc.styles.find("heading 1").unwrap();
+            doc.apply_style(MAIN, 0, 0, h1);
+            doc.forget_history();
+            let mut v = DocView::new(doc, "T".into());
+            v.update_layout(&mut fonts);
+            let at = if at_end {
+                Position::new(1, 4)
+            } else {
+                Position::new(0, 0)
+            };
+            v.set_selection(Selection::caret(at));
+            v.insert_toc(TocOptions::default());
+            v.update_layout(&mut fonts);
+            let first = v.doc.existing_toc().expect("contents were made");
+            // Made again from somewhere else, they are replaced where they are.
+            v.set_selection(Selection::caret(Position::new(
+                v.doc.main.paras.len() - 1,
+                0,
+            )));
+            v.insert_toc(TocOptions {
+                page_numbers: false,
+                ..TocOptions::default()
+            });
+            v.update_layout(&mut fonts);
+            assert_eq!(v.doc.existing_toc().map(|r| r.start), Some(first.start));
+            let texts: Vec<&str> = v.doc.main.paras.iter().map(|p| p.text.as_str()).collect();
+            assert_eq!(
+                texts.iter().filter(|t| **t == "Chapter One").count(),
+                2,
+                "the heading and one line for it: {texts:?}"
+            );
+            assert_eq!(texts.concat().matches("text").count(), 1, "{texts:?}");
+        }
+    }
+
+    #[test]
+    fn contents_after_a_cover_page_undo_in_one_step_and_follow_edits() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut doc = quill_core::text::from_plain_text("Cover\nChapter One\ntext");
+        let h1 = doc.styles.find("heading 1").unwrap();
+        doc.apply_style(MAIN, 1, 1, h1);
+        doc.forget_history();
+        let before = doc.main.clone();
+        let mut v = DocView::new(doc, "T".into());
+        v.update_layout(&mut fonts);
+        v.set_selection(Selection::caret(Position::new(1, 0)));
+        v.insert_toc(TocOptions::default());
+        v.update_layout(&mut fonts);
+        assert!(v.doc.props.live_toc.is_some());
+        // The contents are live: renaming the heading updates the line.
+        let heading = v.doc.main.paras.len() - 2;
+        assert_eq!(v.doc.main.paras[heading].text, "Chapter One");
+        v.set_selection(Selection::caret(Position::new(heading, 11)));
+        v.type_text("s");
+        v.update_layout(&mut fonts);
+        let range = v.doc.existing_toc().unwrap();
+        assert!(
+            v.doc.main.paras[range.start]
+                .text
+                .starts_with("Chapter Ones")
+        );
+        // One Undo takes the typing back; another takes the contents away.
+        let clip = &mut Clipboard::new();
+        v.exec(crate::commands::Cmd::Undo, false, clip);
+        v.exec(crate::commands::Cmd::Undo, false, clip);
+        v.update_layout(&mut fonts);
+        assert_eq!(v.doc.main, before);
+        assert!(v.doc.existing_toc().is_none());
+    }
+
+    #[test]
     fn every_level_of_an_editable_contents_reaches_its_heading() {
         let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
             return;
@@ -577,8 +731,8 @@ mod tests {
         v.insert_toc(TocOptions::default());
         v.update_layout(&mut fonts);
         v.make_toc_editable();
-        let end = v.doc.existing_toc().unwrap();
-        assert_eq!(end, 1);
+        let range = v.doc.existing_toc().unwrap();
+        assert_eq!(range, 0..2);
         // Change the first line, not its page number.
         let tab = v.doc.main.paras[0].text.find(chars::TAB).unwrap();
         v.doc.begin("t", v.sel);
@@ -633,7 +787,7 @@ mod tests {
         v.update_toc();
         v.update_layout(&mut fonts);
         assert!(v.doc.props.live_toc.is_some());
-        assert_eq!(v.doc.existing_toc(), Some(1));
+        assert_eq!(v.doc.existing_toc(), Some(0..2));
     }
 
     #[test]
@@ -741,10 +895,10 @@ mod tests {
         assert!(v.doc.props.live_toc.is_some());
 
         // Deleted, it is gone for good: nothing brings it back.
-        let end = v.doc.existing_toc().unwrap();
+        let range = v.doc.existing_toc().unwrap();
         v.set_selection(Selection::new(
-            Position::new(0, 0),
-            Position::new(end + 1, 0),
+            Position::new(range.start, 0),
+            Position::new(range.end, 0),
         ));
         v.exec(crate::commands::Cmd::Clear, false, &mut clip);
         v.update_layout(&mut fonts);

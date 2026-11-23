@@ -71,21 +71,23 @@ pub struct PicDrag {
 }
 
 impl DocView {
-    /// Insert a picture at the selection, shrunk to fit the column if it
-    /// is wider (at its own proportions).
     /// Paste Special: the Clipboard as `form`.
-    pub fn paste_as(&mut self, form: crate::paste_special::Form, clip: &mut super::Clipboard) {
+    pub fn paste_as(
+        &mut self,
+        form: crate::paste_special::Form,
+        clip: &mut super::Clipboard,
+    ) -> Effect {
         use crate::paste_special::Form;
         match form {
             Form::Formatted => {
-                let _ = self.exec(crate::commands::Cmd::Paste, false, clip);
+                return self.exec(crate::commands::Cmd::Paste, false, clip);
             }
             Form::Unformatted => {
                 let Some(text) = clip.plain_text() else {
-                    return;
+                    return Effect::None;
                 };
                 if !self.room_for(quill_core::limits::Size::of_text(&text)) {
-                    return;
+                    return Effect::None;
                 }
                 // Plain text takes the format of the insertion point, or
                 // in Markdown source the source's own.
@@ -109,8 +111,10 @@ impl DocView {
                 }
             }
         }
+        Effect::None
     }
 
+    /// Insert a picture at the selection, shrunk proportionally to fit the column.
     pub fn insert_picture(&mut self, mut pic: Picture) {
         crate::image::ensure_preview(&mut pic);
         let width = self.column_twips(self.sel.focus.para);

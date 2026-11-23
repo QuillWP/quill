@@ -87,7 +87,18 @@ impl WinState {
                 dialog.inactive = true;
             }
         }
-        if !on_handle && !self.view.select_picture_at(dx, dy) {
+        self.view.break_menu = false;
+        let on_break = if on_handle {
+            None
+        } else {
+            self.view.section_mark_at(dx, dy)
+        };
+        if let Some(first) = on_break {
+            // A section break's menu changes its kind: the caret goes in the
+            // section it starts, which is the one that changes.
+            self.view.sel = quill_core::Selection::caret(quill_core::Position::new(first, 0));
+            self.view.break_menu = true;
+        } else if !on_handle && !self.view.select_picture_at(dx, dy) {
             let (pos, upstream) = self.view.hit(dx, dy);
             self.view.context_at(pos, upstream);
         }

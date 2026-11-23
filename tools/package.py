@@ -4,7 +4,11 @@ source ZIP for any build host.
 
 By default the app is built inside the build folder (target/release/Quill.app,
 or target/debug/Quill Debug.app with --debug; on Linux target/release/quill or
-target/debug/quill-debug). --dist makes the packages in dist/. On a Mac,
+target/debug/quill-debug). These run outside the App Sandbox, so tests can
+give them their own HOME. --sandbox makes the Mac's App Sandbox test build
+instead, Quill Sandbox.app or Quill Debug Sandbox.app in the same folder.
+--dist makes the packages in dist/; on a Mac the release package runs in the App Sandbox
+(the debug package does not). On a Mac,
 --dist builds both Apple Silicon and Intel; everything else builds only for
 the Mac it runs on.
 
@@ -169,7 +173,9 @@ def copy_common(destination: Path, mac: bool = False) -> None:
     skip = [".DS_Store"] + (["hyph_en_US.pat", "README_hyph_en_US.txt"] if mac else [])
     shutil.copytree(ROOT / "data", destination / "data",
                     ignore=shutil.ignore_patterns(*skip))
-    for name in ("README.md", "LICENSE-MIT", "LICENSE-APACHE"):
+    # The Mac app leaves the README out (its pictures would not travel with
+    # it); the disk image carries a plain README beside the app instead.
+    for name in ("LICENSE-MIT", "LICENSE-APACHE") + (() if mac else ("README.md",)):
         shutil.copy2(ROOT / name, destination / name)
     notices = PACKAGE_NOTICES if PACKAGE_NOTICES.exists() else ROOT / "THIRD-PARTY-NOTICES.txt"
     shutil.copy2(notices, destination / "THIRD-PARTY-NOTICES.txt")
@@ -217,7 +223,27 @@ def portable_package(executable: Path, output: Path, version: str,
     return destination
 
 
-def mac_app(executable: Path, app: Path, version: str, identity: str | None, debug: bool = False) -> None:
+def claim_nothing(info: dict) -> None:
+    """Leave a test build no claim on any document type, so the installed
+    Quill keeps opening the files. It still declares every type, with the
+    rank None (never the default app for it): the App Sandbox lets Quill
+    write a backup beside a document only when the app declares both the
+    document's type and the backup's. Quill's own types are imported, since
+    the real Quill declares them."""
+    info["CFBundleDocumentTypes"] = [
+        {**kind, "LSHandlerRank": "None"} for kind in info.get("CFBundleDocumentTypes", [])
+    ]
+    imported = info.pop("UTExportedTypeDeclarations", [])
+    if imported:
+        info["UTImportedTypeDeclarations"] = imported
+
+
+def mac_app(executable: Path, app: Path, version: str, identity: str | None, debug: bool = False,
+            sandbox: bool = False, test_app: bool = False) -> None:
+    """Make the Mac app bundle. With `sandbox` it is signed with the App
+    Sandbox entitlements, as the packages people download are. With
+    `test_app` too it is a separate test app (Quill Sandbox), with its own
+    name and bundle id and so its own container."""
     contents = app / "Contents"
     (contents / "MacOS").mkdir(parents=True)
     resources = contents / "Resources"
@@ -235,13 +261,24 @@ def mac_app(executable: Path, app: Path, version: str, identity: str | None, deb
         info["CFBundleName"] = "Quill Debug"
         info["CFBundleDisplayName"] = "Quill Debug"
         info["CFBundleIdentifier"] = "com.quillwp.Quill.debug"
-        info.pop("CFBundleDocumentTypes", None)
-        info.pop("UTExportedTypeDeclarations", None)
+        claim_nothing(info)
+    entitlements = []
+    if sandbox:
+        entitlements = ["--entitlements", str(ROOT / "tools/Quill.entitlements")]
+    if sandbox and test_app:
+        # The App Sandbox test build: another app again, with its own bundle
+        # id, so macOS gives it its own container and it never shares files
+        # with Quill or Quill Debug.
+        name = info["CFBundleName"] + " Sandbox"
+        info["CFBundleName"] = info["CFBundleDisplayName"] = name
+        info["CFBundleIdentifier"] += ".sandbox"
+        claim_nothing(info)
     (contents / "Info.plist").write_bytes(plistlib.dumps(info))
     if identity:
-        run("codesign", "--force", "--options", "runtime", "--timestamp", "--sign", identity, str(app))
+        run("codesign", "--force", "--options", "runtime", "--timestamp", *entitlements,
+            "--sign", identity, str(app))
     else:
-        run("codesign", "--force", "--sign", "-", str(app))
+        run("codesign", "--force", *entitlements, "--sign", "-", str(app))
     run("codesign", "--verify", "--deep", "--strict", str(app))
 
 
@@ -262,7 +299,13 @@ def program_name(system: str, debug: bool) -> str:
     return "quill-debug" if debug and system == "linux" else "quill"
 
 
-def dev_app(executable: Path, version: str, system: str, debug: bool = False) -> Path:
+def app_name(debug: bool, sandbox: bool = False) -> str:
+    """The Mac app's bundle name for a build beside the source."""
+    return ("Quill Debug" if debug else "Quill") + (" Sandbox" if sandbox else "") + ".app"
+
+
+def dev_app(executable: Path, version: str, system: str, debug: bool = False,
+            sandbox: bool = False) -> Path:
     """Put a runnable app beside the build, in target/<profile>/."""
     if system != "macos":
         # Off the Mac the bare program finds its data in the source tree.
@@ -277,7 +320,7 @@ def dev_app(executable: Path, version: str, system: str, debug: bool = False) ->
         shutil.copy2(executable, staged)
         os.replace(staged, program)
         return program
-    name = "Quill Debug.app" if debug else "Quill.app"
+    name = app_name(debug, sandbox)
     app = executable.parent / name
     # Replacing the app under a running copy would pull it out from under
     # him. lsof finds the program however it was started.
@@ -288,7 +331,8 @@ def dev_app(executable: Path, version: str, system: str, debug: bool = False) ->
             raise ValueError(f"Quit Quill first: it is running from {app}")
     with tempfile.TemporaryDirectory(prefix=".qwp-app-", dir=executable.parent) as tmp:
         staged = Path(tmp) / name
-        mac_app(executable, staged, version, os.environ.get("MACOS_SIGN_IDENTITY"), debug)
+        mac_app(executable, staged, version, os.environ.get("MACOS_SIGN_IDENTITY"), debug,
+                sandbox=sandbox, test_app=sandbox)
         replace_app(staged, app)
     return app
 
@@ -305,8 +349,15 @@ def mac_package(executable: Path, output: Path, version: str, arch: str, label: 
         # disk image, so it never replaces or passes for the real one.
         name = "Quill Debug" if debug else "Quill"
         app = image_root / f"{name}.app"
-        mac_app(executable, app, version, identity, debug)
+        # The release package people download runs in the App Sandbox. The
+        # debug package does not, so testers can reach its files and logs
+        # and the bug reports they send are not limited by the sandbox. Builds
+        # beside the source do not run in it either, so tests can give them
+        # their own HOME.
+        mac_app(executable, app, version, identity, debug, sandbox=not debug)
         (image_root / "Applications").symlink_to("/Applications")
+        text = (ROOT / "tools/dmg-readme.txt").read_text()
+        (image_root / "README.txt").write_text(text.replace("VERSION", version, 1))
         image = root / destination.name
         run("hdiutil", "create", "-quiet", "-volname", name, "-srcfolder", str(image_root),
             "-ov", "-format", "UDZO", str(image))
@@ -333,10 +384,13 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="run formatting, strict lint, and tests before building")
     parser.add_argument("--debug", action="store_true", help="build the debug version (slower, but crash reports name the code)")
     parser.add_argument("--dist", action="store_true", help="make the packages to publish (DMG, tar.gz, zip) in --output; on a Mac, for Apple Silicon and Intel")
+    parser.add_argument("--sandbox", action="store_true", help="on a Mac, build Quill Sandbox.app (or Quill Debug Sandbox.app): the App Sandbox test build")
     parser.add_argument("--output", type=Path, default=ROOT / "dist", help="where --dist and --source write (default: dist)")
     args = parser.parse_args()
     if args.source and (args.with_source or args.check or args.debug or args.dist):
         parser.error("--source cannot be combined with --with-source, --check, --debug or --dist")
+    if args.sandbox and (args.source or args.dist):
+        parser.error("--sandbox makes a test app beside the build; it cannot be combined with --source or --dist")
     if os.environ.get("MACOS_NOTARY_PROFILE") and not args.dist and not args.source:
         parser.error("notarizing needs --dist")
     if args.debug and os.environ.get("MACOS_NOTARY_PROFILE"):
@@ -361,7 +415,9 @@ def main() -> int:
         run(sys.executable, str(ROOT / "tools/generate-notices.py"),
             "--target", build_target, "--output", str(PACKAGE_NOTICES))
         if not args.dist:
-            print(f"App: {dev_app(executable, version, system, args.debug)}")
+            if args.sandbox and system != "macos":
+                raise ValueError("--sandbox is for the Mac only")
+            print(f"App: {dev_app(executable, version, system, args.debug, args.sandbox)}")
             break
         arch = build_target.split("-")[0]
         if system == "macos":

@@ -497,6 +497,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn live_spelling_mac_service_marks_a_real_misspelling() {
+        if !crate::unrestricted_host_services() {
+            return;
+        }
         assert!(
             crate::spellcheck::available(),
             "Mac spelling service must be available for this host check"

@@ -438,7 +438,7 @@ fn custom_colors(doc: &Document) -> Vec<Rgb> {
         .map(|(c, _)| Rgb(c))
         .collect();
     let stories = std::iter::once(&doc.main)
-        .chain(doc.headers.iter())
+        .chain(doc.stored_header_stories())
         .chain([&doc.notes, &doc.annotations]);
     for p in stories.flat_map(|s| &s.paras) {
         for run in p.runs.iter().filter(|r| r.len > 0) {
@@ -479,7 +479,7 @@ pub fn is_saved(c: Rgb) -> bool {
 /// Whether any text in `doc` is in color `c`.
 pub fn uses(doc: &Document, c: Rgb) -> bool {
     std::iter::once(&doc.main)
-        .chain(doc.headers.iter())
+        .chain(doc.stored_header_stories())
         .chain([&doc.notes, &doc.annotations])
         .flat_map(|s| &s.paras)
         .any(|p| p.runs.iter().any(|r| r.len > 0 && r.chp.color == c))
@@ -767,5 +767,28 @@ mod tests {
         crate::settings::update(|s| s.named_colors.clear());
         assert_eq!(row, [Rgb(0xFF0007), own]);
         assert!(custom_colors(&Document::new()).is_empty());
+    }
+
+    /// A two-section document whose second section owns its headers, with
+    /// `chp` on text in its first header.
+    fn header_owned_by_the_second_section(chp: quill_core::CharProps) -> Document {
+        let mut doc = Document::new();
+        doc.insert_section_break(quill_core::Position::new(0, 0));
+        let mut header = quill_core::text::from_plain_text("").main;
+        header.paras[0].insert(0, "Chapter two", chp);
+        let mut set = vec![quill_core::text::from_plain_text("").main; 6];
+        set[0] = header;
+        doc.section.headers = Some(std::sync::Arc::new(set));
+        doc
+    }
+
+    #[test]
+    fn a_color_only_in_a_section_owned_header_is_in_the_custom_row_and_in_use() {
+        let own = Rgb(0x445566);
+        let base = Document::new().styles.get(0).chp;
+        let doc = header_owned_by_the_second_section(quill_core::CharProps { color: own, ..base });
+        assert!(custom_colors(&doc).contains(&own));
+        assert!(uses(&doc, own));
+        assert!(!uses(&doc, Rgb(0x010203)));
     }
 }

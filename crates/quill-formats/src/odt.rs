@@ -488,8 +488,15 @@ pub fn write(doc: &Document, now: u64) -> Vec<u8> {
             text_props_mask(&style.format.props, style.format.mask)
         );
     }
+    // ODF has no gutter, so the gutter is folded into the left margin, which
+    // is the inside margin when the page is mirrored.
+    let usage = if p.mirror_margins {
+        r#" style:page-usage="mirrored""#
+    } else {
+        ""
+    };
     let styles = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS}><office:font-face-decls>{fonts}</office:font-face-decls><office:styles>{named}</office:styles><office:automatic-styles><style:page-layout style:name="Page"><style:page-layout-properties fo:page-width="{}pt" fo:page-height="{}pt" style:print-orientation="{}" fo:margin-top="{}pt" fo:margin-bottom="{}pt" fo:margin-left="{}pt" fo:margin-right="{}pt"/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="Page"/></office:master-styles></office:document-styles>"#,
+        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-styles {NS}><office:font-face-decls>{fonts}</office:font-face-decls><office:styles>{named}</office:styles><office:automatic-styles><style:page-layout style:name="Page"{usage}><style:page-layout-properties fo:page-width="{}pt" fo:page-height="{}pt" style:print-orientation="{}" fo:margin-top="{}pt" fo:margin-bottom="{}pt" fo:margin-left="{}pt" fo:margin-right="{}pt"/></style:page-layout></office:automatic-styles><office:master-styles><style:master-page style:name="Standard" style:page-layout-name="Page"/></office:master-styles></office:document-styles>"#,
         points(p.page_width),
         points(p.page_height),
         if p.page_width > p.page_height {
@@ -499,7 +506,7 @@ pub fn write(doc: &Document, now: u64) -> Vec<u8> {
         },
         points(p.margin_top),
         points(p.margin_bottom),
-        points(p.margin_left),
+        points(p.margin_left.saturating_add(p.gutter)),
         points(p.margin_right)
     );
     let mut manifest = format!(

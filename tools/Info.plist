@@ -79,6 +79,35 @@
 				<string>public.html</string>
 			</array>
 		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Quill Backup</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.quillwp.backup</string>
+			</array>
+			<key>CFBundleTypeExtensions</key>
+			<array>
+				<string>qwp-backup</string>
+				<string>docx-backup</string>
+				<string>rtf-backup</string>
+				<string>odt-backup</string>
+				<string>html-backup</string>
+				<string>htm-backup</string>
+				<string>md-backup</string>
+				<string>markdown-backup</string>
+				<string>txt-backup</string>
+				<string>text-backup</string>
+			</array>
+			<key>NSIsRelatedItemType</key>
+			<true/>
+			<key>CFBundleTypeIconFile</key>
+			<string>QuillDocument</string>
+		</dict>
 	</array>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
@@ -100,6 +129,34 @@
 				</array>
 				<key>public.mime-type</key>
 				<string>application/x-quillwp</string>
+			</dict>
+			<key>UTTypeIconFile</key>
+			<string>QuillDocument</string>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.quillwp.backup</string>
+			<key>UTTypeDescription</key>
+			<string>Quill Backup</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>qwp-backup</string>
+					<string>docx-backup</string>
+					<string>rtf-backup</string>
+					<string>odt-backup</string>
+					<string>html-backup</string>
+					<string>htm-backup</string>
+					<string>md-backup</string>
+					<string>markdown-backup</string>
+					<string>txt-backup</string>
+					<string>text-backup</string>
+				</array>
 			</dict>
 			<key>UTTypeIconFile</key>
 			<string>QuillDocument</string>

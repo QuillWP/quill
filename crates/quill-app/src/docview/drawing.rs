@@ -235,7 +235,6 @@ pub(super) fn draw_break_rule(
     c: &mut dyn Surface,
     fonts: &Fonts,
     cache: &mut GlyphCache,
-    face: quill_layout::FaceKey,
     x0: f32,
     x1: f32,
     y: f32,
@@ -245,7 +244,10 @@ pub(super) fn draw_break_rule(
     if !c.screen() {
         return;
     }
-    let size = 9.0;
+    // The system UI font, whatever the document's text is set in. The face
+    // is resolved in update_layout, which can load it.
+    let face = fonts.find_resolved(quill_layout::fonts::UI_FONT, false, false);
+    let size = 8.0;
     let width: f32 = label
         .chars()
         .map(|ch| fonts.advance(face, fonts.glyph_in(face, ch), size))
@@ -521,7 +523,7 @@ impl DocView {
     pub fn draw(&mut self, c: &mut Canvas, fonts: &Fonts, cache: &mut GlyphCache, focused: bool) {
         let area = self.area;
         let clip = c.set_clip(area);
-        let ox = self.area.x + self.text_x();
+        let ox = self.area.x + self.text_x(0);
         // In dark mode the desk round the pages takes the interface's dark
         // colors and the pages and their text a dark page's (`page_ink`).
         // Only the drawing changes: the document keeps its own colors.
@@ -534,7 +536,6 @@ impl DocView {
             );
             c.dark_page = c.dark;
             let (_, ph) = self.page_size();
-            let left = area.x + self.page_left();
             for k in 0..self.pages.len() {
                 let top = area.y - self.scroll_y + self.page_top(k);
                 if top > area.bottom() {
@@ -543,7 +544,7 @@ impl DocView {
                 if top + ph < area.y {
                     continue;
                 }
-                self.draw_page(c, fonts, cache, focused, k, left, top);
+                self.draw_page(c, fonts, cache, focused, k, area.x + self.page_left(k), top);
             }
         } else {
             if self.captions {
@@ -597,6 +598,14 @@ impl DocView {
                 &self.pages[..]
             };
             for page in pages.iter().skip(1).filter(|p| !p.manual) {
+                // A section break that starts a page has its own rule.
+                let starts_section =
+                    self.secs.iter().skip(1).any(|(first, _)| {
+                        (self.pad(page.y) - self.tops[*first]).abs() <= SECTION_PAD
+                    });
+                if starts_section {
+                    continue;
+                }
                 let y = (oy + self.pad(page.y)).floor();
                 if y < area.y || y > area.bottom() {
                     continue;
@@ -639,9 +648,9 @@ impl DocView {
         top: f32,
     ) {
         let (pw, ph) = self.page_size();
-        let p = &self.doc.props;
+        let (margin_left, margin_right) = self.doc.props.page_margins(k);
         let mt = self.page_body_top(k);
-        let ox = left + (p.margin_left + p.gutter) as f32 / 20.0;
+        let ox = left + margin_left as f32 / 20.0;
         let n = self.layouts.len();
         let end = self.tops[n];
         let page = Rect::new(left, top, pw, ph);
@@ -654,7 +663,7 @@ impl DocView {
         }
         if c.screen() && crate::settings::with(|s| s.text_boundaries) {
             // Preferences > Text Boundaries: the margins, dotted.
-            let tr = left + pw - p.margin_right as f32 / 20.0;
+            let tr = left + pw - margin_right as f32 / 20.0;
             let tb = top + ph - self.page_body_bottom_margin(k);
             c.dotted_hline(ox, tr, top + mt, color::GRAY_DARK);
             c.dotted_hline(ox, tr, tb, color::GRAY_DARK);
@@ -1066,20 +1075,18 @@ impl DocView {
         );
         self.draw_spelling(c, para, l, ox, py);
         if !self.page_view && c.screen() {
-            let face = l.glyphs.last().map(|g| g.face).unwrap_or_default();
             for y in manual_page_break_rule_ys(l, py) {
-                // The break has its own line, so the guide runs the width
-                // of the text area, as a section break's does.
+                // The break has its own line, so the guide runs the width of
+                // the window with a double rule, as a section break's does.
                 draw_break_rule(
                     c,
                     fonts,
                     cache,
-                    face,
-                    ox,
-                    ox + self.para_width(para),
+                    self.area.x + 2.0,
+                    self.area.right(),
                     y,
                     "Page Break",
-                    false,
+                    true,
                 );
             }
         }
@@ -1150,7 +1157,6 @@ mod break_tests {
                 &mut PrintSurface,
                 &fonts,
                 &mut GlyphCache::new(),
-                Default::default(),
                 0.0,
                 400.0,
                 20.0,
@@ -1254,6 +1260,66 @@ mod page_cut_tests {
         let mut s = Shown::default();
         view.draw_page(&mut s, fonts, &mut GlyphCache::new(), false, k, 0.0, 0.0);
         s
+    }
+
+    #[test]
+    fn facing_pages_use_distinct_paper_and_text_origins() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let mut doc = quill_core::text::from_plain_text("X\nX\nX");
+        doc.main.paras[1].pap.page_break_before = true;
+        doc.main.paras[2].pap.page_break_before = true;
+        doc.props.mirror_margins = true;
+        doc.props.margin_left = 2160;
+        doc.props.margin_right = 1440;
+        doc.props.gutter = 360;
+        let mut view = DocView::new(doc, "Facing pages".into());
+        view.area = Rect::new(0.0, 0.0, 1500.0, 700.0);
+        let mut clipboard = crate::docview::Clipboard::without_system();
+        view.exec(crate::commands::Cmd::PageLayoutView, false, &mut clipboard);
+        view.update_layout(&mut fonts);
+        assert_eq!(view.pages.len(), 3);
+        assert!(view.page_top(0) < view.page_top(1));
+        assert_eq!(view.page_top(1), view.page_top(2));
+        assert_eq!(view.page_left(2) - view.page_left(1), view.page_size().0);
+        assert_eq!(view.page_left(0), view.page_left(2));
+
+        // Click the body and header on both sides of the same spread.
+        view.show_page(1);
+        for para in 1..3 {
+            let pos = Position::new(para, 0);
+            let (x, y, h) = view.caret_geometry(pos, false);
+            let (wx, wy) = view.to_window(x, y);
+            assert_eq!(view.hit(wx, wy + h / 2.0).0, pos);
+            assert_eq!(view.page_at_window(wx, wy + h / 2.0), Some(para));
+            let header_y = view.area.y + view.page_top(para) - view.scroll_y + 1.0;
+            assert!(view.header_at(wx, header_y).is_some());
+        }
+
+        // The same page renderer is used by PDF and printing. Even-page
+        // text starts at the outside margin on the left of the paper.
+        let first = page(&view, &fonts, 0).glyphs[0].0;
+        let second = page(&view, &fonts, 1).glyphs[0].0;
+        assert!((first - second - 54.0).abs() < 0.01);
+        // Reopen the saved view in a narrow window. It should start on
+        // page 1, then reveal page 2 when asked to show it.
+        let mut doc = view.doc.clone();
+        doc.props.view = Some(view.current_view());
+        let mut narrow = DocView::new(doc, "Narrow".into());
+        narrow.area = Rect::new(0.0, 0.0, 420.0, 700.0);
+        narrow.open_in_its_view();
+        narrow.update_layout(&mut fonts);
+        assert!(narrow.facing_pages());
+        assert!((0.0..narrow.area.w).contains(&narrow.page_left(0)));
+        narrow.show_page(1);
+        assert!((0.0..narrow.area.w).contains(&narrow.page_left(1)));
+
+        view.doc.props.mirror_margins = false;
+        view.update_layout(&mut fonts);
+        assert!(!view.facing_pages());
+        assert_eq!(view.page_left(1), view.page_left(2));
+        assert!(view.page_top(1) < view.page_top(2));
     }
 
     fn line() -> BorderLine {

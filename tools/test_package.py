@@ -27,6 +27,7 @@ class PackageTests(unittest.TestCase):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"fixture")
+        (self.root / "tools/dmg-readme.txt").write_text("Quill VERSION\n")
         self.output = self.root / "dist"
         self.output.mkdir()
 
@@ -74,6 +75,17 @@ class PackageTests(unittest.TestCase):
                              "LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-NOTICES.txt", "README.md"]:
                     self.assertIn(name, names)
 
+    def assert_claims_nothing(self, info):
+        # Every type is still declared, which the App Sandbox needs before it
+        # allows a backup beside a document, but never as the default app.
+        kinds = info["CFBundleDocumentTypes"]
+        self.assertTrue(kinds)
+        self.assertEqual({k["LSHandlerRank"] for k in kinds}, {"None"})
+        self.assertIs(kinds[-1]["NSIsRelatedItemType"], True)
+        self.assertNotIn("UTExportedTypeDeclarations", info)
+        self.assertEqual([t["UTTypeIdentifier"] for t in info["UTImportedTypeDeclarations"]],
+                         ["com.quillwp.document", "com.quillwp.backup"])
+
     def test_mac_bundle_uses_separate_app_and_document_icons_and_qwp_type(self):
         import plistlib
         executable = Path(self.tmp.name) / "quill"
@@ -92,8 +104,46 @@ class PackageTests(unittest.TestCase):
                          ["com.quillwp.document"])
         native = info["UTExportedTypeDeclarations"][0]["UTTypeTagSpecification"]
         self.assertEqual(native["public.filename-extension"], ["qwp"])
+        # Backups beside a document are Quill's too, as related items.
+        backup = info["CFBundleDocumentTypes"][-1]
+        self.assertIs(backup["NSIsRelatedItemType"], True)
+        self.assertIn("qwp-backup", backup["CFBundleTypeExtensions"])
         for name in ["Quill.icns", "QuillDocument.icns"]:
             self.assertTrue((contents / "Resources" / name).is_file())
+
+    def test_sandbox_build_is_its_own_app_signed_with_the_entitlements(self):
+        import plistlib
+        executable = Path(self.tmp.name) / "quill"
+        executable.write_bytes(b"executable")
+        info = plistlib.loads((package.ROOT / "tools/Info.plist").read_bytes())
+        (self.root / "tools/Info.plist").write_bytes(plistlib.dumps(info))
+        calls = []
+        with patch.object(package, "ROOT", self.root), \
+                patch.object(package, "run", lambda *a, **k: calls.append(a)):
+            for debug, name, ident in [(False, "Quill Sandbox", "com.quillwp.Quill.sandbox"),
+                                       (True, "Quill Debug Sandbox", "com.quillwp.Quill.debug.sandbox")]:
+                app = Path(self.tmp.name) / package.app_name(debug, True)
+                self.assertEqual(app.name, name + ".app")
+                package.mac_app(executable, app, "1.2.3", None, debug, sandbox=True, test_app=True)
+                info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+                self.assertEqual(info["CFBundleIdentifier"], ident)
+                self.assertEqual(info["CFBundleName"], name)
+                self.assert_claims_nothing(info)
+                sign = next(c for c in calls if c[0] == "codesign" and "--force" in c)
+                self.assertEqual(sign[sign.index("--entitlements") + 1],
+                                 str(self.root / "tools/Quill.entitlements"))
+                calls.clear()
+            # Without --sandbox nothing is signed with entitlements.
+            package.mac_app(executable, Path(self.tmp.name) / "Quill.app", "1.2.3", None)
+            self.assertFalse(any("--entitlements" in c for c in calls))
+        # The real file is a property list that turns the sandbox on.
+        real = plistlib.loads((package.ROOT / "tools/Quill.entitlements").read_bytes())
+        self.assertIs(real["com.apple.security.app-sandbox"], True)
+        self.assertNotIn("com.apple.security.network.client", real)
+        # One read-only exception: the Print panel's custom paper sizes.
+        self.assertEqual(real["com.apple.security.temporary-exception.shared-preference.read-only"],
+                         ["com.apple.print.custompapers"])
+        self.assertNotIn("com.apple.security.temporary-exception.shared-preference.read-write", real)
 
     def test_debug_packages_are_a_different_app_from_the_real_one(self):
         import plistlib
@@ -102,10 +152,16 @@ class PackageTests(unittest.TestCase):
         info = plistlib.loads((package.ROOT / "tools/Info.plist").read_bytes())
         (self.root / "tools/Info.plist").write_bytes(plistlib.dumps(info))
 
+        signed = []
+        images = []
+
         def fake_run(*args, **kwargs):
             # hdiutil makes the disk image: its last argument.
             if args and args[0] == "hdiutil" and args[1] == "create":
+                images.append(sorted(p.name for p in Path(args[args.index("-srcfolder") + 1]).iterdir()))
                 Path(args[-1]).write_bytes(b"image")
+            if args and args[0] == "codesign" and "--force" in args:
+                signed.append(args)
 
         with patch.object(package, "ROOT", self.root), patch.object(package, "run", fake_run):
             dmg = package.mac_package(executable, self.output, "1.2.3", "arm64", "-debug", True)
@@ -116,11 +172,23 @@ class PackageTests(unittest.TestCase):
             info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
             self.assertEqual(info["CFBundleIdentifier"], "com.quillwp.Quill.debug")
             self.assertEqual(info["CFBundleName"], "Quill Debug")
-            self.assertNotIn("CFBundleDocumentTypes", info)
+            self.assert_claims_nothing(info)
             # A release package is still Quill.
             package.mac_package(executable, self.output, "1.2.3", "arm64")
             info = plistlib.loads((self.output / "Quill.app/Contents/Info.plist").read_bytes())
             self.assertEqual(info["CFBundleIdentifier"], "com.quillwp.Quill")
+            self.assertEqual(info["CFBundleName"], "Quill")
+            # The release package runs in the App Sandbox; the debug one does not.
+            self.assertEqual(len(signed), 2)
+            self.assertNotIn("--entitlements", signed[0])
+            self.assertEqual(signed[1][signed[1].index("--entitlements") + 1],
+                             str(self.root / "tools/Quill.entitlements"))
+            # Each disk image carries a plain README beside the app, and the
+            # app itself has none.
+            for names in images:
+                self.assertIn("README.txt", names)
+            self.assertFalse((self.output / "Quill.app/Contents/Resources/README.md").exists())
+            self.assertFalse((self.output / "Quill Debug.app/Contents/Resources/README.md").exists())
             # A portable debug package registers nothing for Linux.
             archive = package.portable_package(executable, self.output, "1.2.3", "linux", "aarch64",
                                                "-debug", True)

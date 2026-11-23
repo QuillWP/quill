@@ -15,6 +15,11 @@ shows up as a crash log in the scratch HOME and fails the run.
 --launch also starts the real window for a few seconds (it appears on screen),
 then ends it. Leave it off when you do not want a window to open.
 
+A Mac app signed with the App Sandbox entitlement (package.py --sandbox) may
+only read inside its container, so for it the scratch folder goes in the
+container's tmp folder, and one more check makes sure a document outside the
+container is refused.
+
 Exits 0 when every check passes, 1 otherwise. Needs Python 3.11 or later, as
 package.py does.
 """
@@ -113,6 +118,24 @@ def default_app():
     return max(found, key=os.path.getmtime)
 
 
+def sandbox_container(app):
+    """The data folder of an App Sandbox app's container, or None when the
+    app is not sandboxed. macOS makes the folder the first time the app runs."""
+    if sys.platform != "darwin" or not app.endswith(".app"):
+        return None
+    p = subprocess.run(["codesign", "-d", "--entitlements", "-", "--xml", app],
+                       capture_output=True)
+    try:
+        entitlements = plistlib.loads(p.stdout) if p.stdout.strip() else {}
+        if entitlements.get("com.apple.security.app-sandbox") is not True:
+            return None
+        with open(os.path.join(app, "Contents", "Info.plist"), "rb") as f:
+            bundle_id = plistlib.load(f)["CFBundleIdentifier"]
+    except (OSError, KeyError, plistlib.InvalidFileException) as e:
+        sys.exit(f"smoketest: cannot read the signature of {app}: {e}")
+    return os.path.expanduser(f"~/Library/Containers/{bundle_id}/Data")
+
+
 def repo_version():
     """The workspace version in Cargo.toml, read the way package.py reads it."""
     try:
@@ -195,7 +218,16 @@ def main():
         sys.exit(f"smoketest: cannot run {binary}")
     print(f"Testing {app}")
 
-    scratch = tempfile.mkdtemp(prefix="quill-smoketest-")
+    container = sandbox_container(app)
+    if container:
+        # Running it once makes the container.
+        subprocess.run([binary, "--version"], capture_output=True, timeout=60)
+        if not os.path.isdir(container):
+            sys.exit(f"smoketest: the sandboxed app made no container at {container}")
+        os.makedirs(os.path.join(container, "tmp"), exist_ok=True)
+        print("Sandboxed: the scratch folder is in its container")
+    scratch = tempfile.mkdtemp(prefix="quill-smoketest-",
+                               dir=os.path.join(container, "tmp") if container else None)
     home = os.path.join(scratch, "home")
     docs = os.path.join(scratch, "docs")
     out = os.path.join(scratch, "out")
@@ -249,6 +281,17 @@ def main():
         if blank and png:
             same = open(blank, "rb").read() == open(png, "rb").read()
             r.check(f"{name} shows its text", not same)
+
+    if container:
+        print("Sandbox")
+        outside = tempfile.mkdtemp(prefix="quill-smoketest-outside-")
+        try:
+            path = write_samples(outside)[0]
+            png, why = snapshot("outside", ["--open", path])
+            r.check("a document outside the container is refused",
+                    png is None and "not permitted" in why, why or "it opened")
+        finally:
+            shutil.rmtree(outside, ignore_errors=True)
 
     if args.launch:
         print("Real window")

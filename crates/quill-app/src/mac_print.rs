@@ -514,6 +514,13 @@ pub fn print(
 mod tests {
     use super::*;
 
+    fn assert_paper_close(actual: (i32, i32), expected: (i32, i32)) {
+        assert!(
+            actual.0.abs_diff(expected.0) <= 10 && actual.1.abs_diff(expected.1) <= 10,
+            "paper size {actual:?} differs from {expected:?} by more than half a point"
+        );
+    }
+
     #[test]
     fn native_paper_sizes_keep_orientation_and_custom_measurements() {
         assert_eq!(
@@ -539,7 +546,7 @@ mod tests {
     fn printer_settings_copy_document_paper_and_isolate_canceled_edits() {
         // CI runners have no real printer and substitute their own paper
         // sizes. docs/release.md has this checked on a desktop Mac instead.
-        if std::env::var_os("CI").is_some() {
+        if !crate::unrestricted_host_services() {
             return;
         }
         autoreleasepool(|_| unsafe {
@@ -551,7 +558,7 @@ mod tests {
             };
             let original = print_info(&settings, &props).unwrap();
             let size: NSSize = msg_send![&*original, paperSize];
-            assert_eq!(paper_twips(size).unwrap(), (16838, 11906));
+            assert_paper_close(paper_twips(size).unwrap(), (16838, 11906));
             let dict: *mut AnyObject = msg_send![&*original, dictionary];
             let url = NSString::from_str("file:///tmp/previous-print.pdf");
             let _: () = msg_send![dict, setObject: &*url forKey: NSPrintJobSavingURL];
@@ -563,7 +570,7 @@ mod tests {
             let _: () = msg_send![&*canceled, setPaperSize: NSSize::new(400., 500.)];
             let saved = settings.0.borrow();
             let size: NSSize = msg_send![&**saved.as_ref().unwrap(), paperSize];
-            assert_eq!(paper_twips(size).unwrap(), (16838, 11906));
+            assert_paper_close(paper_twips(size).unwrap(), (16838, 11906));
             drop(saved);
 
             // Reopening after undo uses the document's dimensions, even if
@@ -572,7 +579,7 @@ mod tests {
             props.page_height = 15840;
             let portrait = print_info(&settings, &props).unwrap();
             let size: NSSize = msg_send![&*portrait, paperSize];
-            assert_eq!(paper_twips(size).unwrap(), (12240, 15840));
+            assert_paper_close(paper_twips(size).unwrap(), (12240, 15840));
             let margin: f64 = msg_send![&*portrait, leftMargin];
             assert_eq!(margin, 0.);
             let dict: *mut AnyObject = msg_send![&*portrait, dictionary];

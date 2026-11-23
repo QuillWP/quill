@@ -115,3 +115,10 @@ path = "fuzz_targets/markdown.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sections"
+path = "fuzz_targets/sections.rs"
+test = false
+doc = false
+bench = false

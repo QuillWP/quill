@@ -77,16 +77,33 @@ pub enum Progress {
     Done(Box<Outcome>),
 }
 
+/// The file `name` names: as it is when absolute, else in `base`.
+fn named_file(base: Option<&std::path::Path>, name: &str) -> PathBuf {
+    let named = PathBuf::from(name);
+    if named.is_absolute() {
+        named
+    } else {
+        base.map_or(named.clone(), |dir| dir.join(&named))
+    }
+}
+
+/// In the App Sandbox Quill may not read a file the person did not choose.
+/// When the file `name` names is refused, ask once to be let into its
+/// folder, saying Quill needs it to `purpose` it.
+fn reach(base: Option<&std::path::Path>, name: &str, purpose: &str) {
+    let path = named_file(base, name);
+    if let Err(error) = std::fs::File::open(&path)
+        && error.kind() == std::io::ErrorKind::PermissionDenied
+    {
+        crate::folder_access::ask_for_folder_of(&path, purpose);
+    }
+}
+
 fn named_path(
     base: Option<&std::path::Path>,
     name: &str,
 ) -> Result<(PathBuf, bool), std::io::Error> {
-    let named = PathBuf::from(name);
-    let path = if named.is_absolute() {
-        named
-    } else {
-        base.map_or(named.clone(), |dir| dir.join(&named))
-    };
+    let path = named_file(base, name);
     let real = path.canonicalize()?;
     let inside = base
         .and_then(|folder| folder.canonicalize().ok())
@@ -118,6 +135,7 @@ pub fn data_for(view: &DocView) -> Result<(String, Data), String> {
         return Err("This document has no DATA instruction. Use View > Print Merge Helper to choose a data document.".into());
     };
     let base = view.path.as_ref().and_then(|p| p.parent());
+    reach(base, &name, "read the merge data");
     let (path, outside) = named_path(base, &name)
         .map_err(|e| format!("The data document “{name}” could not be opened: {e}"))?;
     if outside && !allow_outside("DATA", &name, &path) {
@@ -165,6 +183,7 @@ fn load_include(
     name: &str,
     outside_files: &mut HashMap<PathBuf, bool>,
 ) -> Result<Document, String> {
+    reach(base, name, "read the included document");
     let (path, outside) = named_path(base, name)
         .map_err(|error| format!("The included document “{name}” could not be opened: {error}"))?;
     if outside {

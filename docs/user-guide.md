@@ -4,8 +4,18 @@ Quill is inspired by Lucas's favorite word processor from 1992. It is built
 in Rust for the Mac, and a Windows build is on its way.
 The website is [quillwp.com](https://quillwp.com).
 Documents use `.qwp`.
-Alpha builds do not import earlier versions' settings, dictionary or
+Beta builds do not import earlier versions' settings, dictionary or
 document recovery files.
+
+The regular Mac app runs in the App Sandbox, Apple's way of limiting an app to
+what you give it, and the apps you build from source do not (see Building
+below). The sandboxed app opens and saves only the documents
+you choose, and keeps its settings, recovery files and crash log in its own
+folder, `~/Library/Containers/com.quillwp.Quill/Data/Library/Preferences/`.
+Quill remembers the documents and folders you chose, so Open Recent and
+reopening work after a restart. A Markdown file's pictures and a Print Merge
+data document sit beside the document in a folder you did not choose, so the
+first time Quill needs one it asks you to allow that folder, once.
 
 The original offered styles, tables, frames, pictures, footnotes, headers and
 footers, outlines, tables of contents and indexes in a 914 KB program that
@@ -36,7 +46,10 @@ headers/footers, section columns, positioned frames, image cropping, print-merge
 behavior, and other advanced layout settings are not reproduced. HTML page/date/time
 fields are placeholders, and browser printing can paginate differently from Quill.
 
-Markdown (.md, .markdown) opens and saves. It carries headings 1 to 6, bold, italic,
+Markdown (.md, .markdown) opens, and a Markdown file you opened saves as itself with Save.
+Saving a document as Markdown is on hold, so Save As does not offer it: turning a
+formatted document into a Markdown window loses its fonts and more, and that needs a
+better design first. Markdown carries headings 1 to 6, bold, italic,
 strikethrough, links, bulleted and numbered lists, block quotes, code, rules, tables
 (with column alignment) and pictures; underline, superscript and subscript are written
 as the HTML tags <u>, <sup> and <sub>. Bullets and numbers are typed text in Quill, so a
@@ -49,15 +62,12 @@ that the Markdown links to on the web stays a link to it, and web addresses in t
 become links when the file is opened. Pictures beside the file or in a folder under it
 load on their own. If the file names pictures anywhere else, Quill leaves them out and asks
 once whether to load them; Don't Load is the default, and Show Paths lists the files. Loading
-copies the pictures into the document, so load them only from files you trust. In Source view
-the pictures stay inside the text.
-Saving as Markdown first lists
-what the file cannot carry (fonts, colors, page layout, headers and footers, footnotes,
-comments, tracked changes, tab stops, frames and the like) and lets you cancel; the
-document you are editing keeps them. View > Markdown > Source shows the document as
-Markdown text to edit; View > Markdown > WYSIWYG shows it formatted. Going back to
-WYSIWYG without changing the text gives the document back exactly; after editing the text, the
-document is rebuilt from it.
+copies the pictures into the document, so load them only from files you trust.
+Saving a Markdown file you opened first lists what the file cannot carry (fonts, colors, page
+layout, headers and footers, footnotes, comments, tracked changes, tab stops, frames and the
+like) and lets you cancel; the document you are editing keeps them. The Source and WYSIWYG
+views (a Markdown file as its text, and formatted again) are on hold along with saving as
+Markdown, so no menu offers them for now.
 
 Paste puts text only into a Markdown file, in either view: the copied text's fonts and pictures
 are not brought along. In a Markdown file, Return carries on a numbered list with the next
@@ -203,8 +213,9 @@ and for the main text Quill selects the first paragraph that came back different
 retyping it or removing its formatting may let the document save. Save Anyway
 saves the document as Quill reads it back, so the file still opens, and the window
 then shows what it holds. Undo takes that change back, except when fonts or
-pictures changed, which the message says first. The file as it was is kept as
-"Backup of" its name, even when backups are turned off. A document this large is too big for the ODT and HTML exports, which
+pictures changed, which the message says first. The file as it was is kept
+beside it with "-backup" after its extension (Report.qwp-backup), even when
+backups are turned off. A document this large is too big for the ODT and HTML exports, which
 say so.
 
 Measurements a file can't sensibly mean, such as margins wider than the page, are
@@ -251,6 +262,11 @@ Open And Save includes “Save foreign files in Quill format by default”, enab
 recommended. On the first Save of an imported document this opens Save As for a
 `.qwp` copy. Turning it off permits normal Save back to the imported format; an
 explicit format chosen in Save As is respected on subsequent saves.
+Always Make Backup, also in Open And Save, keeps the version a save replaces
+beside the document, with "-backup" after its extension: Report.qwp-backup,
+Report.docx-backup. Each save replaces the backup with the version before it.
+A backup opens in Quill like the document it copies; Save As offers its
+original name.
 
 General > Start Lists from a Typed * or - is on by default. With it, typing `* ` or `- ` at
 the start of a paragraph makes a bulleted or dashed list, and Undo gives back what was typed.
@@ -264,6 +280,29 @@ Mac's system font) are left out of the font menus unless Preferences > Fonts > S
 Fonts is on. Text copied from a Mac app in one of them pastes in that font, after a warning that
 the font will not be available on other computers. A font that is not installed shows in the default font, is marked by
 View > Highlight Missing Fonts and stays in the document, so Replace Missing Fonts can still replace it.
+
+## Facing pages
+
+Facing pages is a setting of the document. Choose **File → Document Setup** and
+enable **Facing Pages** to set **Inside** and **Outside** margins in place of
+Left and Right. The gutter adds space to the inside edge on every page. The
+margins apply in Page Layout and print output. New documents start with facing
+pages off.
+
+While the document uses facing pages, **View → Page Layout** shows the first
+page on the right and the later pages in pairs. **View → Fill Horizontally**
+fits the pair to the document pane. With facing pages off, Page Layout is a
+single column of pages. Quill documents remember the view when saved.
+
+Turning facing pages off makes the two margins equal, with the gutter added to
+them, so the text keeps its width and does not reflow.
+
+## Hidden text
+
+**View → Hidden Text** shows text formatted as hidden. While it is on, hidden
+text also prints and saves into a PDF. Turn it off to hide the text again and
+leave it out of the printout. The choice belongs to the program, not to a
+document.
 
 ## Platform interface
 
@@ -422,6 +461,10 @@ edit the entry names, then choose Update Table of Contents to make it live again
 The matching headings change together as one Undo step. Subsequent heading edits
 continue updating the live contents.
 
+Insert > Table of Contents puts the contents at the insertion point, in a section of its own,
+so a cover page or title page can come before it. The text before it ends one section and the
+text after it starts another, and choosing it again replaces the contents already there.
+
 Insert > TOC Entry marks selected text, as Word's Mark Table of Contents Entry does,
 so a table of contents lists it, among the headings, when its TOC Entries box is ticked
 (Headings and TOC Entries are separate boxes, and both are on by default). Insert > Index
@@ -487,11 +530,33 @@ that interface is Light, Dark or Auto.
     python3 tools/package.py --debug    # a debug build, in target/debug/Quill Debug.app
                                         # (on Linux, the program target/debug/quill-debug)
     python3 tools/package.py --dist     # the disk image to share, in dist/
+    python3 tools/package.py --sandbox  # a separate App Sandbox test app
     python3 tools/footprint.py          # sizes and memory against the budget
+    python3 tools/smoketest.py          # a quick check of a build, offscreen
+    python3 tools/overnight.py --until 06:00   # the overnight tests
 
 The debug build is a separate program from Quill, with its own settings and
 recovery files under the "Quill Debug" profile. On Linux it is called `quill-debug`,
 and its debug package does not install itself as Quill.
+
+On the Mac, the release package `--dist` makes (the regular Quill) runs in the
+App Sandbox. The debug package (`--dist --debug`) does not, so testers can
+reach its settings and crash log in `~/Library/Preferences/`. The apps built
+beside the source do not either, so tests can run them with a home folder of their
+own; `--sandbox` adds a separate sandboxed test app, Quill Sandbox.app (or
+Quill Debug Sandbox.app), with its own container.
+
+`tools/overnight.py` is the overnight test run: formatting, clippy and every
+test, the debug app rebuilt and smoke tested, then every document in a folder of
+test documents (`test-documents/` beside the repository, or `--corpus`) opened
+as the app opens it, each with a time and memory limit, and a sample again in
+the debug build. Each run keeps a report in `tests/overnight/runs/`, starting
+with what got worse since the run before, and adds new failures to
+`overnight-test-fails.md` beside the repository. `--pause`, `--resume`, `--stop`
+and `--status` control a run in progress, and `--print-schedule` prints a
+launchd agent to start it every night. With `QUILL_OVERNIGHT_MAIL` set (and a
+password in the keychain, as `tools/overnight_mail.py` describes), it sends a
+message when a run starts and when it ends; that file only sends mail.
 
 On Linux, Quill opens its windows through X11 whenever it can, which on a Wayland
 desktop means XWayland. There the desktop draws the title bar in its own theme and

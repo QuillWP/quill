@@ -12,6 +12,7 @@ const MAX_CLIP_TEXT: usize = quill_core::limits::MAX_CHARACTERS;
 const MAX_CLIP_HTML: usize = 8 << 20;
 
 /// What a paste brings in.
+#[cfg_attr(test, derive(Clone))]
 pub enum Clip {
     /// Copied inside Quill, with formatting.
     Rich(RichContent),
@@ -39,6 +40,8 @@ pub struct Clipboard {
     system: Option<arboard::Clipboard>,
     rich: Option<Cached>,
     local_text: Option<String>,
+    #[cfg(test)]
+    test_clip: Option<Clip>,
 }
 
 struct Cached {
@@ -69,6 +72,8 @@ impl Clipboard {
             },
             rich: None,
             local_text: None,
+            #[cfg(test)]
+            test_clip: None,
         }
     }
 
@@ -80,6 +85,23 @@ impl Clipboard {
             system: None,
             rich: None,
             local_text: None,
+            test_clip: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_test_picture(bytes: Vec<u8>) -> Self {
+        Self {
+            test_clip: Some(Clip::Picture(bytes)),
+            ..Self::without_system()
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_test_external_text(doc: Document) -> Self {
+        Self {
+            test_clip: Some(Clip::Rich(RichContent::from_document(doc, None))),
+            ..Self::without_system()
         }
     }
 
@@ -129,6 +151,10 @@ impl Clipboard {
     }
 
     pub fn put_text(&mut self, text: &str) {
+        #[cfg(test)]
+        {
+            self.test_clip = None;
+        }
         if let Some(system) = &mut self.system {
             let _ = system.set_text(text.to_string());
         }
@@ -137,6 +163,10 @@ impl Clipboard {
     }
 
     pub fn put(&mut self, source: &Document, frag: Fragment) {
+        #[cfg(test)]
+        {
+            self.test_clip = None;
+        }
         // What is copied is the text with its tracked changes accepted:
         // other programs can't show them, and Quill's own paste would drop
         // them anyway.
@@ -189,6 +219,10 @@ impl Clipboard {
     /// Our own fragment if the system clipboard still holds what we put
     /// there, otherwise whatever text another application copied.
     pub fn get(&mut self) -> Option<Clip> {
+        #[cfg(test)]
+        if let Some(clip) = &self.test_clip {
+            return Some(clip.clone());
+        }
         if self.system.is_none() {
             return self
                 .rich
@@ -243,14 +277,13 @@ impl Clipboard {
         self.system
             .as_mut()
             .and_then(|s| s.get_text().ok())
-            .filter(|t| t.len() <= MAX_CLIP_TEXT)
-            .or_else(|| {
-                self.get().map(|c| match c {
-                    Clip::Plain(s) => s,
-                    Clip::Rich(r) => r.fragment.plain_text(),
-                    Clip::Picture(_) => String::new(),
-                })
+            .filter(|t| !t.is_empty() && t.len() <= MAX_CLIP_TEXT)
+            .or_else(|| match self.get()? {
+                Clip::Plain(s) => Some(s),
+                Clip::Rich(r) => Some(r.fragment.plain_text()),
+                Clip::Picture(_) => None,
             })
+            .filter(|t| !t.is_empty())
     }
 }
 

@@ -507,9 +507,9 @@ impl NumFormat {
             Numeral::UpperRoman
         } else if body.chars().all(|c| "ivxlcdm".contains(c)) && body != "d" && body != "c" {
             Numeral::LowerRoman
-        } else if body.len() == 1 && body.chars().all(|c| c.is_ascii_uppercase()) {
+        } else if body.chars().all(|c| c.is_ascii_uppercase()) {
             Numeral::UpperLetter
-        } else if body.len() == 1 && body.chars().all(|c| c.is_ascii_lowercase()) {
+        } else if body.chars().all(|c| c.is_ascii_lowercase()) {
             Numeral::LowerLetter
         } else {
             return None;
@@ -555,8 +555,8 @@ fn roman(mut n: u32) -> String {
     out
 }
 
-fn letters(mut n: u32) -> String {
-    // 1 is a, 26 is z, 27 is aa.
+/// Alphabetic numbering: 1 is a, 26 is z, 27 is aa.
+pub fn alphabetic_number(mut n: u32) -> String {
     let mut out = Vec::new();
     while n > 0 {
         n -= 1;
@@ -569,8 +569,8 @@ fn letters(mut n: u32) -> String {
 fn numeral(kind: Numeral, n: u32) -> String {
     match kind {
         Numeral::Arabic => n.to_string(),
-        Numeral::LowerLetter => letters(n),
-        Numeral::UpperLetter => letters(n).to_uppercase(),
+        Numeral::LowerLetter => alphabetic_number(n),
+        Numeral::UpperLetter => alphabetic_number(n).to_uppercase(),
         Numeral::LowerRoman if n <= 3_999 => roman(n),
         Numeral::UpperRoman if n <= 3_999 => roman(n).to_uppercase(),
         Numeral::LowerRoman | Numeral::UpperRoman => n.to_string(),
@@ -589,7 +589,7 @@ pub fn leading_number(text: &str) -> Option<(usize, &str)> {
     let body_start = i;
     while i < b.len()
         && (b[i].is_ascii_alphanumeric()
-            || (b[i] == b'.' && i + 1 < b.len() && b[i + 1].is_ascii_digit()))
+            || (b[i] == b'.' && i + 1 < b.len() && b[i + 1].is_ascii_alphanumeric()))
     {
         i += 1;
     }
@@ -600,15 +600,23 @@ pub fn leading_number(text: &str) -> Option<(usize, &str)> {
     let numeric = body.chars().all(|c| c.is_ascii_digit() || c == '.');
     let single_letter = body.len() == 1 && body.chars().all(|c| c.is_ascii_alphabetic());
     let roman = body.chars().all(|c| "ivxlcdmIVXLCDM".contains(c));
-    if !(numeric || single_letter || roman) {
-        return None;
-    }
     let mut punct = false;
     while i < b.len() && matches!(b[i], b'.' | b')' | b']' | b':') {
         i += 1;
         punct = true;
     }
     let number_end = i;
+    // Multi-letter labels use a tab, so "See. Next paragraph" is prose.
+    let alphabetic = body.len() > 1
+        && b.get(i) == Some(&b'\t')
+        // Even at the largest start and document size, each level needs
+        // at most four letters. Leave longer words alone.
+        && body.split('.').all(|part| part.len() <= 4)
+        && (body.bytes().all(|c| c.is_ascii_lowercase() || c == b'.')
+            || body.bytes().all(|c| c.is_ascii_uppercase() || c == b'.'));
+    if !(numeric || single_letter || roman || alphabetic) {
+        return None;
+    }
     match b.get(i) {
         Some(b'\t') => {}
         Some(b' ') if punct => {}
@@ -712,7 +720,15 @@ pub fn renumber(doc: &mut Document, story: StoryId, first: usize, last: usize, o
             } else {
                 fmt.write(counters[0])
             };
-            q.insert(0, &format!("{number}{sep}"), chp);
+            let mut label = format!("{number}{sep}");
+            if matches!(fmt.numeral, Numeral::LowerLetter | Numeral::UpperLetter)
+                && sep == " "
+                && leading_number(&label).is_none()
+            {
+                label.pop();
+                label.push(chars::TAB);
+            }
+            q.insert(0, &label, chp);
         }
         new.push(q);
     }
@@ -960,11 +976,39 @@ mod tests {
     }
 
     #[test]
+    fn alphabetic_renumber_can_reuse_and_remove_labels_past_z() {
+        let mut doc = crate::text::from_plain_text("one\na. two\nthree\nSee. This is prose.");
+        let mut options = Renumber {
+            only_numbered: false,
+            start: 26,
+            format: "a.".into(),
+            numbers: Numbers::Plain,
+        };
+        renumber(&mut doc, StoryId::Main, 0, 2, &options);
+        assert_eq!(doc.main.paras[0].text, "z.\tone");
+        assert_eq!(doc.main.paras[1].text, "aa.\ttwo");
+        assert_eq!(doc.main.paras[2].text, "ab.\tthree");
+        options.start = 28;
+        options.format.clear();
+        options.only_numbered = true;
+        options.numbers = Numbers::ByExample;
+        renumber(&mut doc, StoryId::Main, 1, 3, &options);
+        assert_eq!(doc.main.paras[1].text, "ab.\ttwo");
+        assert_eq!(doc.main.paras[2].text, "ac.\tthree");
+        options.numbers = Numbers::Remove;
+        renumber(&mut doc, StoryId::Main, 0, 3, &options);
+        let labels: Vec<_> = doc.main.paras.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(labels, ["one", "two", "three", "See. This is prose."]);
+    }
+
+    #[test]
     fn finds_leading_numbers() {
         assert_eq!(leading_number("1.\tOne"), Some((3, "1.")));
         assert_eq!(leading_number("(a) Two"), Some((4, "(a)")));
         assert_eq!(leading_number("2.3\tThree"), Some((4, "2.3")));
         assert_eq!(leading_number("IV) Four"), Some((4, "IV)")));
+        assert_eq!(leading_number("a.aa.\tFive"), Some((6, "a.aa.")));
+        assert_eq!(leading_number("CHAPTER:\tFive"), None);
         assert_eq!(leading_number("I think"), None);
         assert_eq!(leading_number("Hello"), None);
         assert_eq!(leading_number("12 apples"), None);

@@ -6,6 +6,80 @@ I add a new release version, just to keep things readable.
 Versions 0.1.0 to 0.14.0 all share the same commit date, 2026-11-05, because
 that is when the public repository was created.
 
+## 0.30.0 - 2026-11-22
+
+**0.30.0 starts with fresh settings.** The regular Mac build now runs in
+Apple's App Sandbox, which stores preferences in a new location. Your documents
+stay where they are. Your preferences, recent documents and saved author name
+start over in the sandboxed build.
+
+This is Quill's first beta. The native QWP format may still change during the
+beta. TestFlight is planned.
+
+### Mac sandbox and file handling
+
+- The regular Mac download uses the App Sandbox and opens and saves documents
+  you choose. Quill runs offline. The debug package and ordinary source builds
+  run outside the sandbox.
+- Quill remembers access to documents you choose, so Open Recent and reopening
+  documents can work after you quit and relaunch.
+- Save replaces the old file using the system's replacement folder. With
+  backups enabled, the previous version is kept beside it as
+  `Report.qwp-backup`. You can open the backup in Quill.
+- Quill asks for folder access when the sandbox blocks access to pictures
+  alongside a Markdown document or to files needed for Print Merge.
+- The Mac Save panel uses the extensions for the selected format. Links open
+  through macOS, and custom paper sizes from the Print panel are available
+  in the sandbox.
+- Developers can use `tools/package.py --sandbox` for a separate sandboxed
+  test build.
+
+### Pages, sections and printing
+
+- Facing-page spreads support mirrored inside and outside margins and a gutter.
+  Document Setup offers system paper sizes, including custom sizes.
+- Widow control is a paragraph setting. Print-specific options are in the
+  Print panel, and View > Hidden Text controls whether hidden text is shown
+  on screen and in print.
+- Insert offers section breaks by type. Right-click an existing section break
+  to change its type. Normal view has updated page and section break guides,
+  with break labels drawn in the interface font.
+- Insert Table of Contents places it at the insertion point. Quill refuses
+  to insert it inside a table.
+
+### Editing and format fixes
+
+- Quill checks headers and footers owned by individual sections when looking
+  for missing fonts, normalizing imported PostScript font names, collecting
+  document colors and warning about settings Word may lose on resave.
+- DOCX Save As checks the formatted document it will write. Quill remembers
+  a Markdown formatting-loss warning only after a successful save, and a
+  picture-folder prompt is limited to failures accessing that folder.
+- Paste Special uses the same dialog in the app and in scripted checks.
+  Paste command handling and alphabetic list numbering also received fixes.
+- RTF preserves control characters in font names. Blank paragraphs no longer
+  contribute to the paragraph count. Files with thousands of character
+  styles open in linear time.
+
+### Known issues and availability
+
+- If inserting a page break in Page Layout has no effect, switch to Normal
+  view to insert it, then return to Page Layout.
+- Markdown Save As and the Markdown Source and WYSIWYG view commands are on
+  hold. Existing Markdown files still open formatted and can be saved back
+  to their original files.
+- This release provides Apple Silicon and Intel Mac disk images, each with a
+  regular and a debug build. The Intel builds were cross-compiled and have
+  not been tested on Intel hardware. There are no Windows or Linux packages.
+
+### Testing tools
+
+- The overnight runner runs the project checks, opens a folder of test
+  documents under time and memory limits, and fuzzes for the rest of the run.
+  Its report distinguishes slow inputs from failures.
+- Snapshot scripts can save documents, giving scripted checks a way to
+  exercise both editing and writing files.
+
 ## 0.25.1 - 2026-11-19
 
 A patch release with fixes from a review of the 0.25.0 code: links that were

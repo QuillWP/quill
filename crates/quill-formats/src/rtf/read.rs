@@ -164,6 +164,8 @@ struct Reader {
     style_character: bool,
     character_mask: u16,
     character_ids: HashMap<i32, u16>,
+    /// Names of the character styles defined so far.
+    character_names: quill_core::character_styles::CharacterNames,
     character_raw: HashMap<i32, (Option<i32>, quill_core::character_styles::CharacterFormat)>,
     style_based: Option<i32>,
     style_next: Option<i32>,
@@ -273,6 +275,7 @@ fn read_into(data: &[u8], report: &mut ImportReport) -> Result<Document, String>
     }
     let doc = Document::new();
     let normal = doc.styles.get(0).clone();
+    let character_names = quill_core::character_styles::CharacterNames::of(&doc.styles);
     let mut r = Reader {
         sec: SectionProps::default(),
         note: None,
@@ -344,6 +347,7 @@ fn read_into(data: &[u8], report: &mut ImportReport) -> Result<Document, String>
         style_character: false,
         character_mask: 0,
         character_ids: HashMap::new(),
+        character_names,
         character_raw: HashMap::new(),
         style_based: None,
         style_next: None,
@@ -993,7 +997,10 @@ impl Reader {
                         self.st.chp,
                         self.character_mask,
                     );
-                    if let Some(id) = self.doc.styles.add_character(&name, format) {
+                    if let Some(id) = self
+                        .character_names
+                        .add(&mut self.doc.styles, &name, format)
+                    {
                         self.character_ids.insert(self.style_num, id);
                         self.character_raw
                             .insert(self.style_num, (self.style_based, format));
@@ -1683,9 +1690,7 @@ impl Reader {
                     _ => None,
                 }
             }
-            "widowctrl" => self.doc.props.widow_control = on,
             "margmirror" => self.doc.props.mirror_margins = true,
-            "printhidden" => self.doc.props.print_hidden = on,
             "facingp" => self.doc.props.even_odd_headers = on,
             // Paragraph structure.
             "par" => {
@@ -1940,6 +1945,8 @@ impl Reader {
                 }
             }
             "keep" => self.pap_mut().keep_together = true,
+            "widctlpar" => self.pap_mut().widow_control = true,
+            "nowidctlpar" => self.pap_mut().widow_control = false,
             "pagebb" => self.pap_mut().page_break_before = true,
             "noline" => self.pap_mut().suppress_line_numbers = true,
             "tqc" => self.st.tab_align = TabAlign::Center,
@@ -2475,6 +2482,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn many_character_styles_read_quickly() {
+        // Found by fuzzing: an .odt file with 8,400 character styles took 45
+        // seconds, because each new name was checked against every style
+        // before it. Every reader that defines character styles did that.
+        let mut rtf = String::from("{\\rtf1{\\stylesheet");
+        for n in 0..60_000 {
+            rtf.push_str(&format!("{{\\*\\cs{n} Style {n};}}"));
+        }
+        // The same name again in other case is a duplicate, not a new style.
+        rtf.push_str("{\\*\\cs60000 STYLE 7;}}x}");
+        let started = std::time::Instant::now();
+        let doc = read(rtf.as_bytes()).unwrap();
+        assert_eq!(doc.styles.characters.len(), 60_000);
+        assert_eq!(doc.styles.find_character("style 59999"), Some(60_000));
+        // Over a minute before, in a debug build; about a second now.
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    }
+
+    #[test]
     fn a_late_style_sheet_does_not_take_the_text_character_style() {
         // Found by fuzzing: body text in a character style with bold of its
         // own, then a style sheet. The paragraph style made there took the
@@ -2569,13 +2595,18 @@ mod tests {
     }
 
     #[test]
-    fn font_names_with_semicolons_and_other_scripts_survive_saving() {
+    fn font_names_with_semicolons_controls_and_other_scripts_survive_saving() {
         let mut doc = quill_core::text::from_plain_text("x");
         let font = doc.font_id("Times New Roman;Serif");
         doc.main.paras[0].runs[0].chp.font = font;
         let back = read(&crate::rtf::write(&doc)).unwrap();
         let chp = back.main.paras[0].chp_of_char(0);
         assert_eq!(back.font_name(chp.font), "Times New Roman;Serif");
+        let mut doc = quill_core::text::from_plain_text("x");
+        doc.main.paras[0].runs[0].chp.font = doc.font_id("Wingdi\nngs");
+        let back = read(&crate::rtf::write(&doc)).unwrap();
+        let chp = back.main.paras[0].chp_of_char(0);
+        assert_eq!(back.font_name(chp.font), "Wingdi\nngs");
         let mut doc = quill_core::text::from_plain_text("x");
         doc.main.paras[0].runs[0].chp.font = doc.font_id("ＭＳ 明朝");
         let back = read(&crate::rtf::write(&doc)).unwrap();

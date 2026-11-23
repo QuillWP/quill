@@ -15,6 +15,10 @@ fn status_counts_refresh_with_main_text_layout() {
     view.update_layout(&mut fonts);
     assert_eq!(view.status_count.paragraphs, 2);
     assert_eq!(view.status_count.characters, 14);
+    view.exec(Cmd::NewParagraph, false, &mut Clipboard::new());
+    view.type_text("   \t");
+    view.update_layout(&mut fonts);
+    assert_eq!(view.status_count.paragraphs, 2);
 }
 
 #[cfg(target_os = "macos")]
@@ -193,6 +197,22 @@ fn hostile_text_and_extreme_settings_survive_layout_editing_and_saving() {
             let _ = std::fs::remove_file(&path);
         }
     }
+}
+
+#[test]
+fn paste_as_text_with_only_a_picture_preserves_the_selection() {
+    let doc = quill_core::text::from_plain_text("Keep these words");
+    let mut view = DocView::new(doc, "Paste as Text".into());
+    let sel = Selection::new(Position::new(0, 0), Position::new(0, 4));
+    view.set_selection(sel);
+    let png = include_bytes!("../../../../assets/quill-64.png");
+    let mut clip = Clipboard::with_test_picture(png.to_vec());
+
+    view.exec(crate::commands::Cmd::PasteText, false, &mut clip);
+
+    assert_eq!(view.doc.main.paras[0].text, "Keep these words");
+    assert_eq!(view.sel, sel);
+    assert!(view.doc.undo_label().is_none());
 }
 
 #[test]
@@ -1428,7 +1448,15 @@ fn a_break_in_a_table_cell_is_refused_with_a_reason() {
     let mut v = with_table(&mut clip);
     let before = v.doc.main.paras.clone();
     v.sel = Selection::caret(Position::new(1, 1));
-    for cmd in [Cmd::PageBreak, Cmd::SectionBreak] {
+    for cmd in [
+        Cmd::PageBreak,
+        Cmd::SectionBreak,
+        Cmd::SectionBreakNextPage,
+        Cmd::SectionBreakContinuous,
+        Cmd::SectionBreakOddPage,
+        Cmd::SectionBreakEvenPage,
+        Cmd::InsertToc,
+    ] {
         v.status = None;
         v.exec(cmd, false, &mut clip);
         assert_eq!(v.doc.main.paras, before);
@@ -1557,4 +1585,24 @@ fn return_elsewhere_in_a_first_table_still_splits_the_cell() {
     assert_eq!(view.doc.main.paras.len(), count + 1);
     assert!(view.doc.main.paras[0].pap.in_table);
     assert_eq!(view.doc.main.paras[0].text, "a");
+}
+
+#[test]
+fn hidden_text_prints_exactly_when_view_hidden_text_shows_it() {
+    let was = crate::settings::with(|s| s.show_hidden);
+    let mut printing = DocView::new(Document::new(), "T".into()).into_print();
+    let mut screen = DocView::new(Document::new(), "T".into());
+    crate::settings::update(|s| s.show_hidden = false);
+    assert!(!printing.options().show_hidden);
+    assert!(!screen.options().show_hidden);
+    crate::settings::update(|s| s.show_hidden = true);
+    assert!(printing.options().show_hidden);
+    assert!(screen.options().show_hidden);
+    // Show ¶ shows hidden text on screen, but a printout never does for it.
+    crate::settings::update(|s| s.show_hidden = false);
+    screen.show_marks = true;
+    printing.show_marks = true;
+    assert!(screen.options().show_hidden);
+    assert!(!printing.options().show_hidden);
+    crate::settings::update(|s| s.show_hidden = was);
 }

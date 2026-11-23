@@ -206,6 +206,15 @@ commands! {
     LineBreak,
     PageBreak,
     SectionBreak,
+    SectionBreakNextPage,
+    SectionBreakContinuous,
+    SectionBreakOddPage,
+    SectionBreakEvenPage,
+    /// Right-click on a section break: change the kind it makes.
+    ChangeBreakNextPage,
+    ChangeBreakContinuous,
+    ChangeBreakOddPage,
+    ChangeBreakEvenPage,
     InsertFootnote,
     ViewFootnotes,
     /// Format > Picture…: the selected picture's size and crop.
@@ -492,6 +501,14 @@ impl Cmd {
             LineBreak => "Line Break",
             PageBreak => "Page Break",
             SectionBreak => "Section Break",
+            SectionBreakNextPage => "Section Break (Next Page)",
+            SectionBreakContinuous => "Section Break (Continuous)",
+            SectionBreakOddPage => "Section Break (Odd Page)",
+            SectionBreakEvenPage => "Section Break (Even Page)",
+            ChangeBreakNextPage => "Next Page",
+            ChangeBreakContinuous => "Continuous",
+            ChangeBreakOddPage => "Odd Page",
+            ChangeBreakEvenPage => "Even Page",
             InsertFootnote => "Footnote…",
             PictureProperties => "Picture…",
             CropInPlace => "Crop in Place",
@@ -602,6 +619,22 @@ pub fn describe(cmd: Cmd) -> String {
         Underline => "Underlines the selection (toggle).",
         PageBreak => "Inserts a page break at the insertion point.",
         SectionBreak => "Inserts a section break at the insertion point.",
+        SectionBreakNextPage => "Inserts a section break; the new section starts on the next page.",
+        SectionBreakContinuous => {
+            "Inserts a section break; the new section continues on the same page."
+        }
+        SectionBreakOddPage => {
+            "Inserts a section break; the new section starts on the next odd page."
+        }
+        SectionBreakEvenPage => {
+            "Inserts a section break; the new section starts on the next even page."
+        }
+        ChangeBreakNextPage => "Makes this section break start the next section on a new page.",
+        ChangeBreakContinuous => {
+            "Makes this section break continue the next section on the same page."
+        }
+        ChangeBreakOddPage => "Makes this section break start the next section on an odd page.",
+        ChangeBreakEvenPage => "Makes this section break start the next section on an even page.",
         Spelling => "Checks the spelling of the document or selection.",
         TrackChanges => {
             "Marks insertions, deletions and format changes as tracked changes (toggle)."

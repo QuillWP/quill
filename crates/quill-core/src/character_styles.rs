@@ -108,11 +108,18 @@ impl crate::StyleSheet {
     }
 
     pub fn add_character(&mut self, name: &str, format: CharacterFormat) -> Option<u16> {
+        if self.find_character(name.trim()).is_some() {
+            return None;
+        }
+        self.push_character(name, format)
+    }
+
+    /// Add a style whose name is known not to be taken yet.
+    fn push_character(&mut self, name: &str, format: CharacterFormat) -> Option<u16> {
         let name = name.trim();
         if name.is_empty()
             || name.chars().count() > 255
             || self.characters.len() >= u16::MAX as usize
-            || self.find_character(name).is_some()
         {
             return None;
         }
@@ -122,7 +129,49 @@ impl crate::StyleSheet {
         });
         Some(self.characters.len() as u16)
     }
+}
 
+/// The names of a style sheet's character styles, for readers that add many
+/// at once. `add_character` checks each new name against every style so far,
+/// so a file with thousands of styles takes time that grows with the square
+/// of their number. An .odt file with 8,400 took 45 seconds in the fuzzer.
+/// Names compare ignoring ASCII case, as in `find_character`.
+#[derive(Default)]
+pub struct CharacterNames(std::collections::HashSet<String>);
+
+impl CharacterNames {
+    pub fn of(sheet: &crate::StyleSheet) -> Self {
+        Self(
+            sheet
+                .characters
+                .iter()
+                .map(|s| s.name.to_ascii_lowercase())
+                .collect(),
+        )
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.0.contains(&name.trim().to_ascii_lowercase())
+    }
+
+    /// `add_character` for a sheet these names were taken from, which must
+    /// not have gained styles any other way since.
+    pub fn add(
+        &mut self,
+        sheet: &mut crate::StyleSheet,
+        name: &str,
+        format: CharacterFormat,
+    ) -> Option<u16> {
+        if self.contains(name) {
+            return None;
+        }
+        let id = sheet.push_character(name, format)?;
+        self.0.insert(name.trim().to_ascii_lowercase());
+        Some(id)
+    }
+}
+
+impl crate::StyleSheet {
     /// Change the named layer while retaining unrelated formatting and metadata.
     pub fn with_character_style(
         &self,
@@ -455,6 +504,23 @@ mod tests {
             .unwrap();
         d.forget_history();
         (d, heading, callout)
+    }
+
+    #[test]
+    fn character_names_refuse_what_add_character_refuses() {
+        let mut sheet = crate::text::from_plain_text("x").styles;
+        let format = CharacterFormat::default();
+        assert_eq!(sheet.add_character("Strong", format), Some(1));
+        let mut names = CharacterNames::of(&sheet);
+        // Taken already, in any case and with spaces round it.
+        assert!(names.contains(" STRONG "));
+        assert_eq!(names.add(&mut sheet, "strong", format), None);
+        assert_eq!(names.add(&mut sheet, "Quote", format), Some(2));
+        assert_eq!(names.add(&mut sheet, " quote", format), None);
+        assert_eq!(names.add(&mut sheet, "  ", format), None);
+        assert_eq!(names.add(&mut sheet, &"n".repeat(256), format), None);
+        assert_eq!(sheet.characters.len(), 2);
+        assert_eq!(sheet.find_character("QUOTE"), Some(2));
     }
 
     #[test]

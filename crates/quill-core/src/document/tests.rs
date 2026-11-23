@@ -1025,3 +1025,111 @@ fn pane_copy_contains_only_the_chosen_story_and_no_history() {
     assert_eq!(pane.undo_label(), None);
     assert!(!pane.is_modified());
 }
+
+#[test]
+fn turning_facing_pages_off_keeps_the_text_width() {
+    let mut props = DocumentProps {
+        margin_left: 2160,
+        margin_right: 1440,
+        gutter: 360,
+        mirror_margins: true,
+        ..DocumentProps::default()
+    };
+    let width = props.text_width();
+    props.set_facing_pages(false);
+    assert!(!props.mirror_margins);
+    assert_eq!(props.gutter, 0);
+    assert_eq!(props.margin_left, props.margin_right);
+    assert_eq!(props.text_width(), width);
+
+    // An odd total still gives the same width, the extra twip on the left.
+    let mut odd = DocumentProps {
+        margin_left: 2161,
+        margin_right: 1440,
+        mirror_margins: true,
+        ..DocumentProps::default()
+    };
+    let width = odd.text_width();
+    odd.set_facing_pages(false);
+    assert_eq!(odd.margin_left - odd.margin_right, 1);
+    assert_eq!(odd.text_width(), width);
+}
+
+#[test]
+fn turning_facing_pages_on_keeps_the_margins() {
+    let mut props = DocumentProps {
+        margin_left: 1800,
+        margin_right: 1800,
+        ..DocumentProps::default()
+    };
+    let before = props.clone();
+    props.set_facing_pages(true);
+    assert!(props.mirror_margins);
+    assert_eq!(props.margin_left, before.margin_left);
+    assert_eq!(props.margin_right, before.margin_right);
+    assert_eq!(props.text_width(), before.text_width());
+}
+
+#[test]
+fn stored_header_stories_visit_each_stored_set_once() {
+    let mut doc = Document::new();
+    let first = doc.headers.len();
+    assert_eq!(doc.stored_header_stories().count(), first);
+    // Three sections, the first showing `headers`. The second and third
+    // share one set of their own.
+    doc.insert_section_break(Position::new(0, 0));
+    doc.insert_section_break(Position::new(1, 0));
+    let breaks: Vec<usize> = doc
+        .main
+        .paras
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.mark == Mark::SectionBreak)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(breaks.len(), 2);
+    let set = || vec![crate::text::from_plain_text("").main; 6];
+    let shared = std::sync::Arc::new(set());
+    doc.main.paras[breaks[1]].section.as_mut().unwrap().headers = Some(shared.clone());
+    doc.section.headers = Some(shared);
+    assert_eq!(doc.stored_header_stories().count(), first + 6);
+    // A set of its own is visited too; sections that show the one before's
+    // (none stored) add nothing.
+    doc.main.paras[breaks[0]].section.as_mut().unwrap().headers = Some(std::sync::Arc::new(set()));
+    assert_eq!(doc.stored_header_stories().count(), first + 12);
+}
+
+#[test]
+fn changing_stored_header_stories_reaches_every_section_even_a_shared_set() {
+    let mut doc = Document::new();
+    doc.insert_section_break(Position::new(0, 0));
+    doc.insert_section_break(Position::new(1, 0));
+    let breaks: Vec<usize> = doc
+        .main
+        .paras
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.mark == Mark::SectionBreak)
+        .map(|(i, _)| i)
+        .collect();
+    let shared = std::sync::Arc::new(vec![crate::text::from_plain_text("").main; 6]);
+    doc.main.paras[breaks[1]].section.as_mut().unwrap().headers = Some(shared.clone());
+    doc.section.headers = Some(shared);
+    let before = doc.stored_header_stories().count();
+    let mut seen = 0;
+    doc.for_each_stored_header_story_mut(|story| {
+        story.paras[0].insert(0, "x", crate::CharProps::default());
+        seen += 1;
+    });
+    // The first section's six, and each of the two sections sharing a set.
+    assert_eq!(seen, before + 6);
+    // Each section's headers changed, and still count as stored once each.
+    let marked = |d: &Document, k: usize| {
+        d.nth_section(k).headers.as_ref().unwrap()[0].paras[0]
+            .text
+            .clone()
+    };
+    assert_eq!(doc.headers[0].paras[0].text, "x");
+    assert_eq!(marked(&doc, 1), "x");
+    assert_eq!(marked(&doc, 2), "x");
+}

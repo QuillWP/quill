@@ -128,6 +128,7 @@ impl App {
             if let Some(k) = key {
                 w.st.dialog_key(k, event.text.as_deref(), clip);
                 w.window.request_redraw();
+                self.handle_effect(el, id, Effect::None);
                 return;
             }
             // Menu keys still work while a modeless window has the

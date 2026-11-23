@@ -10,6 +10,9 @@ use quill_core::{StoryId, Underline};
 use quill_layout::{FontFamilyInfo, FontVariant};
 use std::path::PathBuf;
 
+pub(crate) const ZOOM_FILL_HORIZONTAL: u8 = 6;
+pub(crate) const ZOOM_FILL_VERTICAL: u8 = 7;
+
 /// What choosing a menu item does.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
@@ -38,6 +41,8 @@ pub enum Action {
     /// Show or hide the Style Sheets palette.
     ToggleStylesPalette,
     ToggleMissingFonts,
+    /// View > Hidden Text: show hidden text on screen and print it.
+    ToggleHidden,
     ToggleFullScreen,
     About,
     Licenses,
@@ -353,8 +358,9 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
         b.cmd("Save As…", Cmd::SaveAs),
         b.cmd("Summary Info…", Cmd::SummaryInfo),
         sep(),
-        b.cmd("Page Setup…", Cmd::PageSetup),
         b.cmd("Document Setup…", Cmd::DocumentDialog),
+        sep(),
+        b.cmd("Page Setup…", Cmd::PageSetup),
         b.cmd("Print…", Cmd::Print),
         b.cmd("Save as PDF…", Cmd::SavePdf),
         b.cmd("Print Merge…", Cmd::PrintMerge),
@@ -449,16 +455,8 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
                 Action::ToggleFullScreen,
             )
             .key("⌃⌘F"),
-            sep(),
-            b.item("Markdown", Action::None).submenu(Menu {
-                title: "Markdown".into(),
-                items: vec![
-                    b.cmd("Source", Cmd::MarkdownSource)
-                        .checked(v.in_markdown_source()),
-                    b.cmd("WYSIWYG", Cmd::MarkdownWysiwyg)
-                        .checked(!v.in_markdown_source()),
-                ],
-            }),
+            // No View > Markdown (Source and WYSIWYG) while Markdown is on
+            // hold: see Format::SAVE_AS. The commands still exist.
             sep(),
             b.item("Standard Toolbar", Action::ToggleToolbar)
                 .checked(crate::settings::with(|s| s.view_toolbar)),
@@ -477,6 +475,8 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Zoom In", Cmd::ZoomIn),
             b.cmd("Zoom Out", Cmd::ZoomOut),
             b.cmd("Zoom 100%", Cmd::Zoom100),
+            b.item("Fill Vertically", Action::Zoom(ZOOM_FILL_VERTICAL)),
+            b.item("Fill Horizontally", Action::Zoom(ZOOM_FILL_HORIZONTAL)),
             sep(),
             b.cmd(
                 if v.show_marks { "Hide ¶" } else { "Show ¶" },
@@ -484,6 +484,8 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             ),
             b.cmd("Show Changes", Cmd::ShowChanges)
                 .checked(v.show_changes),
+            b.item("Hidden Text", Action::ToggleHidden)
+                .checked(crate::settings::with(|s| s.show_hidden)),
             sep(),
             b.cmd("Footnotes", Cmd::ViewFootnotes).key("⌘⇧⌥S"),
             b.cmd("Annotations…", Cmd::ViewAnnotations),
@@ -496,8 +498,17 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
     let insert = Menu {
         title: "Insert".into(),
         items: vec![
-            b.cmd("Page Break", Cmd::PageBreak).key("⇧⌅"),
-            b.cmd("Section Break", Cmd::SectionBreak).key("⌘⌅"),
+            b.item("Break", Action::None).submenu(Menu {
+                title: "Break".into(),
+                items: vec![
+                    b.cmd("Page Break", Cmd::PageBreak).key("⇧⌅"),
+                    sep(),
+                    b.cmd("Section Break (Next Page)", Cmd::SectionBreakNextPage),
+                    b.cmd("Section Break (Continuous)", Cmd::SectionBreakContinuous),
+                    b.cmd("Section Break (Odd Page)", Cmd::SectionBreakOddPage),
+                    b.cmd("Section Break (Even Page)", Cmd::SectionBreakEvenPage),
+                ],
+            }),
             b.cmd("Table…", Cmd::InsertTable),
             b.cmd("Footnote…", Cmd::InsertFootnote).key("⌘E"),
             b.cmd("Annotation…", Cmd::InsertAnnotation),
@@ -700,14 +711,17 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
         title: "Insert".into(),
         items: vec![
             b.cmd("Page Break", Cmd::PageBreak),
-            b.cmd("Section Break", Cmd::SectionBreak),
+            b.cmd("Section Break (Next Page)", Cmd::SectionBreakNextPage),
+            b.cmd("Section Break (Continuous)", Cmd::SectionBreakContinuous),
+            b.cmd("Section Break (Odd Page)", Cmd::SectionBreakOddPage),
+            b.cmd("Section Break (Even Page)", Cmd::SectionBreakEvenPage),
         ],
     };
     // In a table of contents: update it, or turn it into ordinary text.
     let toc = view
         .doc
         .existing_toc()
-        .filter(|&end| view.sel.start().para <= end)
+        .filter(|range| range.contains(&view.sel.start().para))
         .map(|_| view.doc.props.live_toc.is_some());
     let mut toc_items = Vec::new();
     if let Some(live) = toc {
@@ -789,6 +803,23 @@ pub fn context_menu(view: &DocView, can_paste: bool, can_paste_text: bool) -> (M
     if crate::table_dialogs::convert_plan(view).is_some() {
         toc_items.push(b.cmd("Convert to Table", Cmd::ConvertToTable));
         toc_items.push(Item::separator());
+    }
+    // On a section break mark: the kinds it can be, the current one checked.
+    if view.break_menu {
+        let now = view.doc.section_props_at(view.sel.focus.para).start;
+        use quill_core::SectionStart::*;
+        let kinds = [
+            ("Next Page", Cmd::ChangeBreakNextPage, NewPage),
+            ("Continuous", Cmd::ChangeBreakContinuous, NoBreak),
+            ("Odd Page", Cmd::ChangeBreakOddPage, OddPage),
+            ("Even Page", Cmd::ChangeBreakEvenPage, EvenPage),
+        ];
+        let mut items: Vec<Item> = kinds
+            .iter()
+            .map(|&(label, cmd, start)| b.cmd(label, cmd).checked(now == start))
+            .collect();
+        items.push(Item::separator());
+        toc_items.splice(0..0, items);
     }
     let mut menu = Menu {
         title: String::new(),
@@ -1188,7 +1219,7 @@ mod tests {
         );
         assert_eq!(
             actions[insert.items[1].id as usize],
-            Action::Cmd(Cmd::SectionBreak)
+            Action::Cmd(Cmd::SectionBreakNextPage)
         );
         assert!(
             menu.items
@@ -1541,6 +1572,29 @@ mod tests {
 
         let window = menus.iter().find(|menu| menu.title == "Window").unwrap();
         assert!(!window.items.iter().any(|item| item.label == "Help…"));
+    }
+
+    #[test]
+    fn view_menu_uses_the_page_fit_zoom_actions() {
+        let view = DocView::new(quill_core::Document::new(), String::new());
+        let (menus, actions) = build_menus(&MenuContext {
+            view: &view,
+            font_families: &[],
+            show_formatting_toolbar: true,
+            show_paragraph_toolbar: true,
+            show_ruler: true,
+            full_screen: false,
+            recent: &[],
+            windows: &[],
+        });
+        let menu = menus.iter().find(|menu| menu.title == "View").unwrap();
+        for (label, choice) in [
+            ("Fill Vertically", ZOOM_FILL_VERTICAL),
+            ("Fill Horizontally", ZOOM_FILL_HORIZONTAL),
+        ] {
+            let item = menu.items.iter().find(|item| item.label == label).unwrap();
+            assert_eq!(actions[item.id as usize], Action::Zoom(choice));
+        }
     }
 
     #[test]

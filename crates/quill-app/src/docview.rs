@@ -334,7 +334,7 @@ pub struct DocView {
     hyph_job: Option<language::HyphenJob>,
     /// Page height, top and bottom margins and widow control when the
     /// pages were worked out, to repaginate when they change.
-    laid_out_page: (i32, i32, i32, bool),
+    laid_out_page: (i32, i32, i32),
     /// Page Layout view: pages drawn as sheets, text placed on them.
     pub page_view: bool,
     /// View > Markdown > Source: the formatted document the text stands for.
@@ -401,6 +401,9 @@ pub struct DocView {
     /// Normal view's room for section break marks: where each starts,
     /// down the text. Page counting leaves it out (see `unpad`).
     section_pads: Vec<f32>,
+    /// The context menu was opened on a section break mark, with the
+    /// caret placed in the section it starts.
+    pub break_menu: bool,
     /// The view the paragraphs were last placed for: Normal view leaves
     /// room for section marks, Page Layout does not.
     placed_page_view: bool,
@@ -459,7 +462,7 @@ impl DocView {
             toc_stale: false,
             toc_rounds: 0,
             hyph_job: None,
-            laid_out_page: (0, 0, 0, false),
+            laid_out_page: (0, 0, 0),
             page_view: false,
             md_source: None,
             md_warned: Vec::new(),
@@ -491,6 +494,7 @@ impl DocView {
             want_wrap: Vec::new(),
             placed_frames_on: false,
             section_pads: Vec::new(),
+            break_menu: false,
             placed_page_view: false,
         }
     }
@@ -507,15 +511,26 @@ impl DocView {
     /// Scroll Page Layout view to the top of page `k`.
     pub fn show_page(&mut self, k: usize) {
         self.scroll_y = (self.page_top(k) - PAGE_GAP / 2.0).max(0.0);
+        if self.facing_pages() {
+            let left = self.page_left(k);
+            if left < 0.0 || left >= self.area.w {
+                self.scroll_sideways(left - PAGE_GAP);
+            }
+        }
     }
 
     /// The page (from 0) the insertion point is on.
     pub fn caret_page(&self) -> usize {
-        if self.pages.is_empty() || self.layouts.is_empty() {
+        if self.pages.is_empty()
+            || self
+                .layouts
+                .get(self.sel.focus.para)
+                .is_none_or(Option::is_none)
+        {
             return 0;
         }
         let (_, top, _) = self.caret_geometry(self.sel.focus, self.upstream);
-        paginate::page_at(&self.pages, top)
+        self.on_page(top).0
     }
 
     /// The pages (from 1) holding a table wider than its column in a
@@ -563,7 +578,8 @@ impl DocView {
     pub fn visible_page(&self) -> usize {
         if self.page_view {
             let (_, height) = self.page_size();
-            (self.scroll_y / (height + PAGE_GAP)).floor().max(0.0) as usize
+            let row = (self.scroll_y / (height + PAGE_GAP)).floor().max(0.0) as usize;
+            self.page_in_row(row, self.area.w / 2.0)
         } else {
             paginate::page_at(&self.pages, self.scroll_y)
         }
@@ -646,7 +662,7 @@ impl DocView {
     pub fn total_height(&self) -> f32 {
         if self.page_view {
             let (_, ph) = self.page_size();
-            return PAGE_GAP + self.pages.len().max(1) as f32 * (ph + PAGE_GAP);
+            return self.page_top(self.pages.len().saturating_sub(1)) + ph + PAGE_GAP;
         }
         self.tops.last().copied().unwrap_or(0.0) + TEXT_TOP + 24.0
     }
@@ -665,31 +681,82 @@ impl DocView {
         (p.page_width as f32 / 20.0, p.page_height as f32 / 20.0)
     }
 
-    /// View x of a page's left edge: centered when the window is wide enough.
-    fn page_left(&self) -> f32 {
-        let (pw, _) = self.page_size();
-        ((self.area.w - pw) / 2.0).max(PAGE_GAP).floor() - self.scroll_x
+    /// Page Layout shows facing pairs, the first page on the right, when the
+    /// document uses facing pages (Format > Document).
+    pub(crate) fn facing_pages(&self) -> bool {
+        self.page_view && !self.printing && self.doc.props.mirror_margins
+    }
+
+    /// Width occupied by the page or the two slots of a spread.
+    pub(crate) fn page_row_width(&self) -> f32 {
+        let width = self.page_size().0;
+        if self.facing_pages() {
+            2.0 * width
+        } else {
+            width
+        }
+    }
+
+    /// View x of page `k`'s left edge. The first page is on the right.
+    fn page_left(&self, k: usize) -> f32 {
+        let edge = ((self.area.w - self.page_row_width()) / 2.0)
+            .max(PAGE_GAP)
+            .floor();
+        let right = self.facing_pages() && k.is_multiple_of(2);
+        edge + if right { self.page_size().0 } else { 0.0 } - self.scroll_x
     }
 
     /// View y of page `k`'s top edge.
     fn page_top(&self, k: usize) -> f32 {
         let (_, ph) = self.page_size();
-        PAGE_GAP + k as f32 * (ph + PAGE_GAP)
+        let row = if self.facing_pages() {
+            k.div_ceil(2)
+        } else {
+            k
+        };
+        PAGE_GAP + row as f32 * (ph + PAGE_GAP)
+    }
+
+    fn page_in_row(&self, row: usize, x: f32) -> usize {
+        if self.facing_pages() && row != 0 {
+            row * 2 - usize::from(x < self.page_left(0))
+        } else {
+            row
+        }
+    }
+
+    fn page_near(&self, x: f32, y: f32) -> usize {
+        let (_, ph) = self.page_size();
+        let row = ((y - PAGE_GAP / 2.0) / (ph + PAGE_GAP)).floor().max(0.0) as usize;
+        self.page_in_row(row, x)
+            .min(self.pages.len().saturating_sub(1))
+    }
+
+    fn page_at_window(&self, wx: f32, wy: f32) -> Option<usize> {
+        if !self.page_view || self.pages.is_empty() {
+            return None;
+        }
+        let x = wx - self.area.x;
+        let y = wy - self.area.y + self.scroll_y;
+        let k = self.page_near(x, y);
+        let (pw, ph) = self.page_size();
+        let left = self.page_left(k);
+        let top = self.page_top(k);
+        ((left..left + pw).contains(&x) && (top..top + ph).contains(&y)).then_some(k)
     }
 
     /// View x of the text's left margin.
-    fn text_x(&self) -> f32 {
+    fn text_x(&self, page: usize) -> f32 {
         if self.page_view {
-            let p = &self.doc.props;
-            self.page_left() + (p.margin_left + p.gutter) as f32 / 20.0
+            self.page_left(page) + self.doc.props.page_margins(page).0 as f32 / 20.0
         } else {
             TEXT_LEFT - self.scroll_x
         }
     }
 
-    /// The window x of the left text margin, for the ruler.
+    /// The window x of the caret page's left text margin, for the ruler.
     pub fn text_left_window(&self) -> f32 {
-        self.area.x + self.text_x()
+        self.area.x + self.text_x(self.caret_page())
     }
 
     /// View y of document y `y`.
@@ -701,27 +768,28 @@ impl DocView {
         self.page_top(k) + self.page_body_top(k) + local
     }
 
-    /// The document point at view point (`x` from the left margin, `vy`).
-    fn doc_at(&self, x: f32, vy: f32) -> (f32, f32) {
+    /// The document point at a window position.
+    fn doc_at(&self, wx: f32, wy: f32) -> (f32, f32) {
+        let x = wx - self.area.x;
+        let vy = wy - self.area.y + self.scroll_y;
         if !self.page_view || self.pages.is_empty() {
-            return (x, vy - TEXT_TOP);
+            return (x - self.text_x(0), vy - TEXT_TOP);
         }
-        let (_, ph) = self.page_size();
-        let k = (((vy - PAGE_GAP / 2.0) / (ph + PAGE_GAP)).floor().max(0.0) as usize)
-            .min(self.pages.len() - 1);
+        let k = self.page_near(x, vy);
         let local = vy - self.page_top(k) - self.page_body_top(k);
-        self.doc_at_page(k, x, local)
+        self.doc_at_page(k, x - self.text_x(k), local)
     }
 
     /// Window position of document point (x, y).
     fn to_window(&self, x: f32, y: f32) -> (f32, f32) {
-        let dx = if self.page_view {
-            self.on_page(y).1
+        let (k, dx) = if self.page_view {
+            let (k, dx, _) = self.on_page(y);
+            (k, dx)
         } else {
-            0.0
+            (0, 0.0)
         };
         (
-            self.area.x + self.text_x() + x + dx,
+            self.area.x + self.text_x(k) + x + dx,
             self.area.y - self.scroll_y + self.to_view(y),
         )
     }
@@ -740,10 +808,7 @@ impl DocView {
 
     /// The text position under a point in window coordinates.
     pub fn hit(&self, wx: f32, wy: f32) -> (Position, bool) {
-        let (x, y) = self.doc_at(
-            wx - self.area.x - self.text_x(),
-            wy - self.area.y + self.scroll_y,
-        );
+        let (x, y) = self.doc_at(wx, wy);
         self.hit_doc(x, y)
     }
 
@@ -824,7 +889,7 @@ impl DocView {
 
     pub fn max_scroll_x(&self) -> f32 {
         let width = if self.page_view {
-            self.page_size().0 + 2.0 * PAGE_GAP
+            self.page_row_width() + 2.0 * PAGE_GAP
         } else {
             self.laid_out_width + TEXT_LEFT + 24.0
         };
@@ -857,7 +922,7 @@ impl DocView {
         let ratio = old / new;
         self.scroll_y = (self.scroll_y + self.area.h / 2.0 * (1.0 - ratio)).max(0.0);
         if self.page_view {
-            let (pw, _) = self.page_size();
+            let pw = self.page_row_width();
             let centered = |w: f32| ((w - pw) / 2.0).max(PAGE_GAP).floor();
             let (before, after) = (self.area.w, self.area.w * ratio);
             // How far the middle of the window is from the page's left edge.
@@ -869,7 +934,8 @@ impl DocView {
 
     /// Scroll so the selection's moving end is on screen.
     pub fn scroll_to_caret(&mut self) {
-        if self.layouts.iter().any(Option::is_none) || self.area.h <= 0.0 {
+        if self.layouts.is_empty() || self.layouts.iter().any(Option::is_none) || self.area.h <= 0.0
+        {
             return;
         }
         // Geometry excludes scrolling. Reveal the moving endpoint horizontally too.
@@ -939,10 +1005,7 @@ impl DocView {
             return;
         }
         if self.outline {
-            let (x, y) = self.doc_at(
-                wx - self.area.x - self.text_x(),
-                wy - self.area.y + self.scroll_y,
-            );
+            let (x, y) = self.doc_at(wx, wy);
             if let Some(i) = self.symbol_at(x, y) {
                 self.drag = None;
                 self.symbol_click(i, count >= 2);
@@ -953,16 +1016,21 @@ impl DocView {
         self.typing_chp = None;
         self.doc.break_typing();
         let (pos, upstream) = self.hit(wx, wy);
-        let in_bar = !self.captions && wx < self.area.x + self.text_x() - 2.0;
+        let in_bar = !self.captions
+            && wx
+                < self.area.x
+                    + self
+                        .text_x(self.page_near(wx - self.area.x, wy - self.area.y + self.scroll_y))
+                    - 2.0;
         // A live table of contents is one object: a click selects it all.
         if count == 1
             && !shift
             && !cmd
             && self.doc.props.live_toc.is_some()
-            && let Some(end) = self.doc.existing_toc()
-            && pos.para <= end
+            && let Some(range) = self.doc.existing_toc()
+            && range.contains(&pos.para)
         {
-            self.sel = Selection::new(Position::new(0, 0), Position::new(end + 1, 0));
+            self.sel = Selection::new(Position::new(range.start, 0), Position::new(range.end, 0));
             self.drag = None;
             self.status = Some("Table of contents: right-click for options".into());
             self.reset_blink();

@@ -496,6 +496,7 @@ fn ppr(p: &ParaProps, base: &ParaProps) -> String {
     let mut o = String::new();
     on_off(&mut o, "keepNext", p.keep_with_next, base.keep_with_next);
     on_off(&mut o, "keepLines", p.keep_together, base.keep_together);
+    on_off(&mut o, "widowControl", p.widow_control, base.widow_control);
     on_off(
         &mut o,
         "pageBreakBefore",
@@ -691,11 +692,13 @@ fn paragraph(doc: &Document, ids: &[String], p: &Paragraph, out: &mut String) {
             r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> INDEX </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
         );
     }
-    if let (Some((o, _)), Some(0)) = (toc, main) {
+    if let (Some((o, range)), Some(at)) = (&toc, main)
+        && range.start == at
+    {
         let _ = write!(
             out,
             r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> {} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
-            toc_instruction(&o)
+            toc_instruction(o)
         );
     }
     // Hyperlinks become HYPERLINK fields around their runs: these work the
@@ -852,7 +855,7 @@ fn paragraph(doc: &Document, ids: &[String], p: &Paragraph, out: &mut String) {
     if link != 0 {
         out.push_str(r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#);
     }
-    if toc.is_some_and(|(_, end)| main == Some(end)) {
+    if toc.is_some_and(|(_, range)| main == Some(range.end - 1)) {
         out.push_str(r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#);
     }
     if index.as_ref().is_some_and(|r| main == Some(r.end - 1)) {
@@ -1581,13 +1584,8 @@ fn styles_xml(doc: &Document, ids: &[String]) -> String {
     let mut out = String::new();
     let _ = write!(
         out,
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles {W_NS}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:cs="{font}"/><w:sz w:val="{0}"/><w:szCs w:val="{0}"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr>{1}</w:pPr></w:pPrDefault></w:docDefaults>"#,
-        defaults.size,
-        if doc.props.widow_control {
-            ""
-        } else {
-            r#"<w:widowControl w:val="0"/>"#
-        }
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles {W_NS}><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="{font}" w:hAnsi="{font}" w:cs="{font}"/><w:sz w:val="{0}"/><w:szCs w:val="{0}"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr></w:pPr></w:pPrDefault></w:docDefaults>"#,
+        defaults.size
     );
     for id in styles_to_write(doc) {
         let s = doc.styles.get(id);
@@ -1663,10 +1661,6 @@ fn settings_xml(doc: &Document) -> String {
     let _ = write!(extra, r#"<w:defaultTabStop w:val="{}"/>"#, p.default_tab);
     if p.even_odd_headers {
         extra.push_str("<w:evenAndOddHeaders/>");
-    }
-    // Quill's own setting, which Word may skip (see W_NS).
-    if p.print_hidden {
-        extra.push_str("<quill:printHiddenText/>");
     }
     format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings {W_NS}>{extra}<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="15"/></w:compat></w:settings>"#

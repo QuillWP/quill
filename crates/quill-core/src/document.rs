@@ -236,10 +236,10 @@ pub struct DocumentProps {
     pub top_exact: bool,
     pub bottom_exact: bool,
     pub gutter: Twips,
+    /// Facing pages (Format > Document): the margins are inside and outside,
+    /// and Page Layout shows facing pairs.
     pub mirror_margins: bool,
     pub default_tab: Twips,
-    pub widow_control: bool,
-    pub print_hidden: bool,
     pub even_odd_headers: bool,
     pub footnote_position: FootnotePosition,
     pub footnote_restart_each_page: bool,
@@ -299,8 +299,6 @@ impl Default for DocumentProps {
             gutter: 0,
             mirror_margins: false,
             default_tab: 720,
-            widow_control: true,
-            print_hidden: false,
             even_odd_headers: false,
             footnote_position: FootnotePosition::BottomOfPage,
             footnote_restart_each_page: false,
@@ -314,12 +312,46 @@ impl Default for DocumentProps {
 }
 
 impl DocumentProps {
+    /// Physical left and right margins including the binding gutter, for a
+    /// zero-based page index. The first sheet is a right-hand page.
+    pub fn page_margins(&self, page: usize) -> (Twips, Twips) {
+        let inside = self.margin_left.saturating_add(self.gutter);
+        if self.mirror_margins && page % 2 == 1 {
+            (self.margin_right, inside)
+        } else {
+            (inside, self.margin_right)
+        }
+    }
+
     /// Width available for text between the margins.
     pub fn text_width(&self) -> Twips {
         self.page_width
             .saturating_sub(self.margin_left)
             .saturating_sub(self.margin_right)
             .saturating_sub(self.gutter)
+    }
+
+    /// Turn facing pages on or off. Turning it off makes the two margins
+    /// equal and folds the gutter into them, so the text width is the same
+    /// and the text does not reflow. Turning it on keeps the margins as they
+    /// are, which leaves the text width unchanged too.
+    pub fn set_facing_pages(&mut self, on: bool) {
+        if self.mirror_margins == on {
+            return;
+        }
+        if !on {
+            // Split the total across both sides. An odd twip goes to the
+            // left, so the total, and with it the text width, stays exact.
+            let total = self
+                .margin_left
+                .saturating_add(self.margin_right)
+                .saturating_add(self.gutter);
+            let half = total / 2;
+            self.margin_left = total - half;
+            self.margin_right = half;
+            self.gutter = 0;
+        }
+        self.mirror_margins = on;
     }
 }
 
@@ -770,6 +802,50 @@ impl Document {
             out.push(current);
         }
         out
+    }
+
+    /// Every header and footer story the document stores, for scans of the
+    /// whole document: the first section's, then each later section's own
+    /// set. A section that shows the one before's (Same As Previous) stores
+    /// none, and a set shared between sections is visited once.
+    /// `story` and `header_story` show one section's headers instead.
+    pub fn stored_header_stories(&self) -> impl Iterator<Item = &Story> {
+        let mut seen: Vec<*const Vec<Story>> = Vec::new();
+        let own = self
+            .main
+            .paras
+            .iter()
+            .filter_map(|p| p.section.as_deref())
+            .chain(std::iter::once(&self.section))
+            .filter_map(|section| section.headers.as_ref())
+            .filter(move |set| {
+                let at = std::sync::Arc::as_ptr(set);
+                let first = !seen.contains(&at);
+                if first {
+                    seen.push(at);
+                }
+                first
+            })
+            .flat_map(|set| set.iter());
+        self.headers.iter().chain(own)
+    }
+
+    /// `stored_header_stories` to change in place, for a rewrite over the
+    /// whole document. A set that other sections share is copied first, so
+    /// each section's set is changed.
+    pub fn for_each_stored_header_story_mut(&mut self, mut f: impl FnMut(&mut Story)) {
+        self.headers.iter_mut().for_each(&mut f);
+        let sections = self
+            .main
+            .paras
+            .iter_mut()
+            .filter_map(|p| p.section.as_deref_mut())
+            .chain(std::iter::once(&mut self.section));
+        for section in sections {
+            if let Some(set) = section.headers.as_mut() {
+                std::sync::Arc::make_mut(set).iter_mut().for_each(&mut f);
+            }
+        }
     }
 
     /// The headers and footers section `k` shows.
@@ -2823,6 +2899,7 @@ fn restyle_pap(p: &ParaProps, old: &ParaProps, new: &ParaProps) -> ParaProps {
         page_break_before,
         keep_with_next,
         keep_together,
+        widow_control,
         suppress_line_numbers,
         borders
     );

@@ -16,7 +16,7 @@ import time
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = ['character_styles', 'native', 'clipboard', 'docx', 'rtf', 'html', 'odt', 'markdown', 'zip', 'xml', 'images', 'settings', 'merge_data', 'editing']
+TARGETS = ['character_styles', 'native', 'clipboard', 'docx', 'rtf', 'html', 'odt', 'markdown', 'zip', 'xml', 'images', 'settings', 'merge_data', 'editing', 'sections']
 # Share of the time for the targets that read whole documents; the rest split a quarter.
 DOCUMENT_TARGETS = TARGETS[:8]
 LIMIT = 262144
@@ -95,6 +95,12 @@ def seed():
     # before mutation starts, including Undo/Redo and explicit save checks.
     for action in range(13):
         add('editing', bytes([action, 0, 0, 0, 3, 0]) * 4)
+    # Section and contents programs: every kind of break, changing a break's
+    # kind, contents put in at a point, deletes across breaks, Undo and Redo.
+    for action in range(10):
+        add('sections', bytes([action, 0, 0, 0, 3, action]) * 4)
+    add('sections', b''.join(bytes([action, 0, 1, 1, 2, kind])
+                             for action in [0, 2, 1, 2, 6, 7, 3, 2, 8] for kind in [1]))
     # Style programs start by defining a style, so the rest have one to act on.
     define = bytes([0, 0, 0, 31, 5, 0])
     for action in range(19):
@@ -131,10 +137,12 @@ def main():
     def report():
         with lock:
             (run / 'status.json').write_text(json.dumps(state, indent=2) + '\n')
-            lines = ['# Quill overnight fuzz report', '', f"Started: {state['started']}", f"Phase: {state['phase']}", '', f'{round(sum(seconds.values()) / 3 / 3600, 1)} hours in all; three concurrent targets, three workers each. AddressSanitizer, debug assertions and overflow checks enabled. Limits: 256 KiB input, 10 seconds per input, 1536 MiB per worker. Failures are retained while testing continues.', '', 'Source snapshot: source.diff and untracked-sources/ (captured before build). Original test documents are read only.', '', '| Target | State | Seconds | New failure files | Latest progress |', '|---|---|---:|---:|---|']
+            lines = ['# Quill overnight fuzz report', '', f"Started: {state['started']}", f"Phase: {state['phase']}", '', f'{round(sum(seconds.values()) / 3 / 3600, 1)} hours in all; three concurrent targets, three workers each. AddressSanitizer, debug assertions and overflow checks enabled. Limits: 256 KiB input, 10 seconds per input, 1536 MiB per worker. Failures and unusually slow inputs are retained while testing continues.', '', 'Source snapshot: source.diff and untracked-sources/ (captured before build). Original test documents are read only.', '', '| Target | State | Seconds | Failures | Slow inputs | Latest progress |', '|---|---|---:|---:|---:|---|']
             for target, info in state['targets'].items():
                 folder = run / target
                 artifacts = sorted((folder / 'artifacts').glob('*')) if folder.exists() else []
+                slow = [p for p in artifacts if p.name.startswith('slow-unit-')]
+                failures = [p for p in artifacts if p not in slow]
                 progress = ''
                 log = folder / 'fuzzer.log'
                 if log.exists():
@@ -144,10 +152,12 @@ def main():
                     matches = re.findall(r'^#\d+.*$', tail, re.M)
                     progress = matches[-1] if matches else tail.strip().split('\n')[-1][:200]
                 elapsed = round(info.get('elapsed', time.time()-info['epoch'] if 'epoch' in info else 0))
-                lines.append(f"| {target} | {info['status']} | {elapsed} | {len(artifacts)} | {progress.replace('|', '/')} |")
-                if artifacts:
-                    lines.extend([''] + [f'- {target}: `{p.relative_to(run)}`' for p in artifacts] + [''])
-            lines += ['', 'Logs and saved failures are in each target directory. A completed run with no saved failures is not proof of correctness. Failed or interrupted targets are not counted as completed. Reproduce and minimize saved failures before treating them as confirmed bugs.']
+                lines.append(f"| {target} | {info['status']} | {elapsed} | {len(failures)} | {len(slow)} | {progress.replace('|', '/')} |")
+                if failures:
+                    lines.extend([''] + [f'- {target} failure: `{p.relative_to(run)}`' for p in failures] + [''])
+                if slow:
+                    lines.extend([''] + [f'- {target} slow input: `{p.relative_to(run)}`' for p in slow] + [''])
+            lines += ['', 'Logs, saved failures and slow inputs are in each target directory. A completed run with no saved failures is not proof of correctness. Failed or interrupted targets are not counted as completed. Reproduce and minimize saved failures before treating them as confirmed bugs; replay slow inputs and measure where their time is spent before treating them as defects.']
             if 'error' in state:
                 lines += ['', 'Campaign error: ' + state['error']]
             temp = run / 'report.tmp'

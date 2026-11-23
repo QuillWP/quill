@@ -464,16 +464,16 @@ fn picture_files_are_created_once_and_never_overwritten() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("image.png");
-    write_picture_file(&path, b"first").unwrap();
-    write_picture_file(&path, b"first").unwrap();
+    write_picture_file(&path, b"first", &mut false).unwrap();
+    write_picture_file(&path, b"first", &mut false).unwrap();
     // Same length deliberately exercises the content comparison.
-    assert!(write_picture_file(&path, b"other").is_err());
+    assert!(write_picture_file(&path, b"other", &mut false).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), b"first");
     #[cfg(unix)]
     {
         let link = dir.join("linked.png");
         std::os::unix::fs::symlink(&path, &link).unwrap();
-        assert!(write_picture_file(&link, b"first").is_err());
+        assert!(write_picture_file(&link, b"first", &mut false).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"first");
     }
     std::fs::remove_dir_all(&dir).unwrap();
@@ -572,12 +572,47 @@ fn transient_replacement_retries_stop_after_six_attempts() {
 }
 
 #[test]
+fn a_backup_is_named_after_its_document_and_opens_as_its_format() {
+    let at = |name: &str| backup_path(Path::new(name)).map(|p| p.display().to_string());
+    assert_eq!(at("/d/Report.qwp").as_deref(), Some("/d/Report.qwp-backup"));
+    assert_eq!(
+        at("/d/My.Report.DOCX").as_deref(),
+        Some("/d/My.Report.DOCX-backup")
+    );
+    assert_eq!(at("/d/notes.md").as_deref(), Some("/d/notes.md-backup"));
+    // No backup of a backup, or of a name Quill does not save.
+    assert_eq!(at("/d/Report.qwp-backup"), None);
+    assert_eq!(at("/d/Report"), None);
+    assert_eq!(at("/d/Report.pages"), None);
+    for format in Format::ALL {
+        for ext in format.extensions() {
+            let backup = backup_path(&Path::new("x").with_extension(ext)).unwrap();
+            assert_eq!(
+                Format::from_path(&backup),
+                Some(format),
+                "{}",
+                backup.display()
+            );
+            let ext = backup.extension().unwrap().to_str().unwrap();
+            assert!(READABLE.contains(&ext), "{ext} is not readable");
+            // The Mac only lets a sandboxed Quill write a backup whose
+            // extension its Info.plist declares.
+            let plist = include_str!("../../../tools/Info.plist");
+            assert!(
+                plist.contains(&format!("<string>{ext}</string>")),
+                "{ext} is not in Info.plist"
+            );
+        }
+    }
+}
+
+#[test]
 fn atomic_copy_replaces_an_existing_backup() {
     let dir = std::env::temp_dir().join(format!("quill-backup-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let source = dir.join("document.qwp");
-    let backup = dir.join("Backup of document.qwp");
+    let backup = dir.join("document.qwp-backup");
     std::fs::write(&source, b"current document").unwrap();
     std::fs::write(&backup, b"older backup").unwrap();
 
@@ -606,7 +641,7 @@ fn saving_keeps_a_private_file_private() {
     assert_eq!(mode(&path), 0o600);
 
     // A backup of a private document is private too, new or replaced.
-    let backup = dir.join("Backup of secret.qwp");
+    let backup = dir.join("secret.qwp-backup");
     copy_atomic(&path, &backup).unwrap();
     assert_eq!(mode(&backup), 0o600);
     std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o640)).unwrap();
@@ -634,7 +669,7 @@ fn atomic_copy_replaces_a_read_only_backup_when_the_folder_allows_it() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let source = dir.join("document.qwp");
-    let backup = dir.join("Backup of document.qwp");
+    let backup = dir.join("document.qwp-backup");
     std::fs::write(&source, b"current document").unwrap();
     std::fs::write(&backup, b"older backup").unwrap();
     std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o444)).unwrap();
@@ -651,7 +686,7 @@ fn failed_save_after_backup_preserves_both_saved_versions() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("document.qwp");
-    let backup = dir.join("Backup of document.qwp");
+    let backup = dir.join("document.qwp-backup");
     std::fs::write(&path, b"last saved version").unwrap();
     copy_atomic(&path, &backup).unwrap();
 
@@ -1450,4 +1485,95 @@ fn a_link_too_long_to_keep_is_reported_when_the_file_opens() {
     let (_, report) = load_reported(&path, true).unwrap();
     assert!(!report.notes().contains(&report::LINKS_DROPPED));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn odt_keeps_facing_pages_and_the_text_width() {
+    let mut doc = text::from_plain_text("One");
+    doc.props.margin_left = 2160;
+    doc.props.margin_right = 1440;
+    doc.props.gutter = 360;
+    doc.props.mirror_margins = true;
+    let back = super::odt_read::read(&super::odt::write(&doc, 0)).unwrap();
+    // ODF has no gutter, so the inside margin comes back with it added in.
+    assert!(back.props.mirror_margins);
+    assert_eq!(back.props.page_margins(0), doc.props.page_margins(0));
+    assert_eq!(back.props.page_margins(1), doc.props.page_margins(1));
+    assert_eq!(back.props.text_width(), doc.props.text_width());
+
+    doc.props.mirror_margins = false;
+    let back = super::odt_read::read(&super::odt::write(&doc, 0)).unwrap();
+    assert!(!back.props.mirror_margins);
+    assert_eq!(back.props.text_width(), doc.props.text_width());
+}
+
+/// A folder nobody can add to, or None when this process can anyway (root).
+#[cfg(unix)]
+fn read_only_folder(tag: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("quill-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(dir.join("probe"), b"x").is_ok() {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        return None;
+    }
+    Some(dir)
+}
+
+#[cfg(unix)]
+fn forget_read_only_folder(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn only_a_refused_pictures_folder_is_flagged_as_one() {
+    let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let with_picture = markdown::read(
+        &format!("One ![a][d].\n\n[d]: data:image/png;base64,{png}\n"),
+        None,
+    )
+    .0;
+    let text_only = markdown::read("Just text\n", None).0;
+    let Some(dir) = read_only_folder("picture-denied") else {
+        return;
+    };
+    // The pictures folder cannot be made here: the one failure that asks
+    // for the folder.
+    let failure = save_checked(&with_picture, &dir.join("Trip.md"), Format::Markdown).unwrap_err();
+    assert!(failure.picture_folder_denied, "{}", failure.message);
+    // The same folder refusing the file itself (nothing to keep beside it)
+    // is not that failure, and says so in its own words.
+    let failure = save_checked(&text_only, &dir.join("Plain.md"), Format::Markdown).unwrap_err();
+    assert!(!failure.picture_folder_denied);
+    assert!(failure.message.contains("Plain.md"), "{}", failure.message);
+    // Nor is any other format's.
+    let failure = save_checked(&with_picture, &dir.join("Trip.docx"), Format::Docx).unwrap_err();
+    assert!(!failure.picture_folder_denied);
+    forget_read_only_folder(&dir);
+    // And a save that works is not one.
+    let dir = std::env::temp_dir().join(format!("quill-picture-ok-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    save_checked(&with_picture, &dir.join("Trip.md"), Format::Markdown).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn save_as_offers_every_format_but_markdown_in_the_usual_order() {
+    let expected: Vec<Format> = Format::ALL
+        .into_iter()
+        .filter(|f| *f != Format::Markdown)
+        .collect();
+    assert_eq!(Format::SAVE_AS.to_vec(), expected);
+    // Markdown is still a format Quill reads and writes by name.
+    assert_eq!(
+        Format::from_path(Path::new("Notes.md")),
+        Some(Format::Markdown)
+    );
 }

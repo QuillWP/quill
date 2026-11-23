@@ -590,6 +590,17 @@ pub fn write_with_progress(
     fonts: &mut Fonts,
     cache: &mut GlyphCache,
     range: std::ops::Range<usize>,
+    progress: impl FnMut(usize, usize),
+) -> Vec<u8> {
+    write_sheets_with_progress(view, fonts, cache, range, progress)
+}
+
+/// Write a PDF with one sheet per page in `range`, reporting progress.
+pub fn write_sheets_with_progress(
+    view: &mut DocView,
+    fonts: &mut Fonts,
+    cache: &mut GlyphCache,
+    range: std::ops::Range<usize>,
     mut progress: impl FnMut(usize, usize),
 ) -> Vec<u8> {
     let (pw, ph) = view.page_size();
@@ -597,13 +608,16 @@ pub fn write_with_progress(
     g.file.bytes = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n".to_vec();
     // 1 catalog, 2 page tree, 3 resources: written last, numbered first.
     let (catalog, tree, resources) = (g.file.alloc(), g.file.alloc(), g.file.alloc());
-    let mut pages: Vec<Option<usize>> = range.filter(|&k| k < view.pages.len()).map(Some).collect();
-    if pages.is_empty() {
-        pages.push(None);
+    let mut sheets: Vec<Vec<(usize, f32)>> = range
+        .filter(|&k| k < view.pages.len())
+        .map(|k| vec![(k, 0.0)])
+        .collect();
+    if sheets.is_empty() {
+        sheets.push(Vec::new());
     }
-    let mut kids = Vec::with_capacity(pages.len());
-    let page_count = pages.len();
-    for (page_index, k) in pages.into_iter().enumerate() {
+    let mut kids = Vec::with_capacity(sheets.len());
+    let page_count = sheets.len();
+    for (page_index, sheet) in sheets.into_iter().enumerate() {
         let mut page = Page {
             out: String::new(),
             height: ph,
@@ -611,9 +625,9 @@ pub fn write_with_progress(
             text: TextState::default(),
             clips: Vec::new(),
         };
-        if let Some(k) = k {
+        for (k, x) in sheet {
             view.prepare_pages(fonts, &[k]);
-            view.draw_page(&mut page, fonts, cache, false, k, 0.0, 0.0);
+            view.draw_page(&mut page, fonts, cache, false, k, x, 0.0);
         }
         let content = page.finish();
         let (page_num, content_num) = (g.file.alloc(), g.file.alloc());

@@ -8,6 +8,11 @@ impl App {
             crate::ev!("effect: {effect:?}");
         }
         self.effect(el, id, effect);
+        if let Some(i) = self.index(id)
+            && let Some(effect) = self.windows[i].1.st.pending_dialog_effect.take()
+        {
+            self.effect(el, id, effect);
+        }
         // A dialog or command may have asked for printing, or for a new
         // window.
         if let Some(i) = self.index(id)
@@ -61,6 +66,8 @@ impl App {
                 if matches!(d, DialogId::Print | DialogId::PageSetup) {
                     if let Some(i) = self.index(id) {
                         if d == DialogId::Print {
+                            // Quill's own choices are a pane in the system
+                            // Print panel.
                             self.print(
                                 i,
                                 crate::page_dialogs::PrintJob {
@@ -83,26 +90,16 @@ impl App {
                         recent: &self.recent,
                         windows: &list,
                     };
-                    if d == DialogId::PasteSpecial {
-                        let forms = self.clipboard.get_or_insert_with(Clipboard::new).forms();
-                        self.windows[i].1.st.open_paste_special(forms);
-                    } else {
-                        self.windows[i].1.st.open_dialog(d, &env);
-                    }
+                    let clip = self.clipboard.get_or_insert_with(Clipboard::new);
+                    self.windows[i]
+                        .1
+                        .st
+                        .open_dialog_with_clipboard(d, &env, clip);
                     #[cfg(target_os = "macos")]
                     if matches!(d, DialogId::Find | DialogId::Replace)
                         && let Some(native) = &self.windows[i].1.dialog
                     {
                         native.activate_find();
-                    }
-                    if d == DialogId::ShowClipboard {
-                        let text = self
-                            .clipboard
-                            .get_or_insert_with(Clipboard::new)
-                            .fragment()
-                            .map(|f| f.plain_text())
-                            .unwrap_or_default();
-                        self.windows[i].1.st.set_clipboard_text(text);
                     }
                     self.windows[i].1.window.request_redraw();
                 }

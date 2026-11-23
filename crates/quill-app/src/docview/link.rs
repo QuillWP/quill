@@ -204,11 +204,27 @@ pub fn follow(url: &str) -> bool {
     } else {
         return false;
     };
+    // NSWorkspace rather than running /usr/bin/open: it is the supported
+    // way, and it works in the App Sandbox.
     #[cfg(target_os = "macos")]
-    let opened = std::process::Command::new("/usr/bin/open")
-        .arg(&url)
-        .spawn()
-        .is_ok();
+    let opened = {
+        use objc2::runtime::{AnyObject, Bool};
+        use objc2::{class, msg_send};
+        use objc2_foundation::NSString;
+        let text = NSString::from_str(&url);
+        // SAFETY: plain Foundation and AppKit class methods; a nil URL (text
+        // NSURL cannot parse) is checked before it is used.
+        unsafe {
+            let link: *mut AnyObject = msg_send![class!(NSURL), URLWithString: &*text];
+            if link.is_null() {
+                false
+            } else {
+                let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+                let done: Bool = msg_send![workspace, openURL: link];
+                done.as_bool()
+            }
+        }
+    };
     #[cfg(target_os = "windows")]
     let opened = {
         use windows::Win32::UI::Shell::ShellExecuteW;

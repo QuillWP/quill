@@ -1682,6 +1682,7 @@ fn build(html: &str, limits: &Limits, file: bool) -> Result<(Document, ImportRep
     }
     let mut metadata = Vec::new();
     find_all(&root, "meta", &mut metadata);
+    let mut taken = quill_core::character_styles::CharacterNames::of(&r.doc.styles);
     for e in metadata {
         if e.attr("name") != Some("quill-character-style") {
             continue;
@@ -1695,7 +1696,7 @@ fn build(html: &str, limits: &Limits, file: bool) -> Result<(Document, ImportRep
                 || name.chars().count() > 255
                 || font.len() > 1024
                 || r.doc.styles.characters.len() >= u16::MAX as usize
-                || r.doc.styles.find_character(name).is_some()
+                || taken.contains(name)
             {
                 r.report.note(notes::CHARACTER_STYLES);
                 continue;
@@ -1708,7 +1709,7 @@ fn build(html: &str, limits: &Limits, file: bool) -> Result<(Document, ImportRep
                     }
                     format.props.font = r.doc.font_id(font);
                 }
-                if r.doc.styles.add_character(name, format).is_none() {
+                if taken.add(&mut r.doc.styles, name, format).is_none() {
                     r.report.note(notes::CHARACTER_STYLES);
                 }
             } else {

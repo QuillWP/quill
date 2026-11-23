@@ -79,6 +79,8 @@ pub struct Item {
     pub rect: Rect,
     pub kind: Kind,
     pub enabled: bool,
+    /// A hidden item is not drawn and takes no clicks or focus.
+    pub hidden: bool,
     /// A static label can remain visible while showing that it is overridden.
     pub struck: bool,
 }
@@ -91,12 +93,13 @@ impl Item {
             rect,
             kind,
             enabled: true,
+            hidden: false,
             struck: false,
         }
     }
 
     fn takes_focus(&self) -> bool {
-        self.enabled && matches!(self.kind, Kind::Field { .. })
+        self.enabled && !self.hidden && matches!(self.kind, Kind::Field { .. })
     }
 }
 
@@ -237,6 +240,9 @@ pub struct Dialog {
     list_click: Option<(std::time::Instant, &'static str, usize)>,
     /// A plain box with no title bar, like Go To and alerts.
     pub plain: bool,
+    /// The Tab key visits the text fields in the order they were added,
+    /// rather than the system's reading order by position.
+    pub tab_in_order: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -278,6 +284,7 @@ impl Dialog {
             pop_click: None,
             list_click: None,
             plain: false,
+            tab_in_order: false,
         }
     }
 
@@ -737,6 +744,13 @@ impl Dialog {
         })
     }
 
+    /// Show or hide an item. A hidden item is not drawn and takes no input.
+    pub fn set_hidden(&mut self, id: &str, hidden: bool) {
+        if let Some(i) = self.items.iter_mut().find(|i| i.id == id) {
+            i.hidden = hidden;
+        }
+    }
+
     pub fn enable(&mut self, id: &str, on: bool) {
         if let Some(i) = self.items.iter_mut().find(|i| i.id == id) {
             i.enabled = on;
@@ -813,7 +827,7 @@ impl Dialog {
 
     // ----- reading values -----
 
-    fn item(&self, id: &str) -> Option<&Item> {
+    pub(crate) fn item(&self, id: &str) -> Option<&Item> {
         self.items.iter().find(|i| i.id == id)
     }
 
@@ -976,6 +990,9 @@ impl Dialog {
         custom: &mut dyn FnMut(&mut Canvas, &mut Label, &'static str, Rect),
     ) {
         for (i, it) in self.items.iter().enumerate() {
+            if it.hidden {
+                continue;
+            }
             if matches!(it.kind, Kind::Custom) {
                 custom(c, label, it.id, self.at(it.rect));
             } else {
@@ -1268,6 +1285,7 @@ impl Dialog {
     fn item_at(&self, x: f32, y: f32) -> Option<usize> {
         self.items.iter().position(|it| {
             it.enabled
+                && !it.hidden
                 && !matches!(
                     it.kind,
                     Kind::Text | Kind::Note | Kind::Group | Kind::Swatch { button: false, .. }
@@ -1941,7 +1959,11 @@ pub mod units {
 
     /// A length in the unit chosen in Preferences: "1.25 in", "3.17 cm".
     pub fn length(t: Twips) -> String {
-        let unit = crate::settings::with(|s| s.unit);
+        length_in(crate::settings::with(|s| s.unit), t)
+    }
+
+    /// `length` for a unit given, for code that already holds the settings.
+    pub fn length_in(unit: crate::settings::Unit, t: Twips) -> String {
         let per = per_unit(unit.abbrev());
         format!("{} {}", trim(t as f64 / per), unit.abbrev())
     }

@@ -165,7 +165,7 @@ fn contents(doc: &mut Document) {
         .collect();
     if !entries.is_empty() {
         let paras = doc.toc_paragraphs(&entries, true);
-        doc.place_toc(paras);
+        doc.place_toc(paras, quill_core::Position::new(0, 0));
     }
 }
 
