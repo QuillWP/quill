@@ -80,6 +80,11 @@ const SIZES: [&str; 11] = [
     "9", "10", "12", "14", "18", "24", "36", "48", "60", "72", "96",
 ];
 
+/// Where on/off switches end: the window's right edge, and inside a
+/// group box.
+const RIGHT: f32 = 430.0;
+const GROUP_RIGHT: f32 = 423.0;
+
 /// The Preferences window showing `panel`, with `families` for Default Font.
 pub fn preferences(panel: usize, families: &[quill_layout::FontFamilyInfo]) -> Dialog {
     preferences_with(panel, families, &settings::get())
@@ -90,7 +95,7 @@ pub fn preferences_with(
     families: &[quill_layout::FontFamilyInfo],
     s: &settings::Settings,
 ) -> Dialog {
-    let height = 376.0;
+    let height = 424.0;
     let mut d = Dialog::new("Preferences", 442.0, height);
     d.close_box = true;
     d.modeless = true;
@@ -113,28 +118,31 @@ pub fn preferences_with(
             let names: Vec<&str> = Unit::ALL.iter().map(|u| u.label()).collect();
             let at = Unit::ALL.iter().position(|u| *u == s.unit).unwrap_or(0);
             d.popup("unit", &names, at, 139.0, 100.0, 89.0);
-            d.check(
+            d.toggle(
                 "autolinks",
                 "Make Typed Web and Mail Addresses Links",
                 12.0,
+                RIGHT,
                 126.0,
                 s.auto_links,
             );
-            d.check(
+            d.toggle(
                 "fmtclip",
                 "Include Formatted Text in Clipboard",
                 12.0,
-                143.0,
+                RIGHT,
+                150.0,
                 s.formatted_clipboard,
             );
-            d.check(
+            d.toggle(
                 "autolists",
                 "Start Lists from a Typed * or -",
                 12.0,
-                160.0,
+                RIGHT,
+                174.0,
                 s.auto_lists,
             );
-            d.text("Default Paper:", 11.0, 184.0);
+            d.text("Default Paper:", 11.0, 208.0);
             let papers = crate::page_dialogs::paper_choices(false);
             let current = crate::page_dialogs::paper_row(
                 &papers,
@@ -146,38 +154,47 @@ pub fn preferences_with(
                 papers.into_iter().map(|x| x.0).collect(),
                 current,
                 139.0,
-                181.0,
+                205.0,
                 160.0,
             );
-            crate::page_dialogs::custom_size_fields(&mut d, 306.0, 181.0, &s.document);
+            crate::page_dialogs::custom_size_fields(&mut d, 306.0, 205.0, &s.document);
             d.note(
                 "paper_help",
                 "For new documents. Page Setup changes the current document.",
                 12.0,
-                215.0,
+                239.0,
                 410.0,
             );
             d.focus("name");
         }
         1 => {
-            d.group("Show", 11.0, 39.0, 364.0, 88.0);
-            d.check("hidden", "Hidden Text", 16.0, 62.0, s.show_hidden);
-            d.check(
+            d.group("Show", 11.0, 39.0, 420.0, 100.0);
+            d.toggle(
+                "hidden",
+                "Hidden Text",
+                16.0,
+                GROUP_RIGHT,
+                62.0,
+                s.show_hidden,
+            );
+            d.toggle(
                 "gridlines",
                 "Table Gridlines",
                 16.0,
-                80.0,
+                GROUP_RIGHT,
+                86.0,
                 s.table_gridlines,
             );
-            d.check(
+            d.toggle(
                 "boundaries",
                 "Text Boundaries in Page Layout View",
                 16.0,
-                98.0,
+                GROUP_RIGHT,
+                110.0,
                 s.text_boundaries,
             );
-            d.group("Open Documents", 11.0, 134.0, 364.0, 104.0);
-            d.text("In View:", 16.0, 157.0);
+            d.group("Open Documents", 11.0, 148.0, 420.0, 118.0);
+            d.text("In View:", 16.0, 171.0);
             let views: Vec<&str> = settings::DefaultView::ALL
                 .iter()
                 .map(|v| v.label())
@@ -186,28 +203,37 @@ pub fn preferences_with(
                 .iter()
                 .position(|v| *v == s.default_view)
                 .unwrap_or(0);
-            d.popup("defaultview", &views, at, 90.0, 154.0, 140.0);
-            d.text("Zoom:", 246.0, 157.0);
+            d.popup("defaultview", &views, at, 90.0, 168.0, 140.0);
+            d.text("Zoom:", 246.0, 171.0);
             let (zooms, at) = zoom_choices(s.document_zoom);
             let names: Vec<String> = zooms.iter().map(|z| format!("{z}%")).collect();
-            d.popup_owned("defaultzoom", names, at, 290.0, 154.0, 80.0);
-            d.check(
+            d.popup_owned("defaultzoom", names, at, 290.0, 168.0, 80.0);
+            d.toggle(
                 "formatting",
                 "With Formatting Toolbar On",
                 16.0,
-                175.0,
+                GROUP_RIGHT,
+                193.0,
                 s.open_with_formatting_toolbar,
             );
-            d.check(
+            d.toggle(
                 "paragraph",
                 "With Paragraph Toolbar On",
                 16.0,
-                193.0,
+                GROUP_RIGHT,
+                217.0,
                 s.open_with_paragraph_toolbar,
             );
-            d.check("ruler", "With Ruler On", 16.0, 211.0, s.open_with_ruler);
-            d.group("Interface", 11.0, 246.0, 420.0, 80.0);
-            d.text("Appearance:", 16.0, 269.0);
+            d.toggle(
+                "ruler",
+                "With Ruler On",
+                16.0,
+                GROUP_RIGHT,
+                241.0,
+                s.open_with_ruler,
+            );
+            d.group("Interface", 11.0, 274.0, 420.0, 106.0);
+            d.text("Appearance:", 16.0, 297.0);
             let names: Vec<&str> = settings::Appearance::ALL
                 .iter()
                 .map(|a| a.label())
@@ -216,41 +242,57 @@ pub fn preferences_with(
                 .iter()
                 .position(|a| *a == s.appearance)
                 .unwrap_or(0);
-            d.popup("appearance", &names, at, 90.0, 266.0, 112.0);
-            d.text("Interface Size:", 16.0, 300.0);
+            d.popup("appearance", &names, at, 90.0, 294.0, 112.0);
+            d.text("Interface Size:", 16.0, 328.0);
             let names: Vec<String> = INTERFACE_SIZES.iter().map(|z| format!("{z}%")).collect();
             let at = INTERFACE_SIZES
                 .iter()
                 .enumerate()
                 .min_by_key(|(_, z)| z.abs_diff(s.interface_scale))
                 .map_or(0, |(i, _)| i);
-            d.popup_owned("ui_size", names, at, 110.0, 297.0, 90.0);
-            d.check(
+            d.popup_owned("ui_size", names, at, 110.0, 325.0, 90.0);
+            d.toggle(
                 "recent",
                 "List Recent Documents",
-                216.0,
-                300.0,
+                16.0,
+                GROUP_RIGHT,
+                352.0,
                 s.recent_files,
             );
         }
         2 => {
-            d.check("rtf", "Always Interpret RTF", 13.0, 45.0, s.interpret_rtf);
-            d.check("backup", "Always Make Backup", 13.0, 65.0, s.make_backup);
-            d.check(
+            d.toggle(
+                "rtf",
+                "Always Interpret RTF",
+                13.0,
+                RIGHT,
+                45.0,
+                s.interpret_rtf,
+            );
+            d.toggle(
+                "backup",
+                "Always Make Backup",
+                13.0,
+                RIGHT,
+                71.0,
+                s.make_backup,
+            );
+            d.toggle(
                 "foreign_quill",
                 "Save foreign files in Quill format by default",
                 13.0,
-                98.0,
+                RIGHT,
+                104.0,
                 s.foreign_as_quill,
             );
-            d.note("foreign_help", "Highly recommended", 32.0, 122.0, 380.0);
-            d.text("Reopen last session's documents:", 16.0, 157.0);
+            d.note("foreign_help", "Highly recommended", 32.0, 128.0, 380.0);
+            d.text("Reopen last session's documents:", 16.0, 163.0);
             let choices: Vec<&str> = settings::Reopen::ALL.iter().map(|r| r.label()).collect();
             let at = settings::Reopen::ALL
                 .iter()
                 .position(|r| *r == s.reopen)
                 .unwrap_or(2);
-            d.popup("reopen", &choices, at, 232.0, 154.0, 130.0);
+            d.popup("reopen", &choices, at, 232.0, 160.0, 130.0);
         }
         SPELLING_PANEL => {
             d.text("Custom Dictionary:", 9.0, 41.0);
@@ -288,48 +330,59 @@ pub fn preferences_with(
                 153.0,
                 410.0,
             );
-            d.check(
+            d.toggle(
                 "live_spelling",
                 "Check spelling as you type",
                 14.0,
+                RIGHT,
                 178.0,
                 s.spelling_as_you_type,
             );
-            d.check("suggest", "Always Suggest", 14.0, 200.0, s.always_suggest);
-            d.group("Ignore", 8.0, 225.0, 269.0, 66.0);
-            d.check(
+            d.toggle(
+                "suggest",
+                "Always Suggest",
+                14.0,
+                RIGHT,
+                204.0,
+                s.always_suggest,
+            );
+            d.group("Ignore", 8.0, 236.0, 422.0, 76.0);
+            d.toggle(
                 "upper",
                 "Words in UPPERCASE",
                 14.0,
-                248.0,
+                GROUP_RIGHT,
+                259.0,
                 s.ignore_uppercase,
             );
-            d.check(
+            d.toggle(
                 "numbers",
                 "Words with Numbers",
                 14.0,
-                269.0,
+                GROUP_RIGHT,
+                283.0,
                 s.ignore_numbers,
             );
             d.button(
                 "reset",
                 "Reset \u{201C}Ignore All\u{201D} List",
                 8.0,
-                302.0,
+                322.0,
                 175.0,
                 false,
             );
         }
         TOOLBAR_PANEL => {
-            d.check("viewtb", "View Toolbar", 14.0, 41.0, s.view_toolbar);
-            d.check(
+            d.toggle("viewtb", "View Toolbar", 14.0, RIGHT, 41.0, s.view_toolbar);
+            d.toggle(
                 "tabbuttons",
                 "Tab Buttons on the Paragraph Toolbar",
                 14.0,
-                59.0,
+                RIGHT,
+                67.0,
                 s.paragraph_toolbar_tabs,
             );
-            d.button("customize", "Customize…", 9.0, 90.0, 110.0, false);
+            d.button("customize", "Customize…", 9.0, 102.0, 110.0, false);
         }
         COLORS_PANEL => {
             d.text(
@@ -360,10 +413,11 @@ pub fn preferences_with(
                 .unwrap_or(1);
             let names: Vec<&str> = AUTOSAVE.iter().map(|a| a.0).collect();
             d.popup("autosave", &names, at, 139.0, 52.0, 150.0);
-            d.check(
+            d.toggle(
                 "smart",
                 "\u{201C}Smart\u{201D} Quotes",
                 12.0,
+                RIGHT,
                 109.0,
                 s.smart_quotes,
             );
@@ -457,20 +511,29 @@ pub fn preferences_with(
                 "font_sources",
                 "Additional Font Sources…",
                 12.0,
-                218.0,
+                206.0,
                 225.0,
                 false,
             );
-            d.check(
+            d.toggle(
                 "private_fonts",
                 "Show Private System Fonts",
-                250.0,
-                221.0,
+                12.0,
+                RIGHT,
+                236.0,
                 s.show_private_fonts,
+            );
+            d.toggle(
+                "ligatures",
+                "Ligatures (fi, fl, ff)",
+                12.0,
+                RIGHT,
+                260.0,
+                s.ligatures,
             );
             // Fonts for Markdown: the plain text of Source view, and the
             // formatted document made from a Markdown file.
-            d.group("Markdown", 11.0, 252.0, 420.0, 74.0);
+            d.group("Markdown", 11.0, 292.0, 420.0, 74.0);
             let rows = [
                 (
                     "Source:",
@@ -488,7 +551,7 @@ pub fn preferences_with(
                 ),
             ];
             for (row, (label, font_id, size_id, name, size)) in rows.into_iter().enumerate() {
-                let y = 272.0 + row as f32 * 28.0;
+                let y = 312.0 + row as f32 * 28.0;
                 let (list, at) = plain_families(families, name);
                 d.text(label, 16.0, y + 3.0);
                 d.font_popup(font_id, &list, at, 70.0, y, 180.0);
@@ -924,6 +987,7 @@ pub fn changed_in(panel: usize, d: &mut Dialog, id: &str, s: &mut settings::Sett
             let font = d.selected_text("font");
             let size: Option<f32> = d.field_text("size").trim().parse().ok();
             s.show_private_fonts = on("private_fonts");
+            s.ligatures = on("ligatures");
             {
                 if !font.is_empty() {
                     s.font = font;
@@ -1087,6 +1151,7 @@ pub fn save(original: &mut settings::Settings, draft: &settings::Settings) {
             font_italic,
             size,
             show_private_fonts,
+            ligatures,
             markdown_source_font,
             markdown_source_size,
             markdown_display_font,
@@ -1184,14 +1249,38 @@ mod tests {
     }
 
     #[test]
+    fn ligatures_are_on_until_turned_off_and_the_choice_is_saved() {
+        settings::update(|s| *s = settings::Settings::default());
+        let mut original = settings::get();
+        let mut draft = original.clone();
+        assert!(draft.ligatures);
+        let mut d = preferences_with(DEFAULT_FONT_PANEL, &[family("Arial")], &draft);
+        assert!(d.is_on("ligatures"));
+        // It sits under Show Private System Fonts, above the Markdown group.
+        let rect = |id: &str| d.items.iter().find(|i| i.id == id).unwrap().rect;
+        assert!(rect("ligatures").y >= rect("private_fonts").bottom());
+        assert!(rect("ligatures").bottom() <= 292.0);
+        d.set_on("ligatures", false);
+        changed_in(DEFAULT_FONT_PANEL, &mut d, "ligatures", &mut draft);
+        save(&mut original, &draft);
+        assert!(!settings::get().ligatures);
+        let back = settings::Settings::from_text(&settings::get().to_text());
+        assert!(!back.ligatures);
+        assert!(settings::Settings::from_text("").ligatures);
+        settings::update(|s| *s = settings::Settings::default());
+    }
+
+    #[test]
     fn saving_keeps_every_choice_the_font_panel_makes() {
         settings::update(|s| *s = settings::Settings::default());
         settings::update(|s| s.font = "Georgia".into());
         let families = [family("Arial"), family("Georgia")];
         let mut original = settings::get();
+        let existing = original.new_document();
+        let saved_document = quill_formats::native::write(&existing, 0);
         let mut draft = original.clone();
         let mut d = preferences_with(DEFAULT_FONT_PANEL, &families, &draft);
-        d.set_selected("font", 1);
+        d.set_selected("font", 0);
         changed_in(DEFAULT_FONT_PANEL, &mut d, "font", &mut draft);
         let mut d = preferences_with(DEFAULT_FONT_PANEL, &families, &draft);
         d.set_selected("style", 1);
@@ -1201,9 +1290,31 @@ mod tests {
         let s = settings::get();
         assert_eq!(
             (s.font.as_str(), s.font_bold, s.font_italic),
-            ("Georgia", true, false)
+            ("Arial", true, false)
         );
         assert_eq!(s.document.scripts.raise, 40);
+
+        let reopened_settings = settings::Settings::from_text(&s.to_text());
+        let new = reopened_settings.new_document();
+        let normal = new.styles.normal_character();
+        let format = new.styles.character(normal).unwrap().format;
+        assert_eq!(new.font_name(format.props.font), "Arial");
+        assert!(format.props.bold);
+        assert!(
+            new.styles
+                .styles
+                .iter()
+                .all(|style| style.character == normal)
+        );
+        assert_eq!(quill_formats::native::write(&existing, 0), saved_document);
+        let reopened = quill_formats::native::read(&saved_document).unwrap();
+        assert_eq!(reopened.styles, existing.styles);
+        assert_eq!(reopened.main, existing.main);
+        assert_eq!(reopened.fonts, existing.fonts);
+        assert_eq!(
+            reopened.font_name(reopened.styles.get(0).chp.font),
+            "Georgia"
+        );
         settings::update(|s| *s = settings::Settings::default());
     }
 

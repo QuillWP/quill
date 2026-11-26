@@ -30,10 +30,18 @@ without asking. macOS is the primary target; Windows and Linux come second.
 - `vendor/winit` is a patched copy. Read `vendor/README.md` before touching
   it or upgrading winit.
 - Match the code around you. Comments say what the code does and why, plainly.
+- The release app stays under 10 MB (decimal MB, the whole `Quill.app`). Check
+  the size of any change that adds a dependency or data file.
 - Every format shares the size limits in `quill_core::limits`. What Quill
   opens it must be able to save and reopen.
 - A dialog must change only what the person changed. Read length fields with
   `units::parse_length_from(text, old)`, since the shown text is rounded.
 - No migration or compatibility code for earlier alpha builds.
+- Mac VoiceOver support (`mac_text_mirror.rs`) is experimental and stays as
+  it is. Keep it working and fix what breaks, but do not extend it until
+  someone who uses VoiceOver regularly has tested Quill and reported bugs.
+  Without that testing nobody can tell whether a change helps. The mirror
+  holds a copy of the text only while VoiceOver is running, so it adds no
+  cost per edit for anyone else; keep it that way.
 - Test with copies of documents, and run test copies of Quill with their own
   `HOME` so they do not touch anyone's settings or recovery files.

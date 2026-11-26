@@ -283,7 +283,7 @@ mod tests {
         assert_eq!(target.styles.characters.len(), count);
         target.commit(Selection::default());
         target.undo();
-        assert_eq!(target.styles.characters.len(), 1);
+        assert_eq!(target.styles.characters.len(), 2);
     }
 
     /// The 2026-11-07 clipboard fuzz run saved this input after a deadly
@@ -321,7 +321,7 @@ mod tests {
         target.undo();
 
         assert_eq!(target.main.paras[0].text, "Existing text");
-        assert_eq!(target.styles.characters.len(), 3);
+        assert_eq!(target.styles.characters.len(), 4);
     }
 
     #[test]

@@ -273,7 +273,7 @@ fn read_into(data: &[u8], report: &mut ImportReport) -> Result<Document, String>
     if !data.starts_with(b"{\\rtf") {
         return Err("not an RTF file".into());
     }
-    let doc = Document::new();
+    let doc = Document::for_import();
     let normal = doc.styles.get(0).clone();
     let character_names = quill_core::character_styles::CharacterNames::of(&doc.styles);
     let mut r = Reader {
@@ -2115,6 +2115,7 @@ impl Reader {
             }
             self.doc.reconcile(quill_core::notes::NoteKind::Annotation);
         }
+        self.doc.styles.ensure_normal_character();
         self.doc.forget_history();
         Ok(self.doc)
     }
@@ -2494,7 +2495,7 @@ mod tests {
         rtf.push_str("{\\*\\cs60000 STYLE 7;}}x}");
         let started = std::time::Instant::now();
         let doc = read(rtf.as_bytes()).unwrap();
-        assert_eq!(doc.styles.characters.len(), 60_000);
+        assert_eq!(doc.styles.characters.len(), 60_001);
         assert_eq!(doc.styles.find_character("style 59999"), Some(60_000));
         // Over a minute before, in a debug build; about a second now.
         assert!(started.elapsed() < std::time::Duration::from_secs(20));

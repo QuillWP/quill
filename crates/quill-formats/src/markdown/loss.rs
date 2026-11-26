@@ -48,7 +48,7 @@ fn blank(story: &quill_core::Story) -> bool {
 /// the person's default paper, so keeping that is no loss.
 pub fn losses(doc: &Document, paper: &quill_core::DocumentProps) -> Vec<&'static str> {
     let mut found = Vec::new();
-    if !doc.styles.characters.is_empty() {
+    if doc.styles.characters.iter().any(|style| !style.is_normal()) {
         note(&mut found, CHARACTER_STYLES);
     }
     if doc.has_changes() {

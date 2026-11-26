@@ -297,7 +297,19 @@ impl DocView {
                 draw_border_box(c, b, x, y);
             }
             let w = self.note_widths.get(i).copied().unwrap_or(0.0);
-            paint_paragraph(c, fonts, cache, p, l, x, y, false, w, &self.doc.objects);
+            paint_paragraph(
+                c,
+                fonts,
+                cache,
+                p,
+                l,
+                x,
+                y,
+                false,
+                w,
+                &self.doc.objects,
+                self.ligatures(),
+            );
             y += l.height;
         }
     }

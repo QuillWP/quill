@@ -1524,7 +1524,7 @@ fn read_body(
     z: &zip::Archive,
     budget: &mut crate::ReadBudget,
 ) -> Result<Document, Damaged> {
-    let mut doc = Document::new();
+    let mut doc = Document::for_import();
     let mut character_names = quill_core::character_styles::CharacterNames::of(&doc.styles);
     let mut fonts = Vec::new();
     let mut styles = Vec::new();
@@ -1613,6 +1613,8 @@ fn read_body(
     }
     doc.objects = objects;
     repair(&mut doc);
+    doc.styles.ensure_normal_character();
+    doc.styles.ensure_title_styles();
     doc.forget_history();
     doc.mark_saved();
     Ok(doc)
@@ -1662,7 +1664,8 @@ fn read_picture(
             _ => {}
         }
     }
-    if !budget.add_picture(&file) || budget.full() {
+    let bytes = z.entry_size(&file).ok_or(Damaged)?;
+    if !budget.add_picture(&file, bytes) || budget.full() {
         return Err(Damaged);
     }
     let data = match loaded.get(&file) {
@@ -1676,6 +1679,10 @@ fn read_picture(
     let preview = if preview_file.is_empty() {
         None
     } else {
+        let bytes = z.entry_size(&preview_file).ok_or(Damaged)?;
+        if !budget.add_picture(&preview_file, bytes) || budget.full() {
+            return Err(Damaged);
+        }
         let d = match loaded.get(&preview_file) {
             Some(d) => d.clone(),
             None => {
@@ -1846,6 +1853,23 @@ mod tests {
         assert!(read_story(&story, &mut budget).is_err());
         assert!(budget.too_large().is_some());
         assert!(budget.size.paragraphs <= quill_core::limits::MAX_PARAGRAPHS + 1);
+    }
+
+    #[test]
+    fn picture_bytes_are_refused_before_their_entries_are_read() {
+        let mut budget = crate::ReadBudget::default();
+        assert!(budget.add_picture(
+            "objects/one.png",
+            quill_core::limits::MAX_PICTURE_DATA_BYTES
+        ));
+        // A second placement of the same file is free.
+        assert!(budget.add_picture("objects/one.png", usize::MAX));
+        assert!(!budget.add_picture("objects/two.png", 1));
+        assert!(
+            budget
+                .too_large()
+                .is_some_and(|why| why.contains("picture data"))
+        );
     }
 
     #[test]

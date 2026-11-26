@@ -304,6 +304,7 @@ impl Cmd {
                 | PlainText
                 | FontSizeUp
                 | FontSizeDown
+                | FontSizeDialog
                 | LargerFontSize
                 | SmallerFontSize
                 | AlignLeft
@@ -768,6 +769,7 @@ pub fn lookup(key: &Key, physical_char: Option<char>, mods: Mods) -> Option<Cmd>
         (K::Ch('v'), true, true, false) => PasteText,
         (K::Ch('a'), true, false, false) => SelectAll,
         (K::Ch('f'), true, false, false) => Find,
+        (K::Ch('f'), true, false, true) => FontSizeDialog,
         (K::Ch('h'), true, false, false) | (K::Ch('f'), true, true, false) => Replace,
         (K::Ch('g'), true, false, false) => GoTo,
         (K::Ch('e'), true, false, false) => InsertFootnote,
@@ -942,10 +944,13 @@ pub fn shortcut_label(cmd: Cmd) -> &'static str {
         Bold => "⌘B",
         Italic => "⌘I",
         Underline => "⌘U",
+        AllCaps => "⌘⇧K",
+        SmallCaps => "⌘⇧H",
         RevertToStyle => "⌘⇧␣",
         CycleCase => "⇧F3",
         LargerFontSize => "⌘⇧>",
         SmallerFontSize => "⌘⇧<",
+        FontSizeDialog => "⌘⌥F",
         FontSizeUp => "⌘]",
         FontSizeDown => "⌘[",
         _ => "",
@@ -997,6 +1002,10 @@ mod tests {
     #[test]
     fn default_shortcuts() {
         assert_eq!(lookup(&ch("f"), None, cmd()), Some(Cmd::Find));
+        assert_eq!(
+            lookup(&ch("ƒ"), Some('f'), Mods { opt: true, ..cmd() }),
+            Some(Cmd::FontSizeDialog)
+        );
         assert_eq!(lookup(&ch("F"), Some('f'), cmd_shift()), Some(Cmd::Replace));
         assert_eq!(lookup(&ch("b"), None, cmd()), Some(Cmd::Bold));
         // Command-Shift-Z is Redo, as on every other Mac app, and no longer

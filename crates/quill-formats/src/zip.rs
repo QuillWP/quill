@@ -196,6 +196,14 @@ impl<'a> Archive<'a> {
         self.entries.iter().map(|e| e.name.as_str())
     }
 
+    /// An entry's expanded size, without reading or allocating it.
+    pub fn entry_size(&self, name: &str) -> Option<usize> {
+        self.entries
+            .iter()
+            .find(|e| e.name.eq_ignore_ascii_case(name))
+            .map(|e| e.size)
+    }
+
     /// The contents of `name`, or None if the archive has no such entry.
     pub fn read(&self, name: &str) -> Result<Option<Vec<u8>>, ZipError> {
         let Some(e) = self
@@ -384,6 +392,8 @@ mod tests {
         let bytes = w.finish();
         let a = Archive::open(&bytes).unwrap();
         assert_eq!(a.names().collect::<Vec<_>>(), ["a.txt", "dir/b.xml"]);
+        assert_eq!(a.entry_size("DIR/B.XML"), Some(big.len()));
+        assert_eq!(a.entry_size("missing"), None);
         assert_eq!(a.read("a.txt").unwrap().unwrap(), b"hello");
         assert_eq!(a.read("dir/b.xml").unwrap().unwrap(), big.as_bytes());
         assert!(a.read("missing").unwrap().is_none());

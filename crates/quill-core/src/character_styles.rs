@@ -93,7 +93,41 @@ pub struct CharacterStyle {
     pub format: CharacterFormat,
 }
 
+impl CharacterStyle {
+    pub fn is_normal(&self) -> bool {
+        self.name.eq_ignore_ascii_case("Normal")
+    }
+}
+
 impl crate::StyleSheet {
+    pub fn normal_character(&self) -> u16 {
+        self.find_character("Normal").unwrap_or(0)
+    }
+
+    /// Install the document's default character style without changing the
+    /// formatting stored in its paragraph styles or text.
+    pub fn ensure_normal_character(&mut self) {
+        let count = self.characters.len();
+        let mut normal = self.normal_character();
+        if normal == 0 {
+            let props = self.get(crate::styles::NORMAL).chp;
+            let Some(id) = self.add_character("Normal", CharacterFormat::new(props, 0b1111)) else {
+                return;
+            };
+            normal = id;
+        }
+        for style in &mut self.styles {
+            if style.character == 0 || style.character as usize > count {
+                style.character = normal;
+                style.own_chp = style.chp;
+            }
+        }
+    }
+
+    pub fn can_delete_character(&self, id: u16) -> bool {
+        self.character(id).is_some_and(|style| !style.is_normal())
+    }
+
     /// Zero means no named character style; definitions are numbered from one.
     pub fn character(&self, id: u16) -> Option<&CharacterStyle> {
         id.checked_sub(1)
@@ -327,7 +361,8 @@ impl Document {
         let Some(style) = self.styles.character(id) else {
             return false;
         };
-        if name.is_empty()
+        if style.is_normal()
+            || name.is_empty()
             || name.chars().count() > crate::limits::MAX_NAME
             || style.name == name
             || self
@@ -396,23 +431,27 @@ impl Document {
         self.record_sheet();
         self.styles.characters[id as usize - 1].format = format;
         self.update_character_uses(id, old.format, false);
-        self.relink_paragraph_styles(id);
+        self.relink_paragraph_styles(id, old);
         true
     }
 
     /// Detach uses without changing their visible formatting; subsequent IDs
     /// move down with the definition, including uses in section headers.
     pub fn delete_character_style(&mut self, id: u16) -> bool {
+        if !self.styles.can_delete_character(id) {
+            return false;
+        }
         let Some(old) = self.styles.character(id).cloned() else {
             return false;
         };
         self.record_sheet();
         self.styles.characters.remove(id as usize - 1);
         self.update_character_uses(id, old.format, true);
-        // Paragraph styles that took it keep their look, now as their own.
+        let normal = self.styles.normal_character();
+        // Paragraph styles that took it return to Normal and keep their look.
         for s in &mut self.styles.styles {
             if s.character == id {
-                s.character = 0;
+                s.character = normal;
                 s.own_chp = s.chp;
             } else if s.character > id {
                 s.character -= 1;
@@ -434,16 +473,16 @@ impl Document {
                             c.character_style = 0;
                             c.direct_format = 0;
                         } else {
-                            let new = self.styles.character(id).unwrap().format;
+                            let new = self.styles.character(id).unwrap();
                             CharacterFormat::copy_fields(
                                 c,
                                 base,
-                                old.mask & !new.mask & !c.direct_format,
+                                old.mask & !new.format.mask & !c.direct_format,
                             );
                             CharacterFormat::copy_fields(
                                 c,
-                                new.resolved(base),
-                                new.mask & !c.direct_format,
+                                new.format.resolved(base),
+                                new.format.mask & !c.direct_format,
                             );
                         }
                     } else if delete && c.character_style > id {
@@ -507,20 +546,41 @@ mod tests {
     }
 
     #[test]
+    fn normal_is_protected_and_its_font_changes_only_inheriting_paragraphs() {
+        let mut doc = Document::with_default_font("Times New Roman", 24);
+        let props = doc.styles.get(0).chp;
+        doc.insert_plain(MAIN, Position::new(0, 0), "Body\nHeading", props);
+        let normal = doc.styles.normal_character();
+        assert!(!doc.delete_character_style(normal));
+        assert!(!doc.rename_character_style(normal, "Body"));
+        let heading = doc.styles.find("heading 1").unwrap();
+        doc.apply_style(MAIN, 1, 1, heading);
+        let heading_props = doc.styles.get(heading).chp;
+
+        let mut format = doc.styles.character(normal).unwrap().format;
+        format.props.font = doc.font_id("Georgia");
+        assert!(doc.redefine_character_style(normal, format));
+
+        assert_eq!(doc.main.paras[0].chp_of_char(0).font, format.props.font);
+        assert_eq!(doc.main.paras[1].chp_of_char(0).font, heading_props.font);
+        assert_eq!(doc.styles.get(heading).chp, heading_props);
+    }
+
+    #[test]
     fn character_names_refuse_what_add_character_refuses() {
         let mut sheet = crate::text::from_plain_text("x").styles;
         let format = CharacterFormat::default();
-        assert_eq!(sheet.add_character("Strong", format), Some(1));
+        assert_eq!(sheet.add_character("Strong", format), Some(2));
         let mut names = CharacterNames::of(&sheet);
         // Taken already, in any case and with spaces round it.
         assert!(names.contains(" STRONG "));
         assert_eq!(names.add(&mut sheet, "strong", format), None);
-        assert_eq!(names.add(&mut sheet, "Quote", format), Some(2));
+        assert_eq!(names.add(&mut sheet, "Quote", format), Some(3));
         assert_eq!(names.add(&mut sheet, " quote", format), None);
         assert_eq!(names.add(&mut sheet, "  ", format), None);
         assert_eq!(names.add(&mut sheet, &"n".repeat(256), format), None);
-        assert_eq!(sheet.characters.len(), 2);
-        assert_eq!(sheet.find_character("QUOTE"), Some(2));
+        assert_eq!(sheet.characters.len(), 3);
+        assert_eq!(sheet.find_character("QUOTE"), Some(3));
     }
 
     #[test]
@@ -604,7 +664,10 @@ mod tests {
         let looked = d.styles.get(heading).chp;
         assert!(d.delete_character_style(callout));
         let style = d.styles.get(heading);
-        assert_eq!((style.character, style.chp), (0, looked));
+        assert_eq!(
+            (style.character, style.chp),
+            (d.styles.normal_character(), looked)
+        );
         assert_eq!(style.own(), looked);
         assert_eq!(d.styles.get(0).character, quote - 1, "Quote moved down");
         assert!(d.styles.get(0).chp.italic);
@@ -615,7 +678,7 @@ mod tests {
         let (mut d, heading, callout) = linked_fixture();
         d.styles.styles[heading as usize].character = 9;
         d.keep_in_bounds();
-        assert_eq!(d.styles.get(heading).character, 0);
+        assert_eq!(d.styles.get(heading).character, d.styles.normal_character());
         let own = d.styles.get(heading).chp;
         d.styles.styles[heading as usize].character = callout;
         d.styles.styles[heading as usize].own_chp = own;

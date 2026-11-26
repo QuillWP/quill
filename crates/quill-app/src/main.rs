@@ -21,6 +21,7 @@ mod contents_dialogs;
 mod crash_log;
 mod customize;
 mod dialog;
+mod document_styles;
 mod docview;
 mod events;
 mod file_dialog;
@@ -40,6 +41,8 @@ mod listbox;
 mod local_dictionary;
 #[cfg(target_os = "macos")]
 mod mac_alert;
+#[cfg(target_os = "macos")]
+mod mac_text_mirror;
 // Its only callers are left out of tests, which keep Quill's own editor.
 #[cfg(all(target_os = "macos", not(test)))]
 mod mac_color_panel;

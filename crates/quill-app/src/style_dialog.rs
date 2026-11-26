@@ -39,12 +39,13 @@ fn sorted(doc: &Document, ids: impl Iterator<Item = StyleId>) -> Vec<StyleId> {
     v
 }
 
-/// The document's styles: Normal, styles in use and styles the user made.
+/// The shared "This Document" paragraph styles, sorted for this dialog.
 fn document_styles(view: &DocView) -> Vec<StyleId> {
-    let doc = &view.doc;
-    let used = doc.main.paras.iter().map(|p| p.pap.style);
-    let made = (0..doc.styles.styles.len() as StyleId).filter(|&i| !doc.styles.get(i).builtin);
-    sorted(doc, used.chain(made).chain([0, view.current_pap().style]))
+    sorted(
+        &view.doc,
+        crate::document_styles::paragraph_styles(&view.doc, Some(view.current_pap().style))
+            .into_iter(),
+    )
 }
 
 /// Every style the editor can be on: a new one, then all the styles.
@@ -68,7 +69,7 @@ pub struct ListState {
     pub ids: Vec<StyleId>,
 }
 
-/// Format > Paragraph Styles: the list, on the current paragraph's style.
+/// Format > Stylesheets: the list, on the current paragraph's style.
 pub fn list(view: &DocView) -> (Dialog, ListState) {
     // The same layout as the Character Styles list, with the two radio
     // buttons above the list.
@@ -354,11 +355,14 @@ pub fn editing(st: &StyleState) -> Option<StyleId> {
     st.entries.get(st.selected).copied().flatten()
 }
 
-/// The Character Style popup: No Style, the document's character styles,
+/// The Character Style popup: the document's character styles,
 /// and a last choice that makes a new one.
 fn character_choices(view: &DocView) -> Vec<String> {
-    std::iter::once("No Style".to_string())
-        .chain(view.doc.styles.characters.iter().map(|s| s.name.clone()))
+    view.doc
+        .styles
+        .characters
+        .iter()
+        .map(|s| s.name.clone())
         .chain(std::iter::once("New Character Style\u{2026}".to_string()))
         .collect()
 }
@@ -367,7 +371,11 @@ fn character_choices(view: &DocView) -> Vec<String> {
 /// and link the style being edited to it.
 pub fn character_saved(st: &mut StyleState, d: &mut Dialog, view: &DocView, id: u16) {
     st.character = id;
-    d.set_options("character_style", character_choices(view), id as usize);
+    d.set_options(
+        "character_style",
+        character_choices(view),
+        id.saturating_sub(1) as usize,
+    );
     update_description(st, d, view);
 }
 
@@ -382,7 +390,7 @@ fn select(st: &mut StyleState, d: &mut Dialog, view: &DocView, i: usize) {
         None => {
             st.pap = view.current_pap().clone();
             st.chp = view.current_chp();
-            st.character = 0;
+            st.character = view.doc.styles.normal_character();
             d.set_field("name", "");
             d.set_selected("basedon", at(Some(view.current_pap().style)));
             d.set_selected("next", 0);
@@ -397,7 +405,7 @@ fn select(st: &mut StyleState, d: &mut Dialog, view: &DocView, i: usize) {
             d.set_selected("next", if s.next == id { 0 } else { at(Some(s.next)) });
         }
     }
-    d.set_selected("character_style", st.character as usize);
+    d.set_selected("character_style", st.character.saturating_sub(1) as usize);
     update_description(st, d, view);
     d.focus("name");
 }
@@ -451,7 +459,11 @@ pub fn update_description(st: &StyleState, d: &mut Dialog, view: &DocView) {
     let paragraph = describe_component(&doc, base, &st.pap, &st.chp, false, true);
     let characters = describe_component(&doc, None, &st.pap, &st.chp, true, false);
     show_lines(d, &["desc0", "desc1", "desc2", "desc3"], &paragraph, false);
-    let linked = view.doc.styles.character(st.character);
+    let linked = view
+        .doc
+        .styles
+        .character(st.character)
+        .filter(|style| !style.is_normal());
     show_lines(
         d,
         &["char0", "char1", "char2"],
@@ -463,11 +475,11 @@ pub fn update_description(st: &StyleState, d: &mut Dialog, view: &DocView) {
             let summary = crate::character_style_dialog::summary(&view.doc, c.format);
             let sets = summary.strip_prefix("Sets: ").unwrap_or("nothing yet");
             format!(
-                "Linked to {} ({sets}). No Style brings back the manual formatting above.",
+                "Linked to {} ({sets}). Choose Normal to use the paragraph style's own formatting.",
                 c.name
             )
         }
-        None => "No Style uses the manual character formatting.".to_string(),
+        None => "Uses Normal with the paragraph style's own formatting.".to_string(),
     };
     d.set_label("character_status", &status);
 }
@@ -489,7 +501,7 @@ fn chosen(st: &StyleState, d: &Dialog, id: &str) -> Option<StyleId> {
 
 pub fn changed(st: &mut StyleState, d: &mut Dialog, view: &DocView, id: &str) {
     if id == "character_style" {
-        st.character = d.selected("character_style") as u16;
+        st.character = d.selected("character_style") as u16 + 1;
         update_description(st, d, view);
     }
 }
@@ -1043,6 +1055,36 @@ mod tests {
             assert_eq!(a.rect.x, b.rect.x, "{id}");
             assert_eq!(a.rect.w, b.rect.w, "{id}");
         }
+    }
+
+    #[test]
+    fn this_document_agrees_with_the_palette_about_styles_outside_main_text() {
+        let mut doc = Document::new();
+        let header = doc.styles.find("header").unwrap();
+        let props = doc.styles.get(0).chp;
+        doc.insert_plain(
+            StoryId::FirstHeader,
+            quill_core::Position::new(0, 0),
+            "Title",
+            props,
+        );
+        doc.apply_style(StoryId::FirstHeader, 0, 0, header);
+        let view = DocView::new(doc, "Untitled1".into());
+
+        let mut dialog = document_styles(&view);
+        dialog.sort_unstable();
+        let mut palette: Vec<_> =
+            crate::styles_palette::entries(&view.doc, crate::styles_palette::Tab::Paragraph, false)
+                .into_iter()
+                .filter_map(|entry| match entry {
+                    crate::styles_palette::Entry::Paragraph(id) => Some(id),
+                    _ => None,
+                })
+                .collect();
+        palette.sort_unstable();
+
+        assert!(dialog.contains(&header));
+        assert_eq!(dialog, palette);
     }
 
     #[test]

@@ -3,12 +3,12 @@
 //! at about the size the screen shows them, not at full resolution, so a
 //! large photo does not hold tens of megabytes.
 
+use quill_core::limits::MAX_DECODED_PICTURE_PIXELS;
 use quill_core::{Document, ImageFormat, Object, Picture};
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-const MAX_DECODED_PIXELS: u64 = 32_000_000;
 const PREVIEW_THRESHOLD_PIXELS: u64 = 4_000_000;
 const PREVIEW_MAX_EDGE: u32 = 1600;
 
@@ -41,7 +41,7 @@ fn jpeg(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     d.decode_headers().ok()?;
     let info = d.info()?;
     let (w, h) = (info.width as u32, info.height as u32);
-    if u64::from(w).checked_mul(u64::from(h))? > MAX_DECODED_PIXELS {
+    if u64::from(w).checked_mul(u64::from(h))? > MAX_DECODED_PICTURE_PIXELS {
         return None;
     }
     let px = d.decode().ok()?;
@@ -85,7 +85,7 @@ fn png(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         }
         i += 12 + len;
     }
-    if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_DECODED_PIXELS {
+    if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_DECODED_PICTURE_PIXELS {
         return None;
     }
     let channels: u32 = match ct {

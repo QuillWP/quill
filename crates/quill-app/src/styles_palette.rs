@@ -4,23 +4,22 @@
 //! them. It docks against the right side of the document window, or comes
 //! out into a small window of its own that can go anywhere on the screen.
 
-use crate::canvas::{Canvas, Label, Rect, color};
+use crate::canvas::{Canvas, Label, Rect, color, round_rect};
 use quill_core::Document;
 use quill_core::props::StyleId;
+use std::time::Instant;
 
 /// Heights and widths in interface units.
-pub const TITLE: f32 = 20.0;
-const TABS: f32 = 26.0;
-const BUTTONS: f32 = 26.0;
+const TITLE: f32 = 24.0;
+const TABS: f32 = 20.0;
+const BUTTONS: f32 = 22.0;
 const ROW: f32 = 20.0;
 /// The docked width, and the size of the window it comes out into.
 pub const DOCK_WIDTH: f32 = 220.0;
-pub const WINDOW_SIZE: (f32, f32) = (220.0, 340.0);
+pub const DOCK_MIN_WIDTH: f32 = 140.0;
+pub const WINDOW_SIZE: (f32, f32) = (210.0, 310.0);
 /// The smallest the palette's own window goes.
-pub const WINDOW_MIN: (f32, f32) = (170.0, 160.0);
-/// The width of the dock button in the tab row of the palette's own window.
-const DOCK_BUTTON: f32 = 24.0;
-
+pub const WINDOW_MIN: (f32, f32) = (200.0, 160.0);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
     All,
@@ -36,15 +35,6 @@ impl Tab {
             Tab::All => "All",
             Tab::Paragraph => "Paragraph",
             Tab::Character => "Character",
-        }
-    }
-
-    /// For a palette too narrow for the whole name.
-    fn short(self) -> &'static str {
-        match self {
-            Tab::All => "All",
-            Tab::Paragraph => "Para",
-            Tab::Character => "Char",
         }
     }
 
@@ -83,20 +73,28 @@ pub enum Button {
     Delete,
 }
 
-const BUTTON_LIST: [(Button, &str); 4] = [
-    (Button::New, "New"),
-    (Button::Edit, "Edit"),
-    (Button::Copy, "Copy"),
+const FOOTER: [(Hit, &str); 3] = [
+    (Hit::Button(Button::New), "+"),
+    (Hit::Button(Button::Delete), "−"),
+    (Hit::More, "⋯"),
+];
+const ACTIONS: [(Button, &str); 3] = [
+    (Button::Edit, "Edit Style…"),
+    (Button::Copy, "Duplicate"),
     (Button::Delete, "Delete"),
 ];
+const ACTION_WIDTH: f32 = 136.0;
 
 /// What a click on the palette hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
+    More,
     Close,
+    Title,
     /// Dock or undock.
     Dock,
     Tab(Tab),
+    ToggleScope,
     Button(Button),
     Row(usize),
     /// Palette furniture that does nothing.
@@ -105,6 +103,7 @@ pub enum Hit {
 
 pub struct Palette {
     pub tab: Tab,
+    pub show_all: bool,
     /// Docked to the right of the document, not in a window of its own.
     pub docked: bool,
     /// While it is drawn in a window of its own, that window's size in
@@ -115,22 +114,36 @@ pub struct Palette {
     /// The row last clicked, which Edit, Copy and Delete work on.
     pub chosen: Option<Entry>,
     pub hover: Option<Hit>,
+    pub dock_width: f32,
+    pub resize_grab: Option<f32>,
+    pub title_press: Option<(f32, f32)>,
+    pub actions_at: Option<(f32, f32)>,
+    pub last_row_click: Option<(Entry, Instant)>,
 }
 
 impl Palette {
     pub fn new(tab: Tab, docked: bool) -> Palette {
         Palette {
             tab,
+            show_all: false,
             docked,
             window: None,
             scroll: 0.0,
             chosen: None,
             hover: None,
+            dock_width: DOCK_WIDTH,
+            resize_grab: None,
+            title_press: None,
+            actions_at: None,
+            last_row_click: None,
         }
     }
 
     pub fn set_tab(&mut self, tab: Tab) {
         self.tab = tab;
+        self.actions_at = None;
+        self.last_row_click = None;
+        self.chosen = None;
         self.scroll = 0.0;
     }
 }
@@ -140,17 +153,21 @@ impl Palette {
 /// styles "No Style" and Clear Formatting. The named styles follow, sorted
 /// by name. The All tab has only the paragraph fixed rows, and the two kinds
 /// of style share one list after them, so they are sorted together.
-pub fn entries(doc: &Document, tab: Tab) -> Vec<Entry> {
+pub fn entries(doc: &Document, tab: Tab, show_all: bool) -> Vec<Entry> {
     let mut rows = Vec::new();
     let mut named: Vec<(String, Entry)> = Vec::new();
     if tab != Tab::Character {
         rows.push(Entry::NoParagraph);
         rows.push(Entry::ClearParagraph);
         rows.push(Entry::Paragraph(0));
-        named.extend((1..doc.styles.styles.len() as StyleId).map(|id| {
-            let e = Entry::Paragraph(id);
-            (name(doc, e).to_lowercase(), e)
-        }));
+        named.extend(
+            visible_paragraph_styles(doc, show_all)
+                .into_iter()
+                .map(|id| {
+                    let e = Entry::Paragraph(id);
+                    (name(doc, e).to_lowercase(), e)
+                }),
+        );
     }
     if tab != Tab::Paragraph {
         if tab == Tab::Character {
@@ -167,6 +184,17 @@ pub fn entries(doc: &Document, tab: Tab) -> Vec<Entry> {
     named.sort_by(|a, b| a.0.cmp(&b.0));
     rows.extend(named.into_iter().map(|(_, e)| e));
     rows
+}
+
+fn visible_paragraph_styles(doc: &Document, show_all: bool) -> Vec<StyleId> {
+    if show_all {
+        (1..doc.styles.styles.len() as StyleId).collect()
+    } else {
+        crate::document_styles::paragraph_styles(doc, None)
+            .into_iter()
+            .filter(|&id| id != 0)
+            .collect()
+    }
 }
 
 /// What the row reads.
@@ -200,7 +228,7 @@ pub fn can_edit(e: Option<Entry>) -> bool {
 pub fn can_delete(doc: &Document, e: Option<Entry>) -> bool {
     match e {
         Some(Entry::Paragraph(id)) => id != 0 && !doc.styles.get(id).builtin,
-        Some(Entry::Character(id)) => id != 0,
+        Some(Entry::Character(id)) => doc.styles.can_delete_character(id),
         Some(Entry::NoParagraph | Entry::ClearParagraph | Entry::ClearCharacter) | None => false,
     }
 }
@@ -209,75 +237,67 @@ struct Layout {
     title: Rect,
     tabs: Rect,
     buttons: Rect,
+    scope: Rect,
     list: Rect,
-    /// The close box, in the title bar of the docked palette.
-    close: Option<Rect>,
     dock: Rect,
 }
 
-/// Whether the system puts the close button at the left of a title bar.
-const CLOSE_AT_LEFT: bool = cfg!(target_os = "macos");
-
-/// `os`: the palette is in a window of its own, whose title bar the system
-/// draws, with its close button. The dock button then sits in the tab row.
-fn layout(b: Rect, os: bool) -> Layout {
-    let title = Rect::new(b.x, b.y, b.w, if os { 0.0 } else { TITLE });
-    let mut tabs = Rect::new(b.x, title.bottom(), b.w, TABS);
-    let buttons = Rect::new(b.x, tabs.bottom(), b.w, BUTTONS);
-    let list = Rect::new(
+fn layout(b: Rect, floating: bool) -> Layout {
+    let title = Rect::new(
         b.x,
-        buttons.bottom(),
+        b.y,
         b.w,
-        (b.bottom() - buttons.bottom()).max(0.0),
+        if floating && cfg!(target_os = "macos") {
+            0.0
+        } else {
+            TITLE
+        },
     );
-    let (close, dock) = if os {
-        let dock = Rect::new(
-            tabs.right() - DOCK_BUTTON - 2.0,
-            tabs.y + 5.0,
-            DOCK_BUTTON,
-            TABS - 6.0,
-        );
-        tabs.w -= DOCK_BUTTON + 2.0;
-        (None, dock)
-    } else if CLOSE_AT_LEFT {
-        (
-            Some(Rect::new(title.x + 6.0, title.y + 4.0, 12.0, 12.0)),
-            Rect::new(title.right() - 22.0, title.y + 1.0, 20.0, TITLE - 2.0),
-        )
-    } else {
-        (
-            Some(Rect::new(
-                title.right() - 20.0,
-                title.y + 1.0,
-                18.0,
-                TITLE - 2.0,
-            )),
-            Rect::new(title.x + 2.0, title.y + 1.0, 20.0, TITLE - 2.0),
-        )
-    };
+    let dock = Rect::new(b.right() - 27.0, title.y + 2.0, 21.0, TITLE - 4.0);
+    let tabs = Rect::new(b.x + 6.0, title.bottom(), b.w - 12.0, TABS);
+    let buttons = Rect::new(b.x, (b.bottom() - BUTTONS).max(b.y), b.w, BUTTONS);
+    let scope = Rect::new(b.x, (buttons.y - BUTTONS).max(b.y), b.w, BUTTONS);
+    let top = tabs.bottom() + 5.0;
+    let list = Rect::new(b.x, top, b.w, (scope.y - top).max(0.0));
     Layout {
         title,
         tabs,
         buttons,
+        scope,
         list,
-        close,
         dock,
     }
 }
 
 fn tab_box(tabs: Rect, i: usize) -> Rect {
-    let w = (tabs.w - 8.0) / 3.0;
-    Rect::new(tabs.x + 4.0 + w * i as f32, tabs.y + 4.0, w, TABS - 4.0)
+    let widths = [0.21, 0.395, 0.395];
+    let left: f32 = widths[..i].iter().sum();
+    Rect::new(tabs.x + tabs.w * left, tabs.y, tabs.w * widths[i], tabs.h)
 }
 
 fn button_box(buttons: Rect, i: usize) -> Rect {
-    let w = (buttons.w - 8.0) / BUTTON_LIST.len() as f32;
+    let x = if i == 2 {
+        buttons.right() - 29.0
+    } else {
+        buttons.x + 5.0 + i as f32 * 24.0
+    };
+    Rect::new(x, buttons.y + 1.0, 24.0, BUTTONS - 2.0)
+}
+
+fn action_bounds(b: Rect, (x, y): (f32, f32)) -> Rect {
+    let h = ACTIONS.len() as f32 * ROW;
     Rect::new(
-        buttons.x + 4.0 + w * i as f32,
-        buttons.y + 3.0,
-        w - 2.0,
-        BUTTONS - 6.0,
+        x.clamp(b.x, (b.right() - ACTION_WIDTH).max(b.x)),
+        (y - h).max(b.y),
+        ACTION_WIDTH,
+        h,
     )
+}
+
+pub fn action_at(b: Rect, anchor: (f32, f32), x: f32, y: f32) -> Option<Button> {
+    let r = action_bounds(b, anchor);
+    r.contains(x, y)
+        .then(|| ACTIONS[((y - r.y) / ROW) as usize].0)
 }
 
 /// How far the list can scroll with `rows` rows.
@@ -291,15 +311,11 @@ pub fn hit(b: Rect, os: bool, scroll: f32, rows: usize, x: f32, y: f32) -> Optio
         return None;
     }
     let l = layout(b, os);
-    if l.dock.contains(x, y) {
-        return Some(Hit::Dock);
+    if l.title.h > 0.0 && l.dock.contains(x, y) {
+        return Some(if os { Hit::Dock } else { Hit::Close });
     }
     if l.title.contains(x, y) {
-        return Some(if l.close.is_some_and(|c| c.contains(x, y)) {
-            Hit::Close
-        } else {
-            Hit::Chrome
-        });
+        return Some(if os { Hit::Chrome } else { Hit::Title });
     }
     if l.tabs.contains(x, y) {
         return Some(
@@ -308,13 +324,20 @@ pub fn hit(b: Rect, os: bool, scroll: f32, rows: usize, x: f32, y: f32) -> Optio
                 .map_or(Hit::Chrome, |i| Hit::Tab(Tab::ALL[i])),
         );
     }
+    if l.scope.contains(x, y) {
+        return Some(Hit::ToggleScope);
+    }
     if l.buttons.contains(x, y) {
         return Some(
-            (0..BUTTON_LIST.len())
+            (0..FOOTER.len())
                 .find(|&i| button_box(l.buttons, i).contains(x, y))
-                .map_or(Hit::Chrome, |i| Hit::Button(BUTTON_LIST[i].0)),
+                .map_or(Hit::Chrome, |i| FOOTER[i].0),
         );
     }
+    if !l.list.contains(x, y) {
+        return Some(Hit::Chrome);
+    }
+    let scroll = scroll.min(max_scroll(b, os, rows));
     let row = ((y - l.list.y + scroll) / ROW).floor();
     if row >= 0.0 && (row as usize) < rows {
         Some(Hit::Row(row as usize))
@@ -352,145 +375,167 @@ pub fn is_current(e: Entry, cur: Current) -> bool {
     }
 }
 
-pub fn draw(c: &mut Canvas, label: &mut Label, p: &Palette, b: Rect, doc: &Document, cur: Current) {
+/// Diagonal arrows for moving between docked and floating states.
+pub fn draw_docking_icon(c: &mut Canvas, label: &mut Label, r: Rect, dock: bool) {
+    const IN: &str = "line k/1.5 2 2 6 6\nline k/1.5 3 6 6 6 6 3\nline k/1.5 13 13 9 9\nline k/1.5 12 9 9 9 9 12";
+    const OUT: &str = "line k/1.5 6 6 2 2\nline k/1.5 2 5 2 2 5 2\nline k/1.5 9 9 13 13\nline k/1.5 10 13 13 13 13 10";
+    let picture = crate::icon::cached(if dock { IN } else { OUT }, 16, 16, c.scale);
+    crate::icon::paint(
+        c,
+        label,
+        &picture,
+        r.x + (r.w - 16.0) / 2.0,
+        r.y + (r.h - 16.0) / 2.0,
+        255,
+        0xF5F5F7,
+    );
+}
+
+pub fn draw(
+    c: &mut Canvas,
+    label: &mut Label,
+    p: &Palette,
+    b: Rect,
+    doc: &Document,
+    cur: Current,
+    rows: &[Entry],
+) {
     let font = quill_layout::fonts::UI_FONT;
     let os = p.window.is_some();
     let l = layout(b, os);
     let clip = c.set_clip(b);
-    c.fill(b, color::WHITE);
-
-    // A docked palette has a thin title bar of its own, with the close
-    // button where the system puts it, a little smaller than its own.
+    c.fill(b, 0xF5F5F7);
     if !os {
-        c.fill(l.title, 0xE4E4E4);
-        c.hline(b.x, b.right(), l.title.bottom() - c.hair(), 0xC4C4C4);
-        if let Some(x) = l.close {
-            let hot = p.hover == Some(Hit::Close);
-            if CLOSE_AT_LEFT {
-                let (cx, cy) = (x.x + x.w / 2.0, x.y + x.h / 2.0);
-                c.circle(cx, cy, 5.5, 0xE0443E);
-                c.circle(cx, cy, 4.8, 0xFF5F57);
-                if hot {
-                    label.draw(c, font, 10.0, true, cx - 3.2, cy + 3.6, "×", 0x4D0000);
-                }
-            } else {
-                if hot {
-                    c.fill(x, 0xE81123);
-                }
-                let ink = if hot { color::WHITE } else { 0x555555 };
-                label.draw(c, font, 13.0, false, x.x + 5.0, x.y + 13.0, "×", ink);
-            }
-        }
-        let title = "Style Sheets";
-        let w = label.width(font, 11.0, true, title);
+        c.vline(b.x, b.y, b.bottom(), 0xD5D5DA);
         label.draw(
             c,
             font,
-            11.0,
+            10.0,
             true,
-            b.x + (b.w - w) / 2.0,
-            l.title.y + 14.0,
-            title,
-            color::BLACK,
+            b.x + 8.0,
+            l.title.y + 15.0,
+            "STYLE SHEETS",
+            0x55555C,
         );
     }
-
-    // Tabs, with the dock button at the end of the row in a window of its
-    // own.
-    c.fill(Rect::new(b.x, l.tabs.y, b.w, TABS), 0xF3F3F3);
-    c.hline(b.x, b.right(), l.tabs.bottom() - c.hair(), 0xD0D0D0);
-    {
-        let d = l.dock;
-        if p.hover == Some(Hit::Dock) {
-            c.fill(d, 0xE0E0E0);
-        }
-        // The arrow points at the edge it docks to, or away from it.
-        let arrow = if os { "⇥" } else { "⇱" };
-        label.draw(c, font, 12.0, false, d.x + 5.0, d.y + 13.0, arrow, 0x555555);
+    let d = l.dock;
+    let control = if os { Hit::Dock } else { Hit::Close };
+    if l.title.h > 0.0 && p.hover == Some(control) {
+        round_rect(c, d, 4.0, 0xE0E0E5);
     }
-    let narrow = tab_box(l.tabs, 0).w < 64.0;
+    if os && l.title.h > 0.0 {
+        draw_docking_icon(c, label, d, true);
+    } else if !os {
+        label.draw(c, font, 13.0, false, d.x + 6.5, d.y + 14.0, "×", 0x505058);
+    }
+
+    round_rect(c, l.tabs, 5.0, 0xE6E6EB);
+    let full_labels_fit = [Tab::Paragraph, Tab::Character].into_iter().all(|tab| {
+        label.width(font, 11.0, true, tab.name()) + 8.0 <= tab_box(l.tabs, tab.index() as usize).w
+    });
     for (i, tab) in Tab::ALL.into_iter().enumerate() {
         let r = tab_box(l.tabs, i);
         let on = tab == p.tab;
-        if on {
-            c.fill(r, color::WHITE);
-            c.frame(r, 0xC4C4C4);
-            c.fill(
-                Rect::new(
-                    r.x + c.hair(),
-                    r.bottom() - c.hair(),
-                    r.w - 2.0 * c.hair(),
-                    2.0,
-                ),
-                color::WHITE,
+        if on || p.hover == Some(Hit::Tab(tab)) {
+            round_rect(
+                c,
+                Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0),
+                4.0,
+                if on { color::WHITE } else { 0xEEEEF0 },
             );
-        } else if p.hover == Some(Hit::Tab(tab)) {
-            c.fill(r, 0xE8E8E8);
         }
-        let text = if narrow { tab.short() } else { tab.name() };
-        let tw = label.width(font, 12.0, on, text);
-        label.draw(
-            c,
-            font,
-            12.0,
-            on,
-            r.x + (r.w - tw) / 2.0,
-            r.y + 15.0,
-            text,
-            if on { color::BLACK } else { 0x444444 },
-        );
-    }
-
-    // Buttons.
-    c.fill(l.buttons, 0xFAFAFA);
-    c.hline(b.x, b.right(), l.buttons.bottom() - c.hair(), 0xD0D0D0);
-    for (i, (button, text)) in BUTTON_LIST.into_iter().enumerate() {
-        let r = button_box(l.buttons, i);
-        let enabled = match button {
-            Button::New => true,
-            Button::Edit | Button::Copy => can_edit(p.chosen),
-            Button::Delete => can_delete(doc, p.chosen),
+        let text = if full_labels_fit {
+            tab.name()
+        } else {
+            match tab {
+                Tab::All => "All",
+                Tab::Paragraph => "¶",
+                Tab::Character => "Abc",
+            }
         };
-        c.fill(
-            r,
-            if enabled && p.hover == Some(Hit::Button(button)) {
-                crate::bars::hover_color()
-            } else {
-                color::WHITE
-            },
-        );
-        c.frame(r, 0xCCCCCC);
-        let tw = label.width(font, 11.0, false, text);
+        let tw = label.width(font, 11.0, on, text);
         label.draw(
             c,
             font,
             11.0,
-            false,
+            on,
             r.x + (r.w - tw) / 2.0,
             r.y + 14.0,
             text,
-            if enabled {
-                color::BLACK
-            } else {
-                color::GRAY_DARK
-            },
+            0x36363D,
         );
     }
 
+    c.hline(b.x, b.right(), l.buttons.y, 0xD5D5DA);
+    let target = p.chosen.or(Some(Entry::Paragraph(cur.paragraph)));
+    for (i, (hit, text)) in FOOTER.into_iter().enumerate() {
+        let r = button_box(l.buttons, i);
+        let enabled = hit != Hit::Button(Button::Delete) || can_delete(doc, target);
+        if enabled && p.hover == Some(hit) {
+            round_rect(c, r, 4.0, 0xE0E0E5);
+        }
+        let tw = label.width(font, 14.0, false, text);
+        label.draw(
+            c,
+            font,
+            14.0,
+            false,
+            r.x + (r.w - tw) / 2.0,
+            r.y + 15.0,
+            text,
+            if enabled { 0x33333A } else { 0x88888E },
+        );
+    }
+
+    c.hline(b.x, b.right(), l.scope.y, 0xD5D5DA);
+    if p.hover == Some(Hit::ToggleScope) {
+        round_rect(
+            c,
+            Rect::new(
+                l.scope.x + 4.0,
+                l.scope.y + 2.0,
+                l.scope.w - 8.0,
+                l.scope.h - 4.0,
+            ),
+            4.0,
+            0xE0E0E5,
+        );
+    }
+    // Label at the left, on/off switch against the right edge.
+    label.draw(
+        c,
+        font,
+        11.0,
+        false,
+        l.scope.x + 12.0,
+        l.scope.y + 15.0,
+        "Show All Styles",
+        0x36363D,
+    );
+    crate::dialog::draw_switch(
+        c,
+        Rect::new(
+            l.scope.right() - 12.0 - crate::dialog::SWITCH_W,
+            l.scope.y + (l.scope.h - crate::dialog::SWITCH_H) / 2.0,
+            crate::dialog::SWITCH_W,
+            crate::dialog::SWITCH_H,
+        ),
+        p.show_all,
+    );
+
     // The list.
-    let rows = entries(doc, p.tab);
     let list_clip = c.set_clip(l.list);
     for (i, e) in rows.iter().enumerate() {
         let y = l.list.y + i as f32 * ROW - p.scroll;
         if y + ROW < l.list.y || y > l.list.bottom() {
             continue;
         }
-        let r = Rect::new(b.x, y, b.w, ROW);
+        let r = Rect::new(b.x + 6.0, y + 1.0, b.w - 12.0, ROW - 2.0);
         let current = is_current(*e, cur);
         if current {
-            c.fill(r, color::HIGHLIGHT);
+            round_rect(c, r, 5.0, 0x0066CC);
         } else if p.hover == Some(Hit::Row(i)) {
-            c.fill(r, 0xEDEDED);
+            round_rect(c, r, 5.0, 0xE8E8EC);
         }
         let (mark, none) = match e {
             Entry::NoParagraph | Entry::ClearParagraph => ("¶", true),
@@ -498,37 +543,72 @@ pub fn draw(c: &mut Canvas, label: &mut Label, p: &Palette, b: Rect, doc: &Docum
             Entry::Paragraph(_) => ("¶", false),
             Entry::Character(id) => ("A", *id == 0),
         };
-        label.draw(c, font, 12.0, false, b.x + 8.0, y + 14.0, mark, 0x666666);
-        let text = fit(label, 12.0, false, &name(doc, *e), b.w - 36.0);
-        if none {
-            label.draw_italic(
-                c,
-                font,
-                12.0,
-                false,
-                b.x + 26.0,
-                y + 14.0,
-                &text,
-                color::BLACK,
-            );
+        let ink = if current && !c.dark {
+            color::WHITE
         } else {
-            label.draw(
-                c,
-                font,
-                12.0,
-                false,
-                b.x + 26.0,
-                y + 14.0,
-                &text,
-                color::BLACK,
-            );
+            color::BLACK
+        };
+        label.draw(
+            c,
+            font,
+            11.5,
+            false,
+            b.x + 12.0,
+            y + 14.0,
+            mark,
+            if current { 0xCDE4FF } else { 0x777780 },
+        );
+        let text = fit(label, 11.5, false, &name(doc, *e), b.w - 36.0);
+        if none {
+            label.draw_italic(c, font, 11.5, false, b.x + 26.0, y + 14.0, &text, ink);
+        } else {
+            label.draw(c, font, 11.5, false, b.x + 26.0, y + 14.0, &text, ink);
         }
     }
     c.restore_clip(list_clip);
 
-    // Edges.
-    c.frame(b, 0xB8B8B8);
+    if let Some(anchor) = p.actions_at {
+        let menu = action_bounds(b, anchor);
+        round_rect(c, menu, 5.0, color::WHITE);
+        c.frame(menu, 0xC6C6CC);
+        for (i, (button, text)) in ACTIONS.into_iter().enumerate() {
+            let enabled = if button == Button::Delete {
+                can_delete(doc, target)
+            } else {
+                can_edit(target)
+            };
+            let y = menu.y + i as f32 * ROW;
+            if enabled && p.hover == Some(Hit::Button(button)) {
+                round_rect(
+                    c,
+                    Rect::new(menu.x + 3.0, y + 1.0, menu.w - 6.0, ROW - 2.0),
+                    4.0,
+                    0xE6E6EB,
+                );
+            }
+            label.draw(
+                c,
+                font,
+                11.5,
+                false,
+                menu.x + 9.0,
+                y + 14.0,
+                text,
+                if enabled { color::BLACK } else { 0x88888E },
+            );
+        }
+    }
     c.restore_clip(clip);
+}
+
+#[cfg(test)]
+pub fn action_point(b: Rect, anchor: (f32, f32), button: Button) -> (f32, f32) {
+    let bounds = action_bounds(b, anchor);
+    let i = ACTIONS
+        .iter()
+        .position(|(value, _)| *value == button)
+        .unwrap();
+    (bounds.x + bounds.w / 2.0, bounds.y + (i as f32 + 0.5) * ROW)
 }
 
 /// A point inside `h` of a palette in `b`, not scrolled, for tests.
@@ -536,11 +616,16 @@ pub fn draw(c: &mut Canvas, label: &mut Label, p: &Palette, b: Rect, doc: &Docum
 pub fn point_of(b: Rect, os: bool, h: Hit) -> (f32, f32) {
     let l = layout(b, os);
     let r = match h {
-        Hit::Close => l.close.unwrap(),
-        Hit::Dock => l.dock,
+        Hit::ToggleScope => l.scope,
+        Hit::More => button_box(l.buttons, 2),
+        Hit::Dock | Hit::Close => l.dock,
+        Hit::Title => l.title,
         Hit::Tab(t) => tab_box(l.tabs, t.index() as usize),
         Hit::Button(k) => {
-            let i = BUTTON_LIST.iter().position(|(b, _)| *b == k).unwrap();
+            let i = FOOTER
+                .iter()
+                .position(|(hit, _)| *hit == Hit::Button(k))
+                .unwrap();
             button_box(l.buttons, i)
         }
         Hit::Row(i) => Rect::new(l.list.x, l.list.y + i as f32 * ROW, l.list.w, ROW),
@@ -552,6 +637,7 @@ pub fn point_of(b: Rect, os: bool, h: Hit) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quill_core::StoryId;
     use quill_core::character_styles::CharacterFormat;
     use quill_core::props::CharProps;
 
@@ -571,9 +657,9 @@ mod tests {
     #[test]
     fn tabs_filter_one_list() {
         let doc = doc();
-        let all = entries(&doc, Tab::All);
-        let paragraph = entries(&doc, Tab::Paragraph);
-        let character = entries(&doc, Tab::Character);
+        let all = entries(&doc, Tab::All, false);
+        let paragraph = entries(&doc, Tab::Paragraph, false);
+        let character = entries(&doc, Tab::Character, false);
         assert!(paragraph.iter().all(|e| matches!(
             e,
             Entry::Paragraph(_) | Entry::NoParagraph | Entry::ClearParagraph
@@ -602,18 +688,133 @@ mod tests {
         assert_eq!(paragraph[0], Entry::NoParagraph);
         assert_eq!(paragraph[1], Entry::ClearParagraph);
         assert_eq!(paragraph[2], Entry::Paragraph(0));
+        for style in ["Title", "Subtitle"] {
+            let entry = Entry::Paragraph(doc.styles.find(style).unwrap());
+            assert!(paragraph.contains(&entry));
+            assert!(all.contains(&entry));
+        }
         assert_eq!(character[0], Entry::Character(0));
         assert_eq!(character[1], Entry::ClearCharacter);
+    }
+
+    fn shows(doc: &Document, style: &str) -> bool {
+        let id = doc.styles.find(style).unwrap();
+        entries(doc, Tab::Paragraph, false).contains(&Entry::Paragraph(id))
+    }
+
+    #[test]
+    fn later_headings_follow_the_highest_heading_used() {
+        let mut doc = quill_core::text::from_plain_text("Heading");
+        for level in 1..=9 {
+            assert_eq!(shows(&doc, &format!("heading {level}")), level <= 3);
+        }
+        for level in 2..=9 {
+            let id = doc.styles.find(&format!("heading {level}")).unwrap();
+            doc.apply_style(StoryId::Main, 0, 0, id);
+            for visible in 1..=9 {
+                assert_eq!(
+                    shows(&doc, &format!("heading {visible}")),
+                    visible <= level + 2
+                );
+            }
+        }
+        doc.apply_style(StoryId::Main, 0, 0, 0);
+        assert!(!shows(&doc, "heading 4"));
+    }
+
+    #[test]
+    fn header_footer_and_footnote_styles_follow_document_content() {
+        use quill_core::{Position, Selection};
+
+        let mut doc = Document::new();
+        for style in ["header", "footer", "footnote reference", "footnote text"] {
+            assert!(!shows(&doc, style));
+        }
+        let props = doc.styles.get(0).chp;
+        doc.insert_plain(StoryId::FirstHeader, Position::new(0, 0), "Title", props);
+        assert!(shows(&doc, "header"));
+        assert!(!shows(&doc, "footer"));
+        doc.insert_plain(StoryId::EvenFooter, Position::new(0, 0), "Page", props);
+        assert!(shows(&doc, "footer"));
+
+        doc.begin("Insert Footnote", Selection::default());
+        doc.insert_note(Position::new(0, 0), props, None);
+        doc.commit(Selection::default());
+        assert!(shows(&doc, "footnote reference"));
+        assert!(shows(&doc, "footnote text"));
+        doc.undo();
+        assert!(!shows(&doc, "footnote reference"));
+        assert!(!shows(&doc, "footnote text"));
+    }
+
+    #[test]
+    fn only_toc_levels_in_the_generated_contents_are_listed() {
+        use quill_core::{Position, Selection};
+
+        let mut doc = quill_core::text::from_plain_text("Chapter\nTopic");
+        for (para, style) in [(0, "heading 1"), (1, "heading 3")] {
+            let id = doc.styles.find(style).unwrap();
+            doc.apply_style(StoryId::Main, para, para, id);
+        }
+        assert!(!shows(&doc, "toc 1"));
+        let entries: Vec<_> = doc
+            .toc_entries(&Default::default())
+            .into_iter()
+            .map(|entry| (entry, String::new()))
+            .collect();
+        let paras = doc.toc_paragraphs(&entries, false);
+        doc.begin("Insert Table of Contents", Selection::default());
+        doc.place_toc(paras, Position::new(0, 0));
+        doc.commit(Selection::default());
+
+        for level in 1..=9 {
+            assert_eq!(shows(&doc, &format!("toc {level}")), matches!(level, 1 | 3));
+        }
+        doc.undo();
+        assert!(!shows(&doc, "toc 1"));
+        assert!(!shows(&doc, "toc 3"));
+    }
+
+    #[test]
+    fn index_styles_follow_usage_and_custom_styles_are_always_visible() {
+        use quill_core::{Paragraph, Selection};
+
+        let mut doc = quill_core::text::from_plain_text("Body");
+        let index = doc.styles.find("index 1").unwrap();
+        let custom = doc.add_style(
+            "My unused style",
+            0,
+            None,
+            Default::default(),
+            Default::default(),
+        );
+        let normal = entries(&doc, Tab::Paragraph, false);
+        assert!(normal.contains(&Entry::Paragraph(custom)));
+        assert!(!normal.contains(&Entry::Paragraph(index)));
+        assert!(entries(&doc, Tab::Paragraph, true).contains(&Entry::Paragraph(index)));
+
+        let style = doc.styles.get(index);
+        let entry = Paragraph::with_text("Term", style.chp, style.pap.clone());
+        doc.begin("Insert Index", Selection::default());
+        doc.place_index(vec![entry]);
+        doc.commit(Selection::default());
+        assert!(shows(&doc, "index 1"));
+        assert!(!shows(&doc, "index 2"));
+        doc.undo();
+        assert!(!shows(&doc, "index 1"));
     }
 
     #[test]
     fn character_styles_are_sorted_by_name() {
         let doc = doc();
-        let names: Vec<String> = entries(&doc, Tab::Character)
+        let names: Vec<String> = entries(&doc, Tab::Character, false)
             .into_iter()
             .map(|e| name(&doc, e))
             .collect();
-        assert_eq!(names, ["No Style", "Clear Formatting", "Accent", "Strong"]);
+        assert_eq!(
+            names,
+            ["No Style", "Clear Formatting", "Accent", "Normal", "Strong"]
+        );
     }
 
     #[test]
@@ -622,7 +823,8 @@ mod tests {
         assert!(!can_delete(&doc, Some(Entry::Paragraph(0))));
         assert!(!can_delete(&doc, Some(Entry::Paragraph(1))));
         assert!(!can_delete(&doc, Some(Entry::Character(0))));
-        assert!(can_delete(&doc, Some(Entry::Character(1))));
+        assert!(!can_delete(&doc, Some(Entry::Character(1))));
+        assert!(can_delete(&doc, Some(Entry::Character(2))));
         assert!(!can_edit(Some(Entry::Character(0))));
         assert!(!can_edit(None));
     }
@@ -631,12 +833,9 @@ mod tests {
     fn clicks_land_on_the_part_they_are_over() {
         let b = Rect::new(100.0, 50.0, DOCK_WIDTH, 300.0);
         assert_eq!(hit(b, false, 0.0, 5, 99.0, 60.0), None);
-        // The docked palette has a title bar with its close and dock boxes.
         let close = point_of(b, false, Hit::Close);
         assert_eq!(hit(b, false, 0.0, 5, close.0, close.1), Some(Hit::Close));
-        let dock = point_of(b, false, Hit::Dock);
-        assert_eq!(hit(b, false, 0.0, 5, dock.0, dock.1), Some(Hit::Dock));
-        assert_eq!(hit(b, false, 0.0, 5, 200.0, 55.0), Some(Hit::Chrome));
+        assert_eq!(hit(b, false, 0.0, 5, 200.0, 55.0), Some(Hit::Title));
         let tabs_y = b.y + TITLE + 10.0;
         assert_eq!(
             hit(b, false, 0.0, 5, 110.0, tabs_y),
@@ -646,12 +845,12 @@ mod tests {
             hit(b, false, 0.0, 5, b.right() - 10.0, tabs_y),
             Some(Hit::Tab(Tab::Character))
         );
-        let buttons_y = b.y + TITLE + TABS + 10.0;
+        let buttons_y = b.bottom() - BUTTONS + 10.0;
         assert_eq!(
             hit(b, false, 0.0, 5, 110.0, buttons_y),
             Some(Hit::Button(Button::New))
         );
-        let list_y = b.y + TITLE + TABS + BUTTONS;
+        let list_y = b.y + TITLE + TABS + 5.0;
         assert_eq!(
             hit(b, false, 0.0, 5, 150.0, list_y + 1.0),
             Some(Hit::Row(0))
@@ -662,8 +861,13 @@ mod tests {
         );
         // Scrolled by a row and a half, the same place is further down.
         assert_eq!(
-            hit(b, false, 1.5 * ROW, 5, 150.0, list_y + 1.0),
+            hit(b, false, 1.5 * ROW, 40, 150.0, list_y + 1.0),
             Some(Hit::Row(1))
+        );
+        // A list that shrank back to five rows fits without scrolling.
+        assert_eq!(
+            hit(b, false, 1.5 * ROW, 5, 150.0, list_y + 1.0),
+            Some(Hit::Row(0))
         );
         // Below the last row is the palette's own empty space.
         assert_eq!(
@@ -673,29 +877,30 @@ mod tests {
     }
 
     #[test]
-    fn in_a_window_of_its_own_the_tabs_start_at_the_top_and_share_the_row_with_dock() {
+    fn floating_filters_have_their_own_row_below_dock() {
         let b = Rect::new(0.0, 0.0, 200.0, 300.0);
         let tab = point_of(b, true, Hit::Tab(Tab::All));
-        assert!(tab.1 < TABS);
+        assert!(tab.1 >= layout(b, true).title.h);
         assert_eq!(hit(b, true, 0.0, 5, tab.0, tab.1), Some(Hit::Tab(Tab::All)));
         let last = point_of(b, true, Hit::Tab(Tab::Character));
         assert_eq!(
             hit(b, true, 0.0, 5, last.0, last.1),
             Some(Hit::Tab(Tab::Character))
         );
-        let dock = point_of(b, true, Hit::Dock);
-        assert!(dock.0 > last.0);
-        assert_eq!(hit(b, true, 0.0, 5, dock.0, dock.1), Some(Hit::Dock));
+        if !cfg!(target_os = "macos") {
+            let dock = point_of(b, true, Hit::Dock);
+            assert!(dock.1 < last.1);
+            assert_eq!(hit(b, true, 0.0, 5, dock.0, dock.1), Some(Hit::Dock));
+        }
     }
 
     #[test]
     fn the_list_scrolls_only_as_far_as_its_rows() {
         let b = Rect::new(0.0, 0.0, DOCK_WIDTH, 300.0);
-        let list = 300.0 - (TITLE + TABS + BUTTONS);
+        let list = 300.0 - (TITLE + TABS + 2.0 * BUTTONS + 5.0);
         assert_eq!(max_scroll(b, false, 3), 0.0);
         assert_eq!(max_scroll(b, false, 40), 40.0 * ROW - list);
-        // Without a title bar the list has that much more room.
-        assert_eq!(max_scroll(b, true, 40), 40.0 * ROW - list - TITLE);
+        assert_eq!(max_scroll(b, true, 40), 40.0 * ROW - layout(b, true).list.h);
     }
 
     #[test]

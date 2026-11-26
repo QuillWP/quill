@@ -37,6 +37,12 @@ currently built and published by hand from the maintainer's Mac.
       failures, or each is understood.
 - [ ] The version in the workspace Cargo.toml is the one being released.
 - [ ] The README's status line says what works.
+- [ ] Sizes: measure the Apple Silicon release app and disk image in `dist/`
+      (decimal MB). Update the "Small on purpose" table and the "about X MB to
+      download" descriptions on the website, and the "less than 10 MB" claim in
+      the README, so they match the published build. The table rows (program,
+      thesaurus data, icons, licences and notices) must add up to the whole
+      app.
 - [ ] License files: the crates say "MIT OR Apache-2.0"; LICENSE-MIT and
       LICENSE-APACHE must be in the repository and in each package.
 - [ ] data/README.md still matches the hyphenation and thesaurus data
@@ -92,7 +98,9 @@ to `VERSION-HISTORY.md` headed with the date of the tag commit in
 quill-review, run the checks above, build the release and debug packages
 (`--dist` and `--dist --debug`; each makes an Apple Silicon and an Intel
 disk image) and keep all the disk images of every version in `dist/`, check
-the Apple Silicon app is still under the 8 MB the README claims, and commit and tag. Review
+the Apple Silicon app is under the 10 MB cap and say whether the README's "less
+than 10 MB" claim still holds (and refresh the sizes on the website and in the
+README), and commit and tag. Review
 all the commits together before pushing, then push, and make one GitHub
 release per tag with all the disk images and that version's history section.
 State in the release which packages were built (Mac only, the Intel ones built
@@ -105,3 +113,8 @@ were set) and which are debug.
       GitHub release by hand, attaching the Mac disk images.
 - [ ] Write the release notes (what is new, known gaps), check
       the attached packages download and open, then publish the draft.
+
+## Changes for the next release
+
+None yet. Add each user-visible change here as it lands, and move the list
+into VERSION-HISTORY.md at release.

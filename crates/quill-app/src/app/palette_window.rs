@@ -141,7 +141,7 @@ impl App {
     }
 
     /// The document window in front, which the palette works on.
-    fn front_index(&self) -> Option<usize> {
+    pub(super) fn front_index(&self) -> Option<usize> {
         self.front
             .and_then(|id| self.index(id))
             .or(if self.windows.is_empty() {
@@ -177,6 +177,8 @@ impl App {
             pw.palette.chosen = None;
             pw.palette.hover = None;
             pw.palette.scroll = 0.0;
+            pw.palette.actions_at = None;
+            pw.palette.last_row_click = None;
         }
         let scale = pw.window.scale_factor();
         let ui = ui_scale(scale as f32);
@@ -236,11 +238,21 @@ impl App {
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
-                button: MouseButton::Left,
+                button: button @ (MouseButton::Left | MouseButton::Right),
                 ..
             } => {
                 let (x, y) = pw.cursor;
-                self.palette_press(el, front, front_id, x, y);
+                if button == MouseButton::Right {
+                    self.take_doc(front);
+                    let pw = self.palette_window.as_mut().unwrap();
+                    let state = &mut self.windows[front].1.st;
+                    std::mem::swap(&mut pw.palette, &mut state.palette);
+                    state.palette_context(x, y);
+                    std::mem::swap(&mut pw.palette, &mut state.palette);
+                    pw.window.request_redraw();
+                } else {
+                    self.palette_press(el, front, front_id, x, y);
+                }
             }
             _ => {}
         }

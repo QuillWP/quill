@@ -363,6 +363,10 @@ impl App {
             return;
         }
         if context {
+            if state == ElementState::Pressed && w.st.palette_context(x / w.st.ui, y / w.st.ui) {
+                w.window.request_redraw();
+                return;
+            }
             // On the Mac the menu is the system's own.
             #[cfg(target_os = "macos")]
             if state == ElementState::Pressed {
@@ -420,6 +424,17 @@ impl App {
         let scale = w.window.scale_factor();
         let (x, y) = ((px / scale) as f32, (py / scale) as f32);
         w.cursor = (x, y);
+        if w.st.tear_off_palette(x, y) {
+            self.palette_at = w.window.inner_position().ok().map(|origin| {
+                winit::dpi::PhysicalPosition::new(
+                    origin.x + (px - 20.0 * scale).round() as i32,
+                    origin.y + (py - 12.0 * scale).round() as i32,
+                )
+            });
+            w.window.request_redraw();
+            self.sync_menus();
+            return;
+        }
         let mut label = Label {
             fonts,
             cache: &mut self.cache,

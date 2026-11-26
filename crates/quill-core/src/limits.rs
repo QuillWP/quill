@@ -53,6 +53,17 @@ pub const MAX_RUNS: usize = 1_000_000;
 /// could be built that saves but cannot be opened again.
 pub const MAX_PICTURES: usize = 4_000;
 
+/// The most encoded picture data a document may retain, originals and
+/// previews together. Pictures can be compressed far more tightly in a ZIP
+/// package than in memory; bounding their total keeps a small document from
+/// expanding into hundreds of separate large allocations. This is also the
+/// limit the Markdown reader has historically used for linked pictures.
+pub const MAX_PICTURE_DATA_BYTES: usize = 256 << 20;
+
+/// The most pixels Quill decodes for one picture, whether importing it or
+/// drawing a PNG or JPEG it already holds.
+pub const MAX_DECODED_PICTURE_PIXELS: u64 = 32_000_000;
+
 /// The most header and footer stories a document may have: six for the
 /// first section, and six for each later section with its own. A .docx
 /// file writes each as a part, and each part that may show a picture
@@ -71,6 +82,8 @@ pub struct Size {
     /// one file, and pictures with the same bytes in two separate copies
     /// count twice, so this is never fewer than the files a save writes.
     pub pictures: usize,
+    /// Bytes in those distinct picture files, including previews.
+    pub picture_bytes: usize,
     /// Header and footer stories: those of the first section and of each
     /// section with its own.
     pub headers: usize,
@@ -86,6 +99,13 @@ impl Size {
             .or_else(|| over(self.characters, MAX_CHARACTERS, "characters"))
             .or_else(|| over(self.runs, MAX_RUNS, "changes of formatting"))
             .or_else(|| over(self.pictures, MAX_PICTURES, "pictures"))
+            .or_else(|| {
+                over(
+                    self.picture_bytes,
+                    MAX_PICTURE_DATA_BYTES,
+                    "bytes of picture data",
+                )
+            })
             .or_else(|| over(self.headers, MAX_HEADERS, "headers and footers"))
     }
 
@@ -105,6 +125,7 @@ impl Size {
             characters: text.chars().count(),
             runs: 1,
             pictures: 0,
+            picture_bytes: 0,
             headers: 0,
         }
     }
@@ -335,9 +356,13 @@ impl Document {
             size.runs += p.runs.len();
             for r in p.runs.iter().filter(|r| r.chp.object != 0) {
                 if let Some(pic) = self.picture(r.chp.object) {
-                    files.insert(pic.data.as_ptr() as usize);
-                    if let Some(preview) = &pic.preview {
-                        files.insert(preview.as_ptr() as usize);
+                    if files.insert(pic.data.as_ptr() as usize) {
+                        size.picture_bytes = size.picture_bytes.saturating_add(pic.data.len());
+                    }
+                    if let Some(preview) = &pic.preview
+                        && files.insert(preview.as_ptr() as usize)
+                    {
+                        size.picture_bytes = size.picture_bytes.saturating_add(preview.len());
                     }
                 }
             }
@@ -356,6 +381,7 @@ impl Document {
             clip_name(&mut s.name);
             s.format = crate::character_styles::CharacterFormat::new(s.format.props, s.format.mask);
         }
+        self.styles.ensure_normal_character();
         let characters = self.styles.characters.len();
         for k in 0..self.styles.styles.len() {
             let s = &mut self.styles.styles[k];
@@ -405,6 +431,50 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    #[test]
+    fn total_picture_data_has_one_document_limit() {
+        let at_limit = Size {
+            picture_bytes: MAX_PICTURE_DATA_BYTES,
+            ..Default::default()
+        };
+        assert!(at_limit.too_large().is_none());
+        let over = Size {
+            picture_bytes: MAX_PICTURE_DATA_BYTES + 1,
+            ..Default::default()
+        };
+        assert!(
+            over.too_large()
+                .is_some_and(|why| why.contains("picture data"))
+        );
+    }
+
+    #[test]
+    fn document_size_counts_shared_picture_files_once() {
+        let mut png = vec![0; 24];
+        png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        png[16..20].copy_from_slice(&2u32.to_be_bytes());
+        png[20..24].copy_from_slice(&3u32.to_be_bytes());
+        let mut picture = crate::Picture::from_bytes(png.clone()).unwrap();
+        let preview: std::sync::Arc<[u8]> = vec![7; 11].into();
+        picture.preview = Some(preview);
+        let mut doc = Document::new();
+        let chp = doc.main.paras[0].chp_at(0);
+        doc.insert_picture(
+            crate::StoryId::Main,
+            crate::Position::new(0, 0),
+            picture.clone(),
+            chp,
+        );
+        doc.insert_picture(
+            crate::StoryId::Main,
+            crate::Position::new(0, 0),
+            picture,
+            chp,
+        );
+        assert_eq!(doc.size().pictures, 2);
+        assert_eq!(doc.size().picture_bytes, png.len() + 11);
     }
 
     #[test]

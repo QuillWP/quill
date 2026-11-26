@@ -250,7 +250,8 @@ def mac_app(executable: Path, app: Path, version: str, identity: str | None, deb
     resources.mkdir()
     shutil.copy2(executable, contents / "MacOS/quill")
     copy_common(resources, mac=True)
-    shutil.copy2(ROOT / "assets/quill.icns", resources / "Quill.icns")
+    icon = "quill-debug.icns" if debug else "quill.icns"
+    shutil.copy2(ROOT / "assets" / icon, resources / "Quill.icns")
     shutil.copy2(ROOT / "assets/quill-document.icns", resources / "QuillDocument.icns")
     info = plistlib.loads((ROOT / "tools/Info.plist").read_bytes())
     info["CFBundleVersion"] = info["CFBundleShortVersionString"] = version

@@ -47,8 +47,8 @@ muda = { version = "0.21", default-features = false }
 objc2 = "0.5"
 # Small typed wrappers around the AppKit controls Quill places in its
 # existing winit windows. The framework itself remains part of macOS.
-objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSBox", "NSButton", "NSCell", "NSControl", "NSFont", "NSGraphics", "NSPanel", "NSPopUpButton", "NSResponder", "NSScroller", "NSScrollView", "NSSpellChecker", "NSTextField", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSGeometry", "NSNotification", "NSObject", "NSString"] }
+objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSBox", "NSButton", "NSCell", "NSControl", "NSFont", "NSGraphics", "NSPanel", "NSPopUpButton", "NSResponder", "NSScroller", "NSScrollView", "NSSpellChecker", "NSText", "NSTextField", "NSTextView", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSGeometry", "NSNotification", "NSObject", "NSRange", "NSString"] }
 # Match muda's AppKit bindings so native menu titles can use attributed
 # strings. These resolve to muda's existing copies; no framework or font is
 # bundled into Quill.

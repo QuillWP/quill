@@ -5,11 +5,9 @@
 //! are.
 
 use quill_core::Picture;
+use quill_core::limits::MAX_DECODED_PICTURE_PIXELS;
 use std::io::Cursor;
 use std::sync::Arc;
-
-/// The most pixels a picture may have, as for the pictures Quill shows.
-const MAX_PIXELS: u64 = 32_000_000;
 
 /// A picture from a file's bytes, in any format Quill reads.
 pub fn picture(bytes: impl Into<Arc<[u8]>>) -> Option<Picture> {
@@ -72,7 +70,7 @@ fn decode(b: &[u8]) -> Option<(u32, u32, Vec<u8>, f32)> {
 
 /// Whether a `w` by `h` picture is small enough to decode.
 fn fits(w: u32, h: u32) -> bool {
-    w > 0 && h > 0 && u64::from(w) * u64::from(h) <= MAX_PIXELS
+    w > 0 && h > 0 && u64::from(w) * u64::from(h) <= MAX_DECODED_PICTURE_PIXELS
 }
 
 /// A GIF's first frame, on a clear canvas the size of the GIF.
@@ -80,7 +78,7 @@ fn gif(b: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     let mut opts = gif::DecodeOptions::new();
     opts.set_color_output(gif::ColorOutput::RGBA);
     opts.set_memory_limit(gif::MemoryLimit::Bytes(std::num::NonZeroU64::new(
-        MAX_PIXELS * 4,
+        MAX_DECODED_PICTURE_PIXELS * 4,
     )?));
     let mut d = opts.read_info(Cursor::new(b)).ok()?;
     let (w, h) = (u32::from(d.width()), u32::from(d.height()));
@@ -387,8 +385,8 @@ fn tiff_pixels(b: &[u8], palette: Option<&[[u8; 4]]>) -> Option<(u32, u32, Vec<u
     use tiff::decoder::{Decoder, DecodingResult, Limits};
     use tiff::tags::Tag;
     let mut limits = Limits::default();
-    limits.decoding_buffer_size = (MAX_PIXELS * 8) as usize;
-    limits.intermediate_buffer_size = (MAX_PIXELS * 8) as usize;
+    limits.decoding_buffer_size = (MAX_DECODED_PICTURE_PIXELS * 8) as usize;
+    limits.intermediate_buffer_size = (MAX_DECODED_PICTURE_PIXELS * 8) as usize;
     let mut d = Decoder::new(Cursor::new(b)).ok()?.with_limits(limits);
     let (w, h) = d.dimensions().ok()?;
     if !fits(w, h) {

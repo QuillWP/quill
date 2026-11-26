@@ -1,4 +1,4 @@
-//! Window > Size To and Move To on the Mac.
+//! Native Mac document window settings, Size To and Move To.
 
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::AnyObject;
@@ -73,6 +73,16 @@ fn native_window(window: &Window) -> Option<*mut AnyObject> {
         let view = handle.ns_view.as_ptr().cast::<AnyObject>();
         let native: *mut AnyObject = msg_send![view, window];
         (!native.is_null()).then_some(native)
+    }
+}
+
+pub(crate) fn disable_tabbing(window: &Window) {
+    if let Some(native) = native_window(window) {
+        // SAFETY: native_window returns the live NSWindow on the app thread.
+        unsafe {
+            (&*native.cast::<objc2_app_kit::NSWindow>())
+                .setTabbingMode(objc2_app_kit::NSWindowTabbingMode::Disallowed);
+        }
     }
 }
 

@@ -10,8 +10,8 @@ fn font_reminder() {
     if crate::settings::with(|s| s.missing_font_reminder)
         && crate::mac_alert::remind(
             "You can deal with missing fonts at any time.",
-            "View > Highlight Missing Fonts marks the text they affect, and Format > Replace \
-             Missing Fonts chooses installed fonts for them.",
+            "Edit > Missing Fonts > Highlight Missing Fonts marks the text they affect, and \
+             Replace Missing Fonts in the same menu chooses installed fonts for them.",
             "Don't show this reminder again",
         )
     {
@@ -278,7 +278,7 @@ impl App {
         }
     }
 
-    /// Format > Replace Missing Fonts…
+    /// Edit > Missing Fonts > Replace Missing Fonts…
     pub(super) fn replace_missing_fonts(&mut self, id: WindowId) {
         self.ensure_fonts();
         let (Some(i), Some(fonts)) = (self.index(id), self.fonts.as_ref()) else {
@@ -809,8 +809,14 @@ fn export_document(view: &DocView, format: Format) -> Result<Option<quill_core::
 fn save_format_warning(doc: &quill_core::Document, format: Format, chosen: bool) -> Option<String> {
     // Only Quill's own format keeps a paragraph style's link to a character
     // style; the others keep the formatting it gives.
-    let linked =
-        chosen && format != Format::Quill && doc.styles.styles.iter().any(|s| s.character != 0);
+    let normal = doc.styles.normal_character();
+    let linked = chosen
+        && format != Format::Quill
+        && doc
+            .styles
+            .styles
+            .iter()
+            .any(|s| s.character != 0 && s.character != normal);
     let link = if linked {
         " Paragraph styles linked to a character style keep its formatting, but not the link."
     } else {

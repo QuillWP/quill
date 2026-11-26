@@ -680,10 +680,16 @@ fn paragraph(doc: &Document, ids: &[String], p: &Paragraph, out: &mut String) {
     out.push_str("</w:pPr>");
     let main = main_index(doc, p);
     // A live table of contents is a TOC field, so Word can update it too.
-    let toc = doc.props.live_toc.zip(doc.existing_toc());
+    // Only a paragraph of the main text can start or end one, and finding
+    // them reads the whole document, so it is done once per save.
+    let (toc_range, index) = if main.is_some() {
+        content_ranges(doc)
+    } else {
+        (None, None)
+    };
+    let toc = doc.props.live_toc.zip(toc_range);
     // The index Quill made is an INDEX field and its entries are XE fields,
     // so Word can update it.
-    let index = doc.existing_index();
     let marks = quill_core::contents::marked_entry_spans(p);
     if let (Some(range), Some(at)) = (&index, main)
         && range.start == at
@@ -1322,8 +1328,22 @@ pub(crate) struct CommentEdges {
     pub(crate) ends: std::collections::HashMap<(usize, usize), Vec<u32>>,
 }
 
+/// Where a table of contents and an index made earlier are in the main text.
+type ContentRanges = (
+    Option<std::ops::Range<usize>>,
+    Option<std::ops::Range<usize>>,
+);
+
 thread_local! {
     static COMMENT_EDGES: std::cell::RefCell<CommentEdges> = Default::default();
+    static CONTENT_RANGES: std::cell::RefCell<Option<ContentRanges>> = Default::default();
+}
+
+/// The ranges `document_xml` found for this save, or a fresh look.
+fn content_ranges(doc: &Document) -> ContentRanges {
+    CONTENT_RANGES
+        .with(|c| c.borrow().clone())
+        .unwrap_or_else(|| (doc.existing_toc(), doc.existing_index()))
 }
 
 pub(crate) fn comment_edges(doc: &Document) -> CommentEdges {
@@ -1378,8 +1398,10 @@ fn comment_marks(out: &mut String, at: Option<(usize, usize)>, start: bool) {
 
 fn document_xml(doc: &Document, ids: &[String]) -> String {
     COMMENT_EDGES.with(|e| *e.borrow_mut() = comment_edges(doc));
+    CONTENT_RANGES.with(|c| *c.borrow_mut() = Some((doc.existing_toc(), doc.existing_index())));
     let out = document_body(doc, ids);
     COMMENT_EDGES.with(|e| *e.borrow_mut() = CommentEdges::default());
+    CONTENT_RANGES.with(|c| *c.borrow_mut() = None);
     out
 }
 

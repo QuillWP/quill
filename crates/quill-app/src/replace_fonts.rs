@@ -1,4 +1,4 @@
-//! Format > Replace Missing Fonts…: one row for each font the document uses
+//! Edit > Missing Fonts > Replace Missing Fonts…: one row for each font the document uses
 //! that is not installed, with an installed font to use from now on.
 
 use crate::dialog::Dialog;

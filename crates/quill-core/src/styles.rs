@@ -225,7 +225,33 @@ impl StyleSheet {
                 s.next = NORMAL;
             }
         }
+        sheet.ensure_normal_character();
+        sheet.ensure_title_styles();
         sheet
+    }
+
+    /// Add missing title styles at the end so saved style IDs stay valid.
+    pub fn ensure_title_styles(&mut self) {
+        for (name, size, bold, italic) in
+            [("Title", 56, true, false), ("Subtitle", 32, false, true)]
+        {
+            if self.find(name).is_some() || self.styles.len() >= StyleId::MAX as usize {
+                continue;
+            }
+            let normal = self.get(NORMAL);
+            let mut pap = normal.pap.clone();
+            pap.keep_with_next = true;
+            pap.after = 120;
+            let props = CharProps {
+                size,
+                bold,
+                italic,
+                ..normal.chp
+            };
+            let id = self.add(name, NORMAL, pap, props);
+            self.styles[id as usize].builtin = true;
+            self.styles[id as usize].next = NORMAL;
+        }
     }
 
     pub fn get(&self, id: StyleId) -> &Style {
@@ -257,12 +283,12 @@ impl StyleSheet {
         }
     }
 
-    /// The character formatting a paragraph style gives its text: `own`, or
-    /// character style `character` laid over it.
+    /// A paragraph style's own formatting includes its Normal baseline.
+    /// A custom character style is an additional layer over that formatting.
     pub fn linked_chp(&self, own: CharProps, character: u16) -> CharProps {
         match self.character(character) {
-            Some(c) => c.format.resolved(own),
-            None => own,
+            Some(c) if !c.is_normal() => c.format.resolved(own),
+            _ => own,
         }
     }
 
@@ -302,6 +328,7 @@ impl StyleSheet {
         let id = self.styles.len() as StyleId;
         let mut pap = pap;
         pap.style = id;
+        let character = self.normal_character();
         self.styles.push(Style {
             name: name.to_string(),
             based_on: Some(based_on),
@@ -309,7 +336,7 @@ impl StyleSheet {
             pap,
             chp,
             builtin: false,
-            character: 0,
+            character,
             own_chp: chp,
         });
         id
@@ -372,11 +399,13 @@ mod tests {
             "line number",
             "page number",
             "PostScript",
+            "Title",
+            "Subtitle",
         ] {
             assert!(s.find(name).is_some(), "missing {name}");
         }
         assert_eq!(s.find("Normal"), Some(NORMAL));
-        assert_eq!(s.styles.len(), 1 + 9 + 2 + 2 + 2 + 7 + 9 + 1);
+        assert_eq!(s.styles.len(), 1 + 9 + 2 + 2 + 2 + 7 + 9 + 1 + 2);
     }
 
     #[test]

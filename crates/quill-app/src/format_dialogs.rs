@@ -11,8 +11,8 @@ use crate::dialog::{Dialog, units};
 use crate::docview::DocView;
 use crate::page_dialogs;
 use quill_core::props::{
-    CharProps, LineSpacing, ParaProps, Rgb, Script, TabAlign, TabLeader, TabStop, Twips, Underline,
-    WORD_COLORS,
+    Align, CharProps, LineSpacing, ParaProps, Rgb, Script, TabAlign, TabLeader, TabStop, Twips,
+    Underline, WORD_COLORS,
 };
 
 /// Which dialog is open, and what it started from.
@@ -703,8 +703,15 @@ pub fn paragraph(view: &DocView) -> (Dialog, Which) {
     (paragraph_properties(&p), Which::Paragraph(p))
 }
 
+const PARA_ALIGNMENTS: [(Align, &str); 4] = [
+    (Align::Left, "Left"),
+    (Align::Center, "Center"),
+    (Align::Right, "Right"),
+    (Align::Justify, "Justify"),
+];
+
 pub fn paragraph_properties(p: &ParaProps) -> Dialog {
-    let mut d = Dialog::new("Paragraph", 438.0, 248.0);
+    let mut d = Dialog::new("Paragraph", 438.0, 278.0);
     d.group("Spacing", 10.0, 4.0, 334.0, 70.0);
     d.text("Before:", 18.0, 24.0);
     d.field("before", &units::length(p.before), 84.0, 22.0, 66.0);
@@ -745,19 +752,23 @@ pub fn paragraph_properties(p: &ParaProps) -> Dialog {
         p.keep_together,
     );
     d.check("widow", "Widow Control", 166.0, 152.0, p.widow_control);
-    d.check(
-        "noline",
-        "Suppress Line Numbers",
-        166.0,
-        184.0,
-        p.suppress_line_numbers,
-    );
-    d.disable("noline");
 
     d.button("dropcap", "Drop Cap…", 358.0, 80.0, 68.0, false);
     d.button("tabs", "Tabs…", 358.0, 108.0, 68.0, false);
     d.button("border", "Border…", 358.0, 136.0, 68.0, false);
     d.button("frame", "Frame…", 358.0, 164.0, 68.0, false);
+    d.text("Alignment:", 18.0, 207.0);
+    d.popup(
+        "alignment",
+        &PARA_ALIGNMENTS.map(|(_, label)| label),
+        PARA_ALIGNMENTS
+            .iter()
+            .position(|&(align, _)| align == p.align)
+            .unwrap_or(0),
+        84.0,
+        205.0,
+        108.0,
+    );
     d.action_buttons(&[
         ("cancel", "Cancel", 68.0, false),
         ("apply", "Apply", 68.0, false),
@@ -769,6 +780,7 @@ pub fn paragraph_properties(p: &ParaProps) -> Dialog {
 
 pub fn read_paragraph(d: &Dialog, base: &ParaProps) -> Option<ParaProps> {
     let mut p = base.clone();
+    p.align = PARA_ALIGNMENTS.get(d.selected("alignment"))?.0;
     let len = |id, old| units::parse_length_from(&d.field_text(id), old);
     p.before = len("before", base.before)?.max(0);
     p.after = len("after", base.after)?.max(0);
@@ -854,7 +866,7 @@ pub fn apply(which: &mut Which, d: &mut Dialog, view: &mut DocView) -> bool {
                 macro_rules! changed {
                     ($($f:ident),*) => { $( if target.$f != base.$f { p.$f = target.$f.clone(); } )* };
                 }
-                changed!(before, after, line, left, right, first, page_break_before, keep_with_next, keep_together, widow_control);
+                changed!(align, before, after, line, left, right, first, page_break_before, keep_with_next, keep_together, widow_control);
             });
             true
         }
@@ -1010,6 +1022,28 @@ mod tests {
         assert!(apply(&mut which, &mut d, &mut v));
         assert_eq!(v.doc.main.paras[0].pap.before, 360);
         assert_eq!(v.doc.main.paras[0].pap.after, 120);
+    }
+
+    #[test]
+    fn paragraph_alignment_preserves_a_mixed_selection_until_changed() {
+        let doc = quill_core::text::from_plain_text("First\nSecond");
+        let mut v = DocView::new(doc, "t".into());
+        v.doc.main.paras[1].pap.align = Align::Right;
+        v.set_selection(Selection::new(Position::new(0, 0), Position::new(1, 6)));
+        let (mut d, mut which) = paragraph(&v);
+        assert!(apply(&mut which, &mut d, &mut v));
+        assert_eq!(v.doc.main.paras[0].pap.align, Align::Left);
+        assert_eq!(v.doc.main.paras[1].pap.align, Align::Right);
+
+        d.set_selected("alignment", 3);
+        assert!(apply(&mut which, &mut d, &mut v));
+        assert!(
+            v.doc
+                .main
+                .paras
+                .iter()
+                .all(|p| p.pap.align == Align::Justify)
+        );
     }
 
     #[test]

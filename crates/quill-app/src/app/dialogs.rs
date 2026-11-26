@@ -1478,11 +1478,10 @@ impl WinState {
             // The Style dialog's last Character Style choice makes a new one.
             Outcome::Changed("character_style")
                 if matches!(which, Which::Style(_))
-                    && d.selected("character_style")
-                        == self.view.doc.styles.characters.len() + 1 =>
+                    && d.selected("character_style") == self.view.doc.styles.characters.len() =>
             {
                 if let Which::Style(st) = which {
-                    d.set_selected("character_style", st.character as usize);
+                    d.set_selected("character_style", st.character.saturating_sub(1) as usize);
                 }
                 let editor =
                     crate::character_style_dialog::editor(&self.view, &self.font_families, None);

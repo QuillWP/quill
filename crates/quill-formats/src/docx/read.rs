@@ -1,9 +1,9 @@
 //! Reading .docx files.
 //!
 //! The reader keeps what the original can express. Modern extras either map to
-//! the nearest 5.1 feature (list numbering becomes literal numbers and a
-//! tab, as the original's Renumber would leave them) or are dropped (comments,
-//! content controls' chrome). Text is never dropped on purpose.
+//! the nearest feature of the original (list numbering becomes literal numbers
+//! and a tab, as the original's Renumber would leave them) or are dropped
+//! (comments, content controls' chrome). Text is never dropped on purpose.
 
 use crate::report::{self as notes, ImportReport};
 use crate::xml::{self, Element};
@@ -21,6 +21,7 @@ use std::sync::Arc;
 struct XmlParts<'a> {
     zip: &'a Archive<'a>,
     parsed: HashMap<String, Option<Arc<Element>>>,
+    budget: xml::Budget,
 }
 
 impl<'a> XmlParts<'a> {
@@ -28,6 +29,7 @@ impl<'a> XmlParts<'a> {
         XmlParts {
             zip,
             parsed: HashMap::new(),
+            budget: xml::Budget::new(),
         }
     }
 
@@ -36,7 +38,7 @@ impl<'a> XmlParts<'a> {
             return Ok(part.clone());
         }
         let part = match self.zip.read(name).map_err(|e| e.to_string())? {
-            Some(bytes) => Some(Arc::new(xml::parse(&bytes)?)),
+            Some(bytes) => Some(Arc::new(xml::parse_with_budget(&bytes, &mut self.budget)?)),
             None => None,
         };
         self.parsed.insert(name.to_string(), part.clone());
@@ -75,7 +77,8 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
         .ok_or("the file has no document part")?;
 
     let mut r = Reader {
-        doc: Document::new(),
+        zip: &zip,
+        doc: Document::for_import(),
         stamps: HashSet::new(),
         styles: HashMap::new(),
         char_styles: HashMap::new(),
@@ -143,7 +146,7 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
     let body = document.child("body").ok_or("the document has no body")?;
     let file = main_path.rsplit('/').next().unwrap_or("document.xml");
     let main_rels = parts.get(&format!("{dir}_rels/{file}.rels"))?;
-    r.images = load_images(&zip, main_rels.as_ref(), &dir);
+    r.images = load_images(main_rels.as_ref(), &dir);
     r.links = load_links(main_rels.as_ref());
     if has_unkept_changes(body) {
         r.report.note(notes::FORMAT_CHANGES);
@@ -207,7 +210,7 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
             if let Some(root) = parts.get(&path)? {
                 let (hdir, hfile) = path.rsplit_once('/').unwrap_or(("", &path));
                 let hrels = parts.get(&format!("{hdir}/_rels/{hfile}.rels"))?;
-                r.images = load_images(&zip, hrels.as_ref(), &format!("{hdir}/"));
+                r.images = load_images(hrels.as_ref(), &format!("{hdir}/"));
                 r.links = load_links(hrels.as_ref());
                 let mut hparas = Vec::new();
                 r.read_block(&root, &mut hparas, false);
@@ -248,7 +251,7 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
             };
             let (ndir, nfile) = path.rsplit_once('/').unwrap_or(("", &path));
             let nrels = parts.get(&format!("{ndir}/_rels/{nfile}.rels"))?;
-            r.images = load_images(&zip, nrels.as_ref(), &format!("{ndir}/"));
+            r.images = load_images(nrels.as_ref(), &format!("{ndir}/"));
             r.links = load_links(nrels.as_ref());
             for note in root.elements() {
                 let key = (end, note.attr("id").unwrap_or_default().to_string());
@@ -355,7 +358,7 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
             // and links; the ones left from the notes are not theirs.
             let (cdir, cfile) = path.rsplit_once('/').unwrap_or(("", &path));
             let crels = parts.get(&format!("{cdir}/_rels/{cfile}.rels"))?;
-            r.images = load_images(&zip, crels.as_ref(), &format!("{cdir}/"));
+            r.images = load_images(crels.as_ref(), &format!("{cdir}/"));
             r.links = load_links(crels.as_ref());
             for c in root.elements() {
                 let Some(&id) = r.comment_ids.get(c.attr("id").unwrap_or_default()) else {
@@ -458,6 +461,7 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
     {
         r.report.forget(notes::GENERATED_INDEXES);
     }
+    r.doc.styles.ensure_normal_character();
     r.doc.forget_history();
     if let Some(why) = r.budget.too_large() {
         return Err(format!("the document is too large for Quill: {why}"));
@@ -703,7 +707,8 @@ fn read_note_properties(e: &Element, p: &mut quill_core::DocumentProps) {
 /// unbounded one, repeated for every list paragraph, is a way to fill memory.
 const MAX_LEVEL_TEXT: usize = 256;
 
-struct Reader {
+struct Reader<'a, 'data> {
+    zip: &'a Archive<'data>,
     doc: Document,
     /// The authors and dates of tracked changes seen, to keep a hostile
     /// file from filling the revision table (see `stamp`).
@@ -745,7 +750,7 @@ struct Reader {
     /// The lists that have numbered a paragraph, by numId.
     lists_used: HashSet<String>,
     /// The pictures the part being read refers to, by relationship id.
-    images: HashMap<String, ImagePart>,
+    images: HashMap<String, String>,
     /// Converted pictures by their package path, shared by every placement.
     picture_cache: HashMap<String, Option<quill_core::Picture>>,
     /// The hyperlink targets the part being read refers to, by
@@ -890,7 +895,6 @@ fn descendant<'a>(e: &'a Element, name: &str) -> Option<&'a Element> {
     None
 }
 
-/// The image relationships of a part, with their bytes.
 /// Hyperlink relationships: id to target.
 fn load_links(rels: Option<&Arc<Element>>) -> HashMap<String, String> {
     let Some(rels) = rels else {
@@ -902,13 +906,10 @@ fn load_links(rels: Option<&Arc<Element>>) -> HashMap<String, String> {
         .collect()
 }
 
-fn load_images(
-    zip: &Archive,
-    rels: Option<&Arc<Element>>,
-    dir: &str,
-) -> HashMap<String, ImagePart> {
+/// The image relationships of a part. Their package entries stay compressed
+/// until the document actually refers to them.
+fn load_images(rels: Option<&Arc<Element>>, dir: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();
-    let mut by_path: HashMap<String, Arc<[u8]>> = HashMap::new();
     let Some(rels) = rels else {
         return out;
     };
@@ -923,33 +924,16 @@ fn load_images(
             Some(abs) => abs.to_string(),
             None => format!("{dir}{target}"),
         };
-        let bytes = if let Some(bytes) = by_path.get(&path) {
-            Some(bytes.clone())
-        } else if let Ok(Some(bytes)) = zip.read(&path) {
-            let bytes: Arc<[u8]> = bytes.into();
-            by_path.insert(path.clone(), bytes.clone());
-            Some(bytes)
-        } else {
-            None
-        };
-        if let Some(bytes) = bytes {
-            out.insert(id.to_string(), ImagePart { path, bytes });
-        }
+        out.insert(id.to_string(), path);
     }
     out
-}
-
-#[derive(Clone)]
-struct ImagePart {
-    path: String,
-    bytes: Arc<[u8]>,
 }
 
 fn twips_or(e: &Element, name: &str, default: i32) -> i32 {
     e.int(name).unwrap_or(default)
 }
 
-impl Reader {
+impl Reader<'_, '_> {
     fn font(&mut self, rfonts: &Element) -> Option<u16> {
         let theme = |v: &str| -> Option<String> {
             if v.starts_with("major") {
@@ -1340,7 +1324,7 @@ impl Reader {
         // Resolve each paragraph style through its basedOn chain.
         let mut resolved: HashMap<String, (ParaProps, CharProps)> = HashMap::new();
         fn resolve(
-            r: &mut Reader,
+            r: &mut Reader<'_, '_>,
             id: &str,
             raw: &HashMap<String, RawStyle>,
             resolved: &mut HashMap<String, (ParaProps, CharProps)>,
@@ -2603,7 +2587,7 @@ impl Reader {
     }
 }
 
-impl Reader {
+impl Reader<'_, '_> {
     /// What a drawing, VML picture or embedded object Quill cannot keep
     /// held: a text box, a picture, a chart or object, or a shape.
     fn note_drawing(&mut self, x: &Element) {
@@ -2673,18 +2657,33 @@ impl Reader {
     /// The picture in a VML shape (`v:imagedata`), at the size its style
     /// gives.
     fn picture_for(&mut self, id: &str) -> Option<quill_core::Picture> {
-        let image = self.images.get(id)?;
-        if let Some(cached) = self.picture_cache.get(&image.path) {
+        let path = self.images.get(id)?.clone();
+        if let Some(cached) = self.picture_cache.get(&path) {
             return cached.clone();
         }
-        // Past the picture limit nothing more is decoded; the file is
-        // refused when reading ends.
-        if !self.budget.add_picture(&image.path) {
+        // Charge the expanded entry before ZIP allocates it. Past the limit
+        // nothing more is inflated or decoded; the file is refused when
+        // reading ends.
+        let size = self.zip.entry_size(&path)?;
+        if !self.budget.add_picture(&path, size) {
             return None;
         }
-        let picture = crate::images::picture(image.bytes.clone());
-        self.picture_cache
-            .insert(image.path.clone(), picture.clone());
+        let Some(bytes) = self.zip.read(&path).ok().flatten() else {
+            self.budget.remove_picture(&path);
+            self.picture_cache.insert(path, None);
+            return None;
+        };
+        let Some(picture) = crate::images::picture(Arc::<[u8]>::from(bytes)) else {
+            self.budget.remove_picture(&path);
+            self.picture_cache.insert(path, None);
+            return None;
+        };
+        if !self.budget.set_picture_bytes(&path, picture.data.len()) {
+            self.picture_cache.insert(path, None);
+            return None;
+        }
+        let picture = Some(picture);
+        self.picture_cache.insert(path, picture.clone());
         picture
     }
 
@@ -3584,6 +3583,21 @@ mod tests {
         let first = parts.get("word/header1.xml").unwrap().unwrap();
         let second = parts.get("word/header1.xml").unwrap().unwrap();
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn image_relationships_keep_paths_without_loading_entries() {
+        let rels = Arc::new(
+            xml::parse(
+                br#"<Relationships><Relationship Id="pic" Type="x/image" Target="media/p.png"/></Relationships>"#,
+            )
+            .unwrap(),
+        );
+        let images = load_images(Some(&rels), "word/");
+        assert_eq!(
+            images.get("pic").map(String::as_str),
+            Some("word/media/p.png")
+        );
     }
 
     #[test]

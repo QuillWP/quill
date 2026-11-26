@@ -107,6 +107,7 @@ impl DocView {
         }
         if main_changed {
             self.status_count = quill_core::text::word_count(&self.doc);
+            self.text_generation = next_generation();
         }
         self.collapsed.resize(n, false);
         if let Some((first, flags)) = self.collapse_after.take() {
@@ -130,6 +131,7 @@ impl DocView {
             self.laid_out_width = opts.width;
             self.laid_out_hidden = opts.show_hidden;
             self.laid_out_changes = opts.show_changes;
+            self.text_generation = next_generation();
         }
         let fonts_table = self.doc.fonts.clone();
         let name = |id: u16| fonts_table.get(id as usize).cloned().unwrap_or_default();
@@ -479,6 +481,7 @@ impl DocView {
                     false,
                     self.laid_out_width,
                     &self.doc.objects,
+                    self.ligatures(),
                 );
                 y += l.height;
             }
@@ -488,6 +491,7 @@ impl DocView {
     /// Work out where every paragraph sits: one under another, and table
     /// cells side by side with each row as tall as its tallest cell.
     pub(super) fn place(&mut self, fonts: &Fonts) {
+        self.geometry_generation = next_generation();
         let paras = &self.doc.main.paras;
         let n = paras.len();
         // A paragraph's height, less the empty line after a closing page
@@ -562,7 +566,10 @@ impl DocView {
             spans.retain(|s| continues(s));
             // A frame: its paragraphs go where the frame says, and the text
             // after them flows round it.
-            if frames_on
+            // A drop cap is placed in every view, since the text beside it
+            // has to wrap round it. Other frames only where frames are on.
+            let placed = frames_on || paras[i].pap.frame.is_some_and(|f| f.drop_lines > 0);
+            if placed
                 && row.is_none()
                 && let Some(f) = self.place_frame(i, y, fonts)
             {
@@ -865,6 +872,7 @@ impl DocView {
     }
 
     pub(super) fn repaginate(&mut self) {
+        self.geometry_generation = next_generation();
         let p = &self.doc.props;
         let base_height = (p.page_height - p.margin_top - p.margin_bottom).max(720) as f32 / 20.0;
         let mut page_heights: Vec<f32> = self

@@ -21,6 +21,43 @@ fn status_counts_refresh_with_main_text_layout() {
     assert_eq!(view.status_count.paragraphs, 2);
 }
 
+#[test]
+fn moving_and_scrolling_leave_the_text_and_line_generations_alone() {
+    let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+        return;
+    };
+    let text = "A line of text that wraps a little. ".repeat(40);
+    let text = vec![text; 30].join("\n");
+    let mut view = DocView::new(quill_core::text::from_plain_text(&text), "Gen".into());
+    view.area = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 600.0,
+        h: 400.0,
+    };
+    view.update_layout(&mut fonts);
+    let before = (view.text_generation, view.geometry_generation);
+    // Caret moves, selections, scrolling and redrawing are what the Mac
+    // accessibility mirror must not rebuild the whole document for.
+    view.set_selection(Selection::caret(Position::new(3, 10)));
+    view.exec(Cmd::Down, false, &mut Clipboard::new());
+    view.exec(Cmd::Right, true, &mut Clipboard::new());
+    view.scroll_by(500.0);
+    view.update_layout(&mut fonts);
+    view.update_layout(&mut fonts);
+    assert_eq!((view.text_generation, view.geometry_generation), before);
+    // Typing changes both.
+    view.type_text("x");
+    view.update_layout(&mut fonts);
+    assert_ne!(view.text_generation, before.0);
+    assert_ne!(view.geometry_generation, before.1);
+    // So does showing tracked changes differently, which hides deletions.
+    let typed = view.text_generation;
+    view.show_changes = !view.show_changes;
+    view.update_layout(&mut fonts);
+    assert_ne!(view.text_generation, typed);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn read_aloud_uses_the_selection_or_the_whole_document() {
@@ -774,6 +811,54 @@ fn a_page_break_at_the_end_shows_the_next_page_as_a_line_break_does() {
     view.exec(Cmd::PageBreak, false, &mut clip);
     view.exec(Cmd::Undo, false, &mut clip);
     assert_eq!(texts(&view), ["Hello\u{c}After"]);
+}
+
+#[test]
+fn arrows_cross_a_continuous_section_break_in_normal_view() {
+    let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+        return;
+    };
+    let mut clip = Clipboard::new();
+    let mut view = DocView::new(Document::new(), "Breaks".into());
+    view.type_text("Same width");
+    view.exec(Cmd::SectionBreakContinuous, false, &mut clip);
+    view.type_text("Same width");
+    view.update_layout(&mut fonts);
+    let before = Position::new(0, 4);
+    let after = Position::new(1, 4);
+    view.set_caret(before, false);
+    view.exec(Cmd::Down, false, &mut clip);
+    assert_eq!(view.sel, Selection::caret(after));
+    view.exec(Cmd::Up, false, &mut clip);
+    assert_eq!(view.sel, Selection::caret(before));
+    view.exec(Cmd::Down, true, &mut clip);
+    assert_eq!(view.sel, Selection::new(before, after));
+}
+
+#[test]
+fn page_layout_reveals_a_break_before_the_next_paragraph() {
+    let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+        return;
+    };
+    let mut clip = Clipboard::new();
+    let mut doc = quill_core::text::from_plain_text("Before\nAfter");
+    doc.main.paras[0].pap.after = 240;
+    let mut view = DocView::new(doc, "Breaks".into());
+    view.page_view = true;
+    view.area = Rect::new(0.0, 0.0, 800.0, 600.0);
+    view.update_layout(&mut fonts);
+    view.sel = Selection::caret(Position::new(0, 6));
+    view.exec(Cmd::PageBreak, false, &mut clip);
+    view.update_layout(&mut fonts);
+    assert_eq!(view.pages.len(), 2);
+    assert_eq!(view.sel.focus, Position::new(0, 7));
+    assert_eq!(view.caret_page(), 1);
+    view.scroll_to_caret();
+    assert!(view.scroll_y > 0.0);
+    view.exec(Cmd::Undo, false, &mut clip);
+    view.update_layout(&mut fonts);
+    assert_eq!(view.pages.len(), 1);
+    assert_eq!(view.sel.focus, Position::new(0, 6));
 }
 
 #[test]
@@ -1585,6 +1670,31 @@ fn return_elsewhere_in_a_first_table_still_splits_the_cell() {
     assert_eq!(view.doc.main.paras.len(), count + 1);
     assert!(view.doc.main.paras[0].pap.in_table);
     assert_eq!(view.doc.main.paras[0].text, "a");
+}
+
+#[test]
+fn ligatures_follow_preferences_on_screen_and_the_copied_choice_in_print() {
+    let was = crate::settings::with(|s| s.ligatures);
+    let screen = DocView::new(Document::new(), "T".into());
+    let mut printing = DocView::new(Document::new(), "T".into()).into_print();
+    // On screen the window reads Preferences each time it draws.
+    crate::settings::update(|s| s.ligatures = false);
+    assert!(!screen.ligatures());
+    crate::settings::update(|s| s.ligatures = true);
+    assert!(screen.ligatures());
+    // A printing copy goes by the choice copied into it, whatever the
+    // settings of the thread it runs on say.
+    printing.print_ligatures = false;
+    assert!(!printing.ligatures());
+    printing.print_ligatures = true;
+    crate::settings::update(|s| s.ligatures = false);
+    assert!(printing.ligatures());
+    // Why the copy is needed: a print thread starts with default settings.
+    let seen = std::thread::spawn(|| crate::settings::with(|s| s.ligatures))
+        .join()
+        .unwrap();
+    assert!(seen, "a new thread does not see this thread's settings");
+    crate::settings::update(|s| s.ligatures = was);
 }
 
 #[test]

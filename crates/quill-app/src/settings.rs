@@ -323,6 +323,7 @@ pub struct Settings {
     pub show_styles_palette: bool,
     pub styles_palette_docked: bool,
     pub styles_palette_tab: u8,
+    pub styles_palette_all: bool,
     /// Customized buttons: position, picture and command name.
     pub toolbar_buttons: Vec<(usize, usize, String)>,
     /// Colors saved for every document, each with its name.
@@ -334,7 +335,9 @@ pub struct Settings {
     pub accepted_fonts: Vec<(PathBuf, Vec<String>)>,
     /// List the system's private fonts in the font menus.
     pub show_private_fonts: bool,
-    /// View > Highlight Missing Fonts.
+    /// Draw standard ligatures (fi, fl, ff...) where the font has them.
+    pub ligatures: bool,
+    /// Edit > Missing Fonts > Highlight Missing Fonts.
     pub highlight_missing_fonts: bool,
     /// Say where to deal with missing fonts after going on without them.
     pub missing_font_reminder: bool,
@@ -407,10 +410,12 @@ impl Default for Settings {
             show_styles_palette: false,
             styles_palette_docked: true,
             styles_palette_tab: 0,
+            styles_palette_all: false,
             toolbar_buttons: Vec::new(),
             named_colors: Vec::new(),
             accepted_fonts: Vec::new(),
             show_private_fonts: false,
+            ligatures: true,
             highlight_missing_fonts: false,
             missing_font_reminder: true,
             markdown_source_font: "Courier New".into(),
@@ -469,15 +474,13 @@ impl Settings {
     /// A new, empty document with these defaults.
     pub fn new_document(&self) -> Document {
         let mut d = Document::with_default_font(&self.font, self.size);
-        // A Bold or Italic Default Font is Normal's own style, so the
-        // styles based on Normal follow it.
+        // Store the chosen face with the document's Normal character style.
         if self.font_bold || self.font_italic {
-            let normal = d.styles.get(0);
-            let mut chp = normal.chp;
-            chp.bold = self.font_bold;
-            chp.italic = self.font_italic;
-            let pap = normal.pap.clone();
-            d.redefine_style(0, pap, chp);
+            let normal = d.styles.normal_character();
+            let mut format = d.styles.character(normal).unwrap().format;
+            format.props.bold = self.font_bold;
+            format.props.italic = self.font_italic;
+            d.redefine_character_style(normal, format);
         }
         d.props = self.document.clone();
         d.section = self.section.clone();
@@ -648,6 +651,7 @@ impl Settings {
             "styles_palette_tab",
             self.styles_palette_tab.to_string(),
         );
+        put(&mut out, "styles_palette_all", b(self.styles_palette_all));
         put(
             &mut out,
             "toolbar_buttons",
@@ -668,6 +672,7 @@ impl Settings {
             put(&mut out, "accepted_fonts", line);
         }
         put(&mut out, "show_private_fonts", b(self.show_private_fonts));
+        put(&mut out, "ligatures", b(self.ligatures));
         put(
             &mut out,
             "highlight_missing_fonts",
@@ -860,6 +865,7 @@ impl Settings {
                 }
                 "show_styles_palette" => s.show_styles_palette = flag,
                 "styles_palette_docked" => s.styles_palette_docked = flag,
+                "styles_palette_all" => s.styles_palette_all = flag,
                 "styles_palette_tab" => s.styles_palette_tab = v.parse().unwrap_or(0u8).min(2),
                 "toolbar_buttons" => {
                     s.toolbar_buttons = v
@@ -886,6 +892,7 @@ impl Settings {
                     }
                 }
                 "show_private_fonts" => s.show_private_fonts = flag,
+                "ligatures" => s.ligatures = flag,
                 "highlight_missing_fonts" => s.highlight_missing_fonts = flag,
                 "missing_font_reminder" => s.missing_font_reminder = flag,
                 "markdown_source_font" if !v.is_empty() => s.markdown_source_font = v.into(),
@@ -1368,6 +1375,25 @@ mod tests {
     }
 
     #[test]
+    fn ligatures_setting_is_written_to_the_settings_file_and_read_back() {
+        // On by default, and a file without the line keeps it on.
+        assert!(Settings::default().ligatures);
+        assert!(Settings::from_text_with_defaults("", Settings::default()).ligatures);
+        // Turned off, the file says so on its own line and reads back off.
+        let off = Settings {
+            ligatures: false,
+            ..Default::default()
+        };
+        let text = off.to_text();
+        assert!(text.lines().any(|l| l.trim() == "ligatures = 0"), "{text}");
+        assert!(!Settings::from_text_with_defaults(&text, Settings::default()).ligatures);
+        // Turned back on, it reads back on.
+        let on = Settings::default().to_text();
+        assert!(on.lines().any(|l| l.trim() == "ligatures = 1"), "{on}");
+        assert!(Settings::from_text_with_defaults(&on, off).ligatures);
+    }
+
+    #[test]
     fn preferences_persist_explicit_choices() {
         assert!(Settings::default().smart_quotes);
         assert!(!Settings::from_text("smart_quotes = 0\n").smart_quotes);
@@ -1442,6 +1468,7 @@ mod tests {
         s.show_styles_palette = true;
         s.styles_palette_docked = false;
         s.styles_palette_tab = 2;
+        s.styles_palette_all = true;
         s.section.columns = 3;
         s.section.start = SectionStart::OddPage;
         s.section.page_number_format = PageNumberFormat::UpperLetter;

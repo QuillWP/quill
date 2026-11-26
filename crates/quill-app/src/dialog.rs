@@ -16,6 +16,34 @@ fn modern_box(c: &mut Canvas, r: Rect, radius: f32, border: u32, fill: u32) {
     round_rect(c, inner, (radius - hair).max(1.0), fill);
 }
 
+/// Size of an on/off switch and of the row that holds one.
+pub const SWITCH_W: f32 = 32.0;
+pub const SWITCH_H: f32 = 18.0;
+pub const SWITCH_ROW: f32 = 20.0;
+
+/// Draw an on/off switch in `r`: a rounded track, blue when on, with a
+/// white knob at the end the switch is turned toward.
+pub fn draw_switch(c: &mut Canvas, r: Rect, on: bool) {
+    let radius = r.h / 2.0;
+    if on {
+        round_rect(c, r, radius, 0x0A84FF);
+    } else {
+        modern_box(c, r, radius, 0xB8B8BE, 0xE4E4E8);
+    }
+    let knob = r.h - 4.0;
+    let x = if on {
+        r.right() - 2.0 - knob
+    } else {
+        r.x + 2.0
+    };
+    round_rect(
+        c,
+        Rect::new(x, r.y + 2.0, knob, knob),
+        knob / 2.0,
+        color::WHITE,
+    );
+}
+
 #[derive(Clone, Debug)]
 pub enum Kind {
     Button {
@@ -26,6 +54,9 @@ pub enum Kind {
         /// Three-state checkbox (Find's formats): gray means "either".
         tri: bool,
         mixed: bool,
+        /// Drawn as an on/off switch at the right end of its row, with the
+        /// label at the left.
+        switch: bool,
     },
     Radio {
         group: u8,
@@ -330,7 +361,7 @@ impl Dialog {
 
     /// Make a checkbox three-state and set it.
     pub fn set_check3(&mut self, id: &str, state: Option<bool>) {
-        if let Some(Kind::Check { on, tri, mixed }) = self.item_mut(id).map(|i| &mut i.kind) {
+        if let Some(Kind::Check { on, tri, mixed, .. }) = self.item_mut(id).map(|i| &mut i.kind) {
             *tri = true;
             *mixed = state.is_none();
             *on = state == Some(true);
@@ -448,6 +479,23 @@ impl Dialog {
                 on,
                 tri: false,
                 mixed: false,
+                switch: false,
+            },
+        ));
+    }
+
+    /// An on/off switch row: `label` at `x`, the switch against the right
+    /// edge `right`.
+    pub fn toggle(&mut self, id: &'static str, label: &str, x: f32, right: f32, y: f32, on: bool) {
+        self.items.push(Item::new(
+            id,
+            label,
+            Rect::new(x, y, right - x, SWITCH_ROW),
+            Kind::Check {
+                on,
+                tri: false,
+                mixed: false,
+                switch: true,
             },
         ));
     }
@@ -676,7 +724,7 @@ impl Dialog {
 
     /// A check box that is either on or off, never gray.
     pub fn set_two_state(&mut self, id: &str, state: bool) {
-        if let Some(Kind::Check { on, tri, mixed }) = self.item_mut(id).map(|i| &mut i.kind) {
+        if let Some(Kind::Check { on, tri, mixed, .. }) = self.item_mut(id).map(|i| &mut i.kind) {
             *tri = false;
             *mixed = false;
             *on = state;
@@ -901,6 +949,7 @@ impl Dialog {
         let r = self.at(it.rect);
         // Checkboxes and radio buttons: their box, not the label's end.
         let x = match it.kind {
+            Kind::Check { switch: true, .. } => r.right() - SWITCH_W / 2.0,
             Kind::Check { .. } | Kind::Radio { .. } => r.x + 6.0,
             _ => r.x + r.w / 2.0,
         };
@@ -1074,6 +1123,30 @@ impl Dialog {
                     r.y + 14.5,
                     &it.label,
                     text_color,
+                );
+            }
+            Kind::Check {
+                on, switch: true, ..
+            } => {
+                draw_switch(
+                    c,
+                    Rect::new(
+                        r.right() - SWITCH_W,
+                        r.y + (r.h - SWITCH_H) / 2.0,
+                        SWITCH_W,
+                        SWITCH_H,
+                    ),
+                    *on,
+                );
+                label.draw(
+                    c,
+                    MODERN_FONT,
+                    SIZE,
+                    false,
+                    r.x,
+                    r.y + r.h / 2.0 + 4.5,
+                    &it.label,
+                    fg,
                 );
             }
             Kind::Check { on, mixed, .. } => {
@@ -1600,7 +1673,7 @@ impl Dialog {
     fn activate(&mut self, i: usize) -> Outcome {
         let id = self.items[i].id;
         match &mut self.items[i].kind {
-            Kind::Check { on, tri, mixed } => {
+            Kind::Check { on, tri, mixed, .. } => {
                 // Three-state boxes go gray, checked, clear, gray.
                 if *tri && *mixed {
                     *mixed = false;

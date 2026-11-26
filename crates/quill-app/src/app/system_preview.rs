@@ -14,12 +14,14 @@ impl App {
         let title = w.st.main_view().title.clone();
         let window = self.windows[i].0;
         let proxy = self.proxy.clone();
+        let ligatures = crate::settings::with(|s| s.ligatures);
         let spawn = std::thread::Builder::new()
             .name("quill-system-preview".into())
             .spawn(move || {
                 let mut fonts = Fonts::new(catalog);
                 let mut cache = GlyphCache::new();
                 let mut view = DocView::new(doc, title).into_print();
+                view.print_ligatures = ligatures;
                 view.update_layout(&mut fonts);
                 let pages = view.pages.len();
                 let bytes = crate::pdf::write_with_progress(

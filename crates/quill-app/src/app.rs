@@ -786,6 +786,9 @@ impl WinState {
             }
             return Effect::None;
         }
+        if self.start_palette_resize(cx, cy) {
+            return Effect::None;
+        }
         if let Some(effect) = self.palette_click(cx, cy, env, clip) {
             return effect;
         }
@@ -813,9 +816,23 @@ impl WinState {
         }
 
         if self.show_formatting_toolbar && cy < self.paragraph_toolbar_top() {
-            if let Some(hit) =
-                bars::formatting_toolbar_hit(self.formatting_toolbar_top(), self.width, cx, cy)
+            if self
+                .styles_undock_rect()
+                .is_some_and(|r| r.contains(cx, cy))
             {
+                self.set_palette_docked(false);
+                return Effect::None;
+            }
+            if self.styles_toggle_rect().contains(cx, cy) {
+                self.toggle_palette();
+                return Effect::None;
+            }
+            if let Some(hit) = bars::formatting_toolbar_hit(
+                self.formatting_toolbar_top(),
+                self.formatting_controls_width(),
+                cx,
+                cy,
+            ) {
                 if hit == Hit::FormattingOverflow {
                     self.open_bar_overflow(false, label, env);
                     return Effect::None;
@@ -1052,8 +1069,12 @@ impl WinState {
 
     fn apply_bar_hit(&mut self, hit: Hit, clip: &mut Clipboard) -> Effect {
         if hit == Hit::ColorPopup {
-            let anchor = bars::overflow_rect(false, self.formatting_toolbar_top(), self.width)
-                .unwrap_or_default();
+            let anchor = bars::overflow_rect(
+                false,
+                self.formatting_toolbar_top(),
+                self.formatting_controls_width(),
+            )
+            .unwrap_or_default();
             self.open_tool_palette(anchor);
             return Effect::None;
         }
@@ -1136,6 +1157,9 @@ impl WinState {
         let (cx, cy) = (x / self.ui, y / self.ui);
         let (dx, dy) = self.document_point(x, y);
         self.pointer = (cx, cy);
+        if self.resize_palette(cx) {
+            return true;
+        }
         if self.palette_move(cx, cy) {
             return true;
         }
@@ -1260,6 +1284,10 @@ impl WinState {
     /// The pointer went up. Returns the effect and, for the Window menu, the
     /// window to bring forward.
     pub fn mouse_up(&mut self, x: f32, y: f32, clip: &mut Clipboard) -> (Effect, Option<usize>) {
+        self.palette.title_press = None;
+        if self.palette.resize_grab.take().is_some() {
+            return (Effect::None, None);
+        }
         let (x, y) = (x / self.ui, y / self.ui);
         if self.review_resize.is_some() {
             self.resize_review(x);
@@ -1359,6 +1387,9 @@ impl WinState {
 
     fn cursor_icon(&self, x: f32, y: f32) -> CursorIcon {
         let (cx, cy) = (x / self.ui, y / self.ui);
+        if self.palette.resize_grab.is_some() || self.palette_resize_hit(cx, cy) {
+            return CursorIcon::EwResize;
+        }
         if self.review_resize.is_some() || self.review_divider_hit(cx, cy) {
             return CursorIcon::ColResize;
         }
@@ -1512,6 +1543,9 @@ struct DocWindow {
     autosave_warned: bool,
     #[cfg(target_os = "macos")]
     scrollbars: Option<crate::mac_widgets::MacScrollbars>,
+    /// An invisible native text view that gives VoiceOver the document text.
+    #[cfg(target_os = "macos")]
+    text_mirror: Option<crate::mac_text_mirror::TextMirror>,
 }
 
 impl DocWindow {
@@ -1590,6 +1624,8 @@ pub enum UserEvent {
     /// The Finder sent documents to open, waiting in `mac_open::take`.
     #[cfg(target_os = "macos")]
     OpenFiles,
+    #[cfg(target_os = "macos")]
+    DockStylesPalette,
     /// Quit from outside Quill (the Dock, logging out) with work unsaved.
     #[cfg(target_os = "macos")]
     Quit,
@@ -1659,6 +1695,8 @@ pub struct App {
     front: Option<WindowId>,
     /// The Appearance setting the windows were last given.
     appearance: Option<crate::settings::Appearance>,
+    /// The Ligatures setting the windows were last drawn with.
+    ligatures: bool,
     /// The Style Sheets palette's own window, while it shows undocked, and
     /// where it was when last closed.
     palette_window: Option<palette_window::PaletteWindow>,
@@ -1723,6 +1761,7 @@ impl App {
             native_print_window: None,
             front: None,
             appearance: None,
+            ligatures: crate::settings::with(|s| s.ligatures),
             palette_window: None,
             palette_at: None,
             #[cfg(target_os = "macos")]
@@ -2253,6 +2292,8 @@ impl App {
                 return;
             }
         };
+        #[cfg(target_os = "macos")]
+        crate::mac_window_geometry::disable_tabbing(&window);
         // `with_position` places the Mac's content area, under the title bar,
         // but frames are saved and compared by the window's outer corner.
         if let Some(at) = top_left {
@@ -2262,6 +2303,8 @@ impl App {
         let surface = softbuffer::Surface::new(&context, window.clone()).expect("window surface");
         #[cfg(target_os = "macos")]
         let scrollbars = crate::mac_widgets::MacScrollbars::new(&window);
+        #[cfg(target_os = "macos")]
+        let text_mirror = crate::mac_text_mirror::TextMirror::new(&window);
         // Input methods (Chinese, Japanese, Korean, dead-key accents, the
         // system's emoji panel) send their text to the window.
         window.set_ime_allowed(true);
@@ -2305,6 +2348,8 @@ impl App {
                 autosave_warned: false,
                 #[cfg(target_os = "macos")]
                 scrollbars,
+                #[cfg(target_os = "macos")]
+                text_mirror,
             },
         ));
     }
@@ -2349,6 +2394,18 @@ impl App {
             windows: &list,
         };
         let w = &mut self.windows[i].1;
+        // VoiceOver moved the caret in the text mirror: move Quill's to
+        // match and bring it into view, before this frame is drawn.
+        #[cfg(target_os = "macos")]
+        if let Some(sel) = w
+            .text_mirror
+            .as_ref()
+            .and_then(|mirror| mirror.take_request(w.st.main_view()))
+        {
+            let view = w.st.main_view_mut();
+            view.set_selection(sel);
+            view.scroll_to_caret();
+        }
         #[cfg(target_os = "macos")]
         {
             let depth = w.st.dialogs.len();
@@ -2542,6 +2599,10 @@ impl App {
             };
             scrollbars.set_dark(w.st.dark);
             scrollbars.sync(state, other, horizontal, w.st.ui);
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(mirror) = &mut w.text_mirror {
+            mirror.sync(w.st.main_view(), w.st.view_zoom());
         }
     }
 }
@@ -2762,6 +2823,12 @@ impl ApplicationHandler<UserEvent> for App {
             self.crop_cursor = crop_cursor(el);
         }
         if !self.recovered {
+            #[cfg(target_os = "macos")]
+            {
+                use winit::platform::macos::ActiveEventLoopExtMacOS;
+                // Quill uses separate document windows until tab support is added.
+                el.set_allows_automatic_window_tabbing(false);
+            }
             self.recovered = true;
             let interrupted = crate::recovery::interrupted();
             if !interrupted.is_empty() {
@@ -2826,6 +2893,16 @@ impl ApplicationHandler<UserEvent> for App {
         let _ = el;
         match event {
             UserEvent::FontsFound => {}
+            #[cfg(target_os = "macos")]
+            UserEvent::DockStylesPalette => {
+                if let Some(i) = self.front_index() {
+                    let w = &mut self.windows[i].1;
+                    w.st.set_palette_docked(true);
+                    w.window.request_redraw();
+                    self.sync_palette_window(el);
+                    self.sync_menus();
+                }
+            }
             #[cfg(target_os = "linux")]
             UserEvent::LinuxMenu { window, action } => {
                 if self.index(window).is_some() {
@@ -3169,6 +3246,8 @@ impl ApplicationHandler<UserEvent> for App {
                 let blip = cfg!(target_os = "linux") && w.st.point_in_window(px, py);
                 if !f && !blip {
                     w.st.menu = None;
+                    w.st.palette.title_press = None;
+                    w.st.palette.resize_grab = None;
                 }
                 w.window.request_redraw();
             }
@@ -3318,6 +3397,14 @@ impl ApplicationHandler<UserEvent> for App {
         self.sync_palette_window(el);
         #[cfg(target_os = "macos")]
         self.sync_edited_marks();
+        // Ligatures turned on or off in Preferences redraw every window.
+        let ligatures = crate::settings::with(|s| s.ligatures);
+        if ligatures != self.ligatures {
+            self.ligatures = ligatures;
+            for (_, w) in &self.windows {
+                w.window.request_redraw();
+            }
+        }
         // New Markdown fonts from the Preferences reach the open windows.
         if let Some((old, new)) = crate::settings::take_markdown_font_change() {
             for (_, w) in &mut self.windows {

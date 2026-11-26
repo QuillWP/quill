@@ -127,6 +127,7 @@ impl DocView {
             characters: now.characters.saturating_add(extra.characters),
             runs: now.runs.saturating_add(extra.runs),
             pictures: now.pictures.saturating_add(extra.pictures),
+            picture_bytes: now.picture_bytes.saturating_add(extra.picture_bytes),
             headers: now.headers.saturating_add(extra.headers),
         };
         match after.too_large() {
@@ -396,9 +397,15 @@ impl DocView {
         } else {
             // Across to the next block down the column, under the same x:
             // in a table that is the row above or below.
-            let b = &self.blocks[self.block_at(self.tops[p])];
+            let block = self.block_at(self.tops[p]);
+            let b = &self.blocks[block];
             let y = if down {
-                b.top + b.height + 0.5
+                let below = b.top + b.height + 0.5;
+                // A section guide can leave a gap before the next block.
+                // Hit that block instead of landing back in this one.
+                self.blocks
+                    .get(block + 1)
+                    .map_or(below, |next| below.max(next.top))
             } else {
                 b.top - 0.5
             };

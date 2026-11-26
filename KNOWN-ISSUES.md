@@ -13,8 +13,8 @@ what is missing or different today, so you do not have to find it yourself.
 - Beta builds are not signed or notarized. See the README for the one-time
   steps to open one.
 - The regular Mac app runs in the App Sandbox (a build from source or the
-  debug package does not), so settings from versions before it
-  start fresh. It asks once for the folder of a Markdown file with pictures,
+  debug package does not). It arrived in 0.30.0, so settings saved by
+  0.25.1 and earlier, which ran outside it, are not carried over. It asks once for the folder of a Markdown file with pictures,
   or of a Print Merge data document. Pictures a Markdown file names in other
   folders are not loaded.
 
@@ -23,10 +23,15 @@ what is missing or different today, so you do not have to find it yourself.
 - Saving a document as Markdown, and the Markdown Source and WYSIWYG views, are
   on hold: no menu offers them. Markdown files still open, and one you opened
   still saves as itself.
-- Accessibility: screen readers (VoiceOver) cannot read the document area.
-- Text shaping: letters are placed one at a time with kerning. There are no
-  ligatures, and right-to-left and complex scripts (Arabic, Hebrew, Indic) do
-  not display correctly.
+- Accessibility: VoiceOver support on the Mac is experimental. Only the main
+  document text is exposed, and it has not been tested by people who use
+  VoiceOver every day. Reports from VoiceOver users are welcome. Voice
+  Control and other accessibility tools see the text only while VoiceOver
+  is running.
+- Text shaping: letters are placed one at a time with kerning. Standard
+  ligatures (fi, fl, ff) are an experimental option in Preferences.
+  Right-to-left and complex scripts (Arabic, Hebrew, Indic) do not display
+  correctly.
 - Grammar checking (Tools > Grammar is always disabled) and Use As Default in
   the Document, Section and Style dialogs.
 - Spelling follows the system. The thesaurus (and hyphenation off the Mac) are

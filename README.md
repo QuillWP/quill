@@ -7,13 +7,13 @@
 <p align="center">
   <strong>Word compatibility in a much smaller package.</strong><br>
   A capable word processor for the Mac that opens and saves DOCX. The Apple
-  Silicon version is less than 8 MB.<br>
+  Silicon version is less than 10 MB.<br>
   Styles, pictures, tables, long-document tools and modern file formats.
 </p>
 
 <p align="center"><a href="https://quillwp.com">quillwp.com</a></p>
 
-**Status: beta · version 0.30.0.** Beta testers wanted.
+**Status: beta · version 0.31.0.** Beta testers wanted.
 **[Download a build](https://github.com/QuillWP/quill/releases)** from the releases page.
 
 **Word compatibility is a work in progress.** Quill opens and saves DOCX, and
@@ -39,23 +39,15 @@ Table formatting and index references
   <a href="assets/screenshots/quill-index.png"><img src="assets/screenshots/quill-index.png" alt="A two-column index with alphabetical entries and page references" width="48%"></a>
 </p>
 
-## New in 0.30.0
+## New in 0.31.0
 
-- **Quill is now beta.** The native `.qwp` format may still change.
-- **The Mac app runs in Apple's App Sandbox.** The regular build now follows
-  macOS sandboxing. Beta testing will soon be available through Apple's
-  TestFlight. It opens and saves only the documents you choose and never uses
-  the network.
-- Backups are kept beside the document as `Report.qwp-backup`
-- Paper sizes include the custom ones you made in the Print panel; facing pages
-  with mirrored margins and a gutter
-- Hidden text, section break kinds on Insert and by right-click
-- Saving as Markdown and the Markdown views are on hold while they are reworked
-- Fixes from a code review: headers and footers owned by individual sections are
-  now checked for missing fonts and Word warnings
-
-The sandboxed build starts with fresh settings. If you build from source with
-`python3 tools/package.py` you get an app that does not run in the sandbox.
+- Redesigned Preferences window and Stylesheets palette.
+- Full support for macOS emoji, including flags, families, skin tones and
+  keycaps.
+- Refined paragraph styling options.
+- Automatic kerning for fonts that support it.
+- Experimental support for ligatures and VoiceOver.
+- Increased security against hostile files.
 
 The full list is in [VERSION-HISTORY.md](VERSION-HISTORY.md).
 
@@ -145,7 +137,8 @@ Quill is a good fit if you use a Mac with a recent macOS, write real documents
 try, and are willing to report what breaks. Please
 [open an issue](https://github.com/QuillWP/quill/issues) for anything that breaks, changes or looks wrong.
 
-Not yet: screen readers cannot read the document area. See
+Screen reader support is new: VoiceOver can read the main document text, but
+it is experimental. See
 [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for what is missing or different, and
 [CONTRIBUTING.md](CONTRIBUTING.md) for how to report a problem.
 

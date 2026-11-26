@@ -653,6 +653,17 @@ impl Document {
         Document::with_default_font(default_font(), 24)
     }
 
+    /// Start decoding before installing the built-in style, so file style
+    /// IDs and definitions can be read in their original order.
+    pub fn for_import() -> Self {
+        let mut doc = Self::new();
+        doc.styles.characters.clear();
+        for style in &mut doc.styles.styles {
+            style.character = 0;
+        }
+        doc
+    }
+
     pub fn with_default_font(font: &str, size: u16) -> Self {
         let mut fonts = vec![font.to_string()];
         let styles = StyleSheet::standard(0, size, &mut |name| intern(&mut fonts, name));
@@ -2681,11 +2692,11 @@ impl Document {
     /// formatting; a linked character style stays linked and is laid over it.
     pub fn redefine_style(&mut self, id: StyleId, pap: ParaProps, chp: CharProps) {
         self.record_sheet();
-        self.redefine(id, pap, chp, 0);
+        self.redefine(id, pap, chp, Some(0));
     }
 
     /// Redefine style `id` and link it to character style `character`, or
-    /// unlink it with zero. `own` is the style's own character formatting.
+    /// return it to Normal with zero. `own` is the style's own character formatting.
     pub fn redefine_style_linked(
         &mut self,
         id: StyleId,
@@ -2700,25 +2711,43 @@ impl Document {
         let character = if self.styles.character(character).is_some() {
             character
         } else {
-            0
+            self.styles.normal_character()
         };
         self.styles.styles[id as usize].character = character;
-        self.redefine(id, pap, own, 0);
+        self.redefine(id, pap, own, Some(0));
     }
 
     /// Bring the paragraph styles linked to character style `character` up to
     /// date after it changed.
-    pub(crate) fn relink_paragraph_styles(&mut self, character: u16) {
+    pub(crate) fn relink_paragraph_styles(
+        &mut self,
+        character: u16,
+        old: crate::character_styles::CharacterStyle,
+    ) {
+        let normal = old.is_normal();
+        let defaults = CharProps::default();
+        let before = old.format.resolved(defaults);
+        let after = self
+            .styles
+            .character(character)
+            .unwrap()
+            .format
+            .resolved(defaults);
         for k in 0..self.styles.styles.len() as StyleId {
             let s = self.styles.get(k);
             if s.character == character {
                 let (pap, own) = (s.pap.clone(), s.own());
-                self.redefine(k, pap, own, 0);
+                if normal {
+                    // Each linked paragraph style inherits Normal directly.
+                    self.redefine(k, pap, restyle_chp(own, &before, &after), None);
+                } else {
+                    self.redefine(k, pap, own, Some(0));
+                }
             }
         }
     }
 
-    fn redefine(&mut self, id: StyleId, pap: ParaProps, own: CharProps, depth: u8) {
+    fn redefine(&mut self, id: StyleId, pap: ParaProps, own: CharProps, depth: Option<u8>) {
         let old = self.styles.get(id).clone();
         let mut pap = pap;
         pap.style = id;
@@ -2760,9 +2789,9 @@ impl Document {
             }
         }
         // Styles based on this one inherit the change.
-        if depth > 8 {
+        let Some(depth) = depth.filter(|&depth| depth <= 8) else {
             return;
-        }
+        };
         let derived: Vec<StyleId> = (0..self.styles.styles.len() as StyleId)
             .filter(|&k| k != id && self.styles.get(k).based_on == Some(id))
             .collect();
@@ -2771,7 +2800,7 @@ impl Document {
             let dp = restyle_pap(&s.pap, &old.pap, &pap);
             // A based-on style follows what this one now looks like.
             let dc = restyle_chp(s.own(), &old.chp, &chp);
-            self.redefine(k, dp, dc, depth + 1);
+            self.redefine(k, dp, dc, Some(depth + 1));
         }
     }
 
@@ -2920,7 +2949,7 @@ fn restyle_chp(c: CharProps, old: &CharProps, new: &CharProps) -> CharProps {
     let mut out = c;
     carry!(
         out, font, size, bold, italic, underline, strike, outline, shadow, small_caps, all_caps,
-        hidden, color, position, spacing
+        hidden, color, position, spacing, script
     );
     out
 }

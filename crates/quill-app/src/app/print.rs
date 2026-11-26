@@ -17,6 +17,8 @@ impl App {
         self.take_doc(i);
         let w = &mut self.windows[i].1;
         w.st.sync_pane();
+        // The print thread has no settings of its own.
+        let ligatures = crate::settings::with(|s| s.ligatures);
         let (doc, title) = match w.st.print_doc.take() {
             Some(doc) => (doc, "Form Letters".to_string()),
             None => {
@@ -44,6 +46,7 @@ impl App {
                     let mut fonts = Fonts::new(catalog);
                     let mut cache = GlyphCache::new();
                     let mut view = DocView::new(doc, title).into_print();
+                    view.print_ligatures = ligatures;
                     view.update_layout(&mut fonts);
                     let progress = proxy.clone();
                     let result =
@@ -93,6 +96,7 @@ impl App {
                 let mut fonts = Fonts::new(catalog);
                 let mut cache = GlyphCache::new();
                 let mut view = DocView::new(doc, title).into_print();
+                view.print_ligatures = ligatures;
                 view.update_layout(&mut fonts);
                 let n = view.pages.len();
                 let range = match job.pages {

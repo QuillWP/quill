@@ -21,7 +21,7 @@ class PackageTests(unittest.TestCase):
         for name in ["assets/quill.png", "data/language.dat", "data/licenses/notice.txt",
                      "tests/visual/example.png", "crates/new-uncommitted.rs", "tools/quill.desktop",
                      "fuzz/fuzz_targets/example.rs", "fuzz/support/oracle.rs", "fuzz/Cargo.toml",
-                     "assets/quill.icns", "assets/quill-document.icns", "assets/quill-about.jpg",
+                     "assets/quill.icns", "assets/quill-debug.icns", "assets/quill-document.icns", "assets/quill-about.jpg",
                      "assets/quill.ico", "assets/quill-document.ico", "assets/quill-document.png",
                      "tools/quill-mime.xml", "tools/install-linux.sh"]:
             path = self.root / name
@@ -152,6 +152,7 @@ class PackageTests(unittest.TestCase):
         info = plistlib.loads((package.ROOT / "tools/Info.plist").read_bytes())
         (self.root / "tools/Info.plist").write_bytes(plistlib.dumps(info))
 
+        (self.root / "assets/quill-debug.icns").write_bytes(b"red debug icon")
         signed = []
         images = []
 
@@ -173,11 +174,14 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(info["CFBundleIdentifier"], "com.quillwp.Quill.debug")
             self.assertEqual(info["CFBundleName"], "Quill Debug")
             self.assert_claims_nothing(info)
+            self.assertEqual((app / "Contents/Resources/Quill.icns").read_bytes(), b"red debug icon")
             # A release package is still Quill.
             package.mac_package(executable, self.output, "1.2.3", "arm64")
             info = plistlib.loads((self.output / "Quill.app/Contents/Info.plist").read_bytes())
             self.assertEqual(info["CFBundleIdentifier"], "com.quillwp.Quill")
             self.assertEqual(info["CFBundleName"], "Quill")
+            self.assertEqual(
+                (self.output / "Quill.app/Contents/Resources/Quill.icns").read_bytes(), b"fixture")
             # The release package runs in the App Sandbox; the debug one does not.
             self.assertEqual(len(signed), 2)
             self.assertNotIn("--entitlements", signed[0])

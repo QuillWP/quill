@@ -589,6 +589,10 @@ pub trait Surface {
     ) {
         self.glyph(fonts, cache, face, id, size, x, baseline, color);
     }
+    /// The original characters represented by the following drawn glyph.
+    fn begin_actual_text(&mut self, _text: &str) {}
+    fn end_actual_text(&mut self) {}
+
     /// Limit drawing to `r` (within any clip already set) until `pop_clip`.
     fn push_clip(&mut self, r: Rect);
     fn pop_clip(&mut self);

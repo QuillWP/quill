@@ -8,6 +8,7 @@ use ab_glyph::{Font, FontRef, GlyphId, VariableFont};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use unicode_segmentation::UnicodeSegmentation;
 
 pub type FaceId = u16;
 
@@ -737,6 +738,160 @@ pub enum Curve {
     Cubic((f32, f32), (f32, f32), (f32, f32), (f32, f32)),
 }
 
+/// Latin standard ligatures, longest first. Drawing only looks for
+/// ligatures that start with "f", so every entry must.
+const STANDARD_LIGATURES: [&str; LIGATURE_COUNT] = [
+    "ffi", "ffl", "ffj", "ffb", "ffh", "ffk", "fft", "ff", "fi", "fl", "fj", "fb", "fh", "fk", "ft",
+];
+const LIGATURE_COUNT: usize = 15;
+
+fn standard_ligatures(data: &[u8], index: u32) -> [Option<GlyphId>; LIGATURE_COUNT] {
+    use ttf_parser::{Face, Tag, gsub::SubstitutionSubtable};
+
+    let Ok(face) = Face::parse(data, index) else {
+        return [None; LIGATURE_COUNT];
+    };
+    let Some(table) = face.tables().gsub else {
+        return [None; LIGATURE_COUNT];
+    };
+    let language = [b"latn", b"DFLT"]
+        .into_iter()
+        .filter_map(|tag| table.scripts.find(Tag::from_bytes(tag)))
+        .find_map(|script| script.default_language);
+    let Some(feature) = language.and_then(|language| {
+        language
+            .feature_indices
+            .into_iter()
+            .filter_map(|i| table.features.get(i))
+            .find(|feature| feature.tag == Tag::from_bytes(b"liga"))
+    }) else {
+        return [None; LIGATURE_COUNT];
+    };
+
+    STANDARD_LIGATURES.map(|text| {
+        let mut chars = text.chars();
+        let first = face.glyph_index(chars.next()?)?;
+        let rest: Vec<_> = chars.map(|c| face.glyph_index(c)).collect::<Option<_>>()?;
+        for lookup in feature
+            .lookup_indices
+            .into_iter()
+            .filter_map(|i| table.lookups.get(i))
+        {
+            for subtable in lookup.subtables.into_iter::<SubstitutionSubtable>() {
+                let SubstitutionSubtable::Ligature(sub) = subtable else {
+                    continue;
+                };
+                if let Some(set) = sub
+                    .coverage
+                    .get(first)
+                    .and_then(|i| sub.ligature_sets.get(i))
+                    && let Some(ligature) = set
+                        .into_iter()
+                        .find(|ligature| ligature.components.into_iter().eq(rest.iter().copied()))
+                    && ligature.glyph.0 != 0
+                    && ligature.glyph.0 < face.number_of_glyphs()
+                {
+                    return Some(GlyphId(ligature.glyph.0));
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Most GPOS kerning pairs one face remembers. A few hundred kilobytes at
+/// most, and many times the pairs a page of Latin text uses.
+const KERN_PAIRS_KEPT: usize = 16_384;
+
+/// The GPOS lookups behind a font's `kern` feature, for every script's
+/// default language. Most modern fonts keep their pair kerning here and
+/// have no old `kern` table at all. Empty when the font has none.
+fn gpos_kern_lookups(face: &ttf_parser::Face) -> Vec<u16> {
+    use ttf_parser::Tag;
+
+    let Some(table) = face.tables().gpos else {
+        return Vec::new();
+    };
+    let kern = Tag::from_bytes(b"kern");
+    let mut found = Vec::new();
+    for script in table.scripts {
+        let Some(language) = script.default_language else {
+            continue;
+        };
+        for feature in language
+            .feature_indices
+            .into_iter()
+            .filter_map(|i| table.features.get(i))
+            .filter(|feature| feature.tag == kern)
+        {
+            for lookup in feature.lookup_indices {
+                if !found.contains(&lookup) {
+                    found.push(lookup);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The horizontal adjustment to the first glyph's advance that the font's
+/// GPOS pair kerning makes between `a` and `b`, in font units. Each lookup
+/// uses the first of its subtables that has the pair.
+fn gpos_pair_kern(face: &ttf_parser::Face, lookups: &[u16], a: GlyphId, b: GlyphId) -> f32 {
+    use ttf_parser::gpos::{PairAdjustment, PositioningSubtable};
+
+    let Some(table) = face.tables().gpos else {
+        return 0.0;
+    };
+    let (a, b) = (ttf_parser::GlyphId(a.0), ttf_parser::GlyphId(b.0));
+    let mut total = 0.0;
+    for lookup in lookups.iter().filter_map(|&i| table.lookups.get(i)) {
+        for subtable in lookup.subtables.into_iter::<PositioningSubtable>() {
+            let PositioningSubtable::Pair(pair) = subtable else {
+                continue;
+            };
+            let adjustment = match pair {
+                PairAdjustment::Format1 { coverage, sets } => coverage
+                    .get(a)
+                    .and_then(|i| sets.get(i))
+                    .and_then(|set| set.get(b)),
+                PairAdjustment::Format2 {
+                    coverage,
+                    classes,
+                    matrix,
+                } => coverage
+                    .get(a)
+                    .and_then(|_| matrix.get((classes.0.get(a), classes.1.get(b)))),
+            };
+            if let Some((first, _)) = adjustment {
+                total += f32::from(first.x_advance);
+                break;
+            }
+        }
+    }
+    total
+}
+
+/// Whether `c` is what makes several characters one emoji: the joiner, the
+/// emoji selector, the keycap mark, a flag letter, a skin tone or a tag.
+fn joins_emoji(c: char) -> bool {
+    matches!(c,
+        '\u{200D}' | '\u{FE0F}' | '\u{20E3}'
+        | '\u{1F1E6}'..='\u{1F1FF}'
+        | '\u{1F3FB}'..='\u{1F3FF}'
+        | '\u{E0020}'..='\u{E007F}')
+}
+
+/// Text that the color emoji font draws as a single picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EmojiSequence {
+    /// The bytes of the text it covers.
+    pub start: usize,
+    pub end: usize,
+    pub face: FaceKey,
+    pub glyph: GlyphId,
+}
+
 /// A face ready for measuring and drawing.
 pub struct LoadedFace {
     pub font: FontRef<'static>,
@@ -759,9 +914,38 @@ pub struct LoadedFace {
     /// Wingdings is a smiley), so these codes draw the symbol, not a
     /// letter borrowed from another font. 0 where the font has nothing.
     symbols: Option<Box<[u16; 256]>>,
+    standard_ligatures: [Option<GlyphId>; LIGATURE_COUNT],
+    /// The face parsed for the tables `font` does not show: GPOS, `morx`.
+    parsed: Option<ttf_parser::Face<'static>>,
+    /// The lookups of the GPOS `kern` feature. When there are any they
+    /// replace the old `kern` table.
+    gpos_kern: Vec<u16>,
+    /// Pairs already looked up, since reading GPOS for every pair of a long
+    /// document is slow. In font units. Holds at most `KERN_PAIRS_KEPT`
+    /// pairs: see `Fonts::kern`.
+    gpos_pairs: std::sync::Mutex<HashMap<(u16, u16), f32>>,
 }
 
 impl LoadedFace {
+    pub fn standard_ligatures(&self, text: &str) -> impl Iterator<Item = (usize, GlyphId)> {
+        STANDARD_LIGATURES
+            .into_iter()
+            .zip(self.standard_ligatures)
+            .filter_map(move |(letters, glyph)| {
+                glyph
+                    .filter(|_| text.starts_with(letters))
+                    .map(|glyph| (letters.len(), glyph))
+            })
+    }
+
+    /// Every standard ligature this face has, with the letters it stands for.
+    pub fn standard_ligature_glyphs(&self) -> impl Iterator<Item = (&'static str, GlyphId)> {
+        STANDARD_LIGATURES
+            .into_iter()
+            .zip(self.standard_ligatures)
+            .filter_map(|(letters, glyph)| glyph.map(|glyph| (letters, glyph)))
+    }
+
     /// The glyph for `c` in this face; 0 if it has none.
     pub fn glyph_id(&self, c: char) -> GlyphId {
         if let Some(map) = &self.symbols {
@@ -903,6 +1087,8 @@ pub struct Fonts {
     loaded: HashMap<(PathBuf, u32, u16), FaceId>,
     resolved: HashMap<(String, bool, bool), FaceKey>,
     fallback_faces: Option<Vec<FaceId>>,
+    /// The color emoji font, once looked for (None inside: there is none).
+    emoji_face: Option<Option<FaceKey>>,
     /// List the system's private fonts too (see `family_names`).
     show_private: bool,
 }
@@ -956,6 +1142,7 @@ impl Fonts {
             loaded: HashMap::new(),
             resolved: HashMap::new(),
             fallback_faces: None,
+            emoji_face: None,
             show_private: false,
         }
     }
@@ -1175,7 +1362,12 @@ impl Fonts {
             (i, 0) => format!("{stem}-{i}"),
             (i, w) => format!("{stem}-{i}-{w}"),
         };
+        let parsed = ttf_parser::Face::parse(data, src.index).ok();
+        let gpos_kern = parsed.as_ref().map(gpos_kern_lookups).unwrap_or_default();
         let face = LoadedFace {
+            parsed,
+            gpos_kern,
+            gpos_pairs: Default::default(),
             data,
             index: src.index,
             name,
@@ -1184,6 +1376,7 @@ impl Fonts {
             line_gap: font.line_gap_unscaled(),
             units_per_em,
             symbols: symbol_codes(data, src.index),
+            standard_ligatures: standard_ligatures(data, src.index),
             font,
         };
         self.faces.push(face);
@@ -1221,6 +1414,67 @@ impl Fonts {
             self.fallback_faces = Some(list);
         }
         self.fallback_faces.clone().unwrap_or_default()
+    }
+
+    /// The color emoji font, if the system has one that keeps its sequences
+    /// in a `morx` table (Apple Color Emoji).
+    fn emoji_face(&mut self) -> Option<FaceKey> {
+        if self.emoji_face.is_none() {
+            let family = self.catalog.find("Apple Color Emoji").cloned();
+            let found = family
+                .map(|family| self.pick_face(&family, false, false, false))
+                .filter(|key| {
+                    self.faces[key.face as usize]
+                        .parsed
+                        .as_ref()
+                        .is_some_and(|parsed| parsed.tables().morx.is_some())
+                });
+            self.emoji_face = Some(found);
+        }
+        self.emoji_face.flatten()
+    }
+
+    /// The parts of `text` that the color emoji font draws as one picture:
+    /// a flag, a family, a skin tone, a symbol in its emoji form, a keycap.
+    /// Single characters are not listed; they draw as themselves.
+    pub fn emoji_sequences(&mut self, text: &str) -> Vec<EmojiSequence> {
+        let mut found = Vec::new();
+        if text.is_ascii() {
+            return found;
+        }
+        let candidates: Vec<(usize, &str)> = text
+            .grapheme_indices(true)
+            .filter(|(_, g)| g.chars().nth(1).is_some() && g.chars().any(joins_emoji))
+            .collect();
+        if candidates.is_empty() {
+            return found;
+        }
+        let Some(key) = self.emoji_face() else {
+            return found;
+        };
+        let face = &self.faces[key.face as usize];
+        let Some(parsed) = &face.parsed else {
+            return found;
+        };
+        for (start, grapheme) in candidates {
+            let ids: Vec<u16> = grapheme.chars().map(|c| face.glyph_id(c).0).collect();
+            // Every character must be one the emoji font has, or the
+            // sequence is ordinary text with marks, such as an accent.
+            if ids.contains(&0) {
+                continue;
+            }
+            if let Some(&[one]) = crate::morx::shape(parsed, &ids).as_deref()
+                && one.glyph != 0
+            {
+                found.push(EmojiSequence {
+                    start,
+                    end: start + grapheme.len(),
+                    face: key,
+                    glyph: GlyphId(one.glyph),
+                });
+            }
+        }
+        found
     }
 
     /// The glyph for `c` in exactly this face (no fallback); 0 if missing.
@@ -1277,7 +1531,28 @@ impl Fonts {
     /// Kerning between two glyphs of the same face, in points.
     pub fn kern(&self, key: FaceKey, a: GlyphId, b: GlyphId, size: f32) -> f32 {
         let face = &self.faces[key.face as usize];
-        face.font.kern_unscaled(a, b) * size / face.units_per_em
+        let units = match &face.parsed {
+            Some(parsed) if !face.gpos_kern.is_empty() => {
+                let mut pairs = face.gpos_pairs.lock().unwrap_or_else(|e| e.into_inner());
+                match pairs.get(&(a.0, b.0)) {
+                    Some(&units) => units,
+                    None => {
+                        let units = gpos_pair_kern(parsed, &face.gpos_kern, a, b);
+                        // A font with thousands of glyphs (CJK) can meet
+                        // millions of different pairs in one document, so
+                        // start over when the cache is full rather than let
+                        // it grow without end. Ordinary text needs far fewer.
+                        if pairs.len() >= KERN_PAIRS_KEPT {
+                            pairs.clear();
+                        }
+                        pairs.insert((a.0, b.0), units);
+                        units
+                    }
+                }
+            }
+            _ => face.font.kern_unscaled(a, b),
+        };
+        units * size / face.units_per_em
     }
 
     pub fn vmetrics(&self, key: FaceKey, size: f32) -> VMetrics {
@@ -1819,6 +2094,31 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn f_ligatures_beyond_fi_and_fl_are_found_longest_first() {
+        let path = PathBuf::from("/System/Library/Fonts/Supplemental/Seravek.ttc");
+        if !path.is_file() {
+            return;
+        }
+        let mut fonts = Fonts::new(Catalog::from_files(&[("Seravek", path, 0, 400, false)]));
+        let key = fonts.resolve("Seravek", false, false);
+        let face = fonts.face(key.face);
+        let have: Vec<&str> = face.standard_ligature_glyphs().map(|(l, _)| l).collect();
+        for letters in ["fj", "fb", "fh", "fk", "ffj", "ffb", "ffh", "ffk"] {
+            assert!(have.contains(&letters), "{letters} missing from {have:?}");
+        }
+        // "ffk" is tried before "ff", so one glyph covers all three letters.
+        assert_eq!(
+            face.standard_ligatures("ffkx").next().map(|(n, _)| n),
+            Some(3)
+        );
+        assert_eq!(
+            face.standard_ligatures("fjord").next().map(|(n, _)| n),
+            Some(2)
+        );
+    }
+
     #[test]
     fn loaded_font_bytes_survive_the_source_file_being_truncated() {
         let path = std::env::temp_dir().join(format!(
@@ -1831,5 +2131,85 @@ mod tests {
         std::fs::write(&path, []).unwrap();
         assert_eq!(loaded, b"stable font bytes");
         std::fs::remove_file(path).unwrap();
+    }
+
+    /// The kerning between two letters of a font file, and what the old
+    /// `kern` table alone says about them. None if the file is missing.
+    #[cfg(target_os = "macos")]
+    fn kern_of(file: &str, pair: (char, char)) -> Option<(f32, f32)> {
+        let path = PathBuf::from(file);
+        if !path.is_file() {
+            return None;
+        }
+        let mut fonts = Fonts::new(Catalog::from_files(&[("K", path, 0, 400, false)]));
+        let key = fonts.resolve("K", false, false);
+        let face = fonts.face(key.face);
+        let (a, b) = (face.glyph_id(pair.0), face.glyph_id(pair.1));
+        let old = face.font.kern_unscaled(a, b);
+        let units = face.units_per_em;
+        Some((fonts.kern(key, a, b, units), old))
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_gpos_pair_cache_stays_bounded_and_correct() {
+        let path = PathBuf::from("/System/Library/Fonts/NewYork.ttf");
+        if !path.is_file() {
+            return;
+        }
+        let mut fonts = Fonts::new(Catalog::from_files(&[("K", path, 0, 400, false)]));
+        let key = fonts.resolve("K", false, false);
+        let (av, size) = {
+            let face = fonts.face(key.face);
+            ((face.glyph_id('A'), face.glyph_id('V')), face.units_per_em)
+        };
+        let first = fonts.kern(key, av.0, av.1, size);
+        assert!(first < 0.0);
+        let glyphs = fonts
+            .face(key.face)
+            .font
+            .glyph_count()
+            .min(u16::MAX as usize) as u16;
+        let mut fed = 0;
+        'pairs: for a in 0..glyphs {
+            for b in 0..glyphs {
+                fonts.kern(key, GlyphId(a), GlyphId(b), size);
+                fed += 1;
+                if fed > 2 * KERN_PAIRS_KEPT {
+                    break 'pairs;
+                }
+            }
+        }
+        let kept = fonts.faces[key.face as usize]
+            .gpos_pairs
+            .lock()
+            .unwrap()
+            .len();
+        assert!(kept <= KERN_PAIRS_KEPT, "{kept} pairs kept");
+        // A pair looked up again after the cache started over is the same.
+        assert_eq!(fonts.kern(key, av.0, av.1, size), first);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_font_with_only_gpos_kerning_is_kerned() {
+        // New York keeps its pair kerning in GPOS and has no `kern` table.
+        let Some((kern, old)) = kern_of("/System/Library/Fonts/NewYork.ttf", ('A', 'V')) else {
+            return;
+        };
+        assert_eq!(old, 0.0);
+        assert!(kern < 0.0, "A V is not kerned: {kern}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn gpos_kerning_agrees_with_the_kern_table_where_a_font_has_both() {
+        // Arial carries the same pairs in both; reading GPOS must not change them.
+        let Some((kern, old)) = kern_of("/System/Library/Fonts/Supplemental/Arial.ttf", ('A', 'V'))
+        else {
+            return;
+        };
+        assert!(old < 0.0);
+        assert_eq!(kern, old);
     }
 }

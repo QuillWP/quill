@@ -98,9 +98,33 @@ pub fn check_supported(doc: &Document) {
         expected.set_comment_range(start, end, id);
     }
     let docx = quill_formats::docx::read(&quill_formats::docx::write(doc, 0)).unwrap();
-    assert_same_named(&expected, &docx, "DOCX");
+    assert_same_exchange(&expected, &docx, "DOCX");
     let rtf = quill_formats::rtf::read(&quill_formats::rtf::write(doc)).unwrap();
-    assert_same_named(&expected, &rtf, "RTF");
+    assert_same_exchange(&expected, &rtf, "RTF");
+}
+
+fn assert_same_exchange(doc: &Document, back: &Document, format: &str) {
+    let differences = common::differences(doc, back);
+    // Empty notes and comments are editor placeholders. Exchange formats
+    // have no note or comment to carry those paragraphs' formatting.
+    let changes: Vec<_> = differences
+        .into_iter()
+        .filter(|change| {
+            for (name, before, after) in [
+                ("notes", &doc.notes, &back.notes),
+                ("annotations", &doc.annotations, &back.annotations),
+            ] {
+                if matches!(before.paras.as_slice(), [p] if p.text.is_empty())
+                    && matches!(after.paras.as_slice(), [p] if p.text.is_empty())
+                    && change.starts_with(&format!("changed   {name} 00 mark:"))
+                {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+    assert!(changes.is_empty(), "{format}: {}", changes.join("\n"));
 }
 
 #[allow(dead_code)]

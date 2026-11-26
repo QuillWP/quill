@@ -468,6 +468,20 @@ impl Surface for Page<'_> {
         self.text.run = Some((y, shear, x + w * size / 1000.0));
     }
 
+    fn begin_actual_text(&mut self, text: &str) {
+        self.end_text();
+        self.out.push_str("/Span << /ActualText <FEFF");
+        for unit in text.encode_utf16() {
+            let _ = write!(self.out, "{unit:04X}");
+        }
+        self.out.push_str("> >> BDC\n");
+    }
+
+    fn end_actual_text(&mut self) {
+        self.end_text();
+        self.out.push_str("EMC\n");
+    }
+
     fn glyph_art(
         &mut self,
         fonts: &Fonts,
@@ -835,6 +849,83 @@ pub mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn standard_ligatures_export_as_glyphs_with_their_original_letters() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+
+        let path = std::path::PathBuf::from(
+            "/Applications/LibreOffice.app/Contents/Resources/fonts/truetype/DejaVuSerif.ttf",
+        );
+        if !path.is_file() {
+            return;
+        }
+        let face = ("DejaVu Serif", path, 0, 400, false);
+        let mut fonts = Fonts::new(quill_layout::Catalog::from_files(&[face]));
+        let mut doc = quill_core::Document::with_default_font("DejaVu Serif", 48);
+        let source = "file flow fluff";
+        let chp = doc.main.paras[0].mark_chp;
+        doc.main.paras[0].insert(0, source, chp);
+        let mut view = DocView::new(doc, "Ligatures".into());
+        view.update_layout(&mut fonts);
+        let pdf = write(&mut view, &mut fonts, &mut GlyphCache::default(), 0..1);
+        let streams: Vec<String> = pdf
+            .windows(7)
+            .enumerate()
+            .filter(|(_, w)| *w == b"stream\n")
+            .filter_map(|(at, _)| miniz_oxide::inflate::decompress_to_vec_zlib(&pdf[at + 7..]).ok())
+            .filter_map(|stream| String::from_utf8(stream).ok())
+            .collect();
+        let page = streams
+            .iter()
+            .find(|stream| stream.contains("/ActualText"))
+            .expect("the PDF page must contain a marked ligature");
+        // Readers that ignore ActualText, such as Preview, use the font's
+        // character map: the ligatures must read as letters there too, not
+        // as U+FB00 to U+FB04.
+        let cmap = streams
+            .iter()
+            .find(|stream| stream.contains("beginbfchar"))
+            .expect("the font must have a character map");
+        for letters in ["<00660069>", "<0066006C>", "<00660066>"] {
+            assert!(cmap.contains(letters), "{letters} missing from {cmap}");
+        }
+        assert!(!cmap.contains("<FB0"), "{cmap}");
+        for text in ["00660069", "0066006C", "00660066"] {
+            let marker = format!("/ActualText <FEFF{text}> >> BDC");
+            let (_, span) = page.split_once(&marker).unwrap();
+            let (span, _) = span.split_once("EMC").unwrap();
+            let (_, glyph) = span.split_once("Tm [<").unwrap();
+            assert_eq!(glyph.find(">] TJ"), Some(4), "{span}");
+        }
+        if let Ok(mut extract) = Command::new("pdftotext")
+            .args(["-", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+        {
+            extract.stdin.take().unwrap().write_all(&pdf).unwrap();
+            let output = extract.wait_with_output().unwrap();
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), source);
+        }
+
+        // With ligatures turned off in Preferences, a printed copy draws the
+        // separate letters.
+        let mut plain = DocView::new(view.doc.clone(), "Plain".into()).into_print();
+        plain.print_ligatures = false;
+        plain.update_layout(&mut fonts);
+        let pdf = write(&mut plain, &mut fonts, &mut GlyphCache::default(), 0..1);
+        let marked = pdf
+            .windows(7)
+            .enumerate()
+            .filter(|(_, w)| *w == b"stream\n")
+            .filter_map(|(at, _)| miniz_oxide::inflate::decompress_to_vec_zlib(&pdf[at + 7..]).ok())
+            .any(|stream| stream.windows(11).any(|w| w == b"/ActualText"));
+        assert!(!marked, "no ligature may be drawn when they are off");
+    }
+
     #[test]
     fn writes_a_wellformed_pdf() {
         let Some(fonts) = test_fonts() else { return };
@@ -986,5 +1077,32 @@ pub mod tests {
                 .iter()
                 .any(|&c| c != 0xffffff && (c >> 16 & 255) != (c >> 8 & 255))
         );
+    }
+
+    #[test]
+    fn an_emoji_sequence_is_one_image_in_pdf() {
+        let Some(mut fonts) = test_fonts() else {
+            return;
+        };
+        if !fonts.has_family("Apple Color Emoji") {
+            return;
+        }
+        // The image objects a PDF of `text` holds, in ordinary text at a small size.
+        let mut images = |text: &str| {
+            let mut doc = quill_core::Document::with_default_font("Helvetica", 24);
+            let chp = doc.main.paras[0].mark_chp;
+            doc.main.paras[0].insert(0, text, chp);
+            let mut v = DocView::new(doc, "Emoji".into());
+            v.update_layout(&mut fonts);
+            let bytes = write(&mut v, &mut fonts, &mut GlyphCache::new(), 0..1);
+            bytes
+                .windows(15)
+                .filter(|s| *s == b"/Subtype /Image")
+                .count()
+        };
+        // A family of three is as many images as one face: a single picture.
+        let one = images("\u{1F600}");
+        assert!(one > 0);
+        assert_eq!(images("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"), one);
     }
 }

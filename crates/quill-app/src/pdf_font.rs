@@ -382,17 +382,28 @@ pub fn build(fonts: &Fonts, face: FaceId, glyphs: &[GlyphId]) -> Built {
 /// The ToUnicode CMap: each subset glyph back to the character it shows,
 /// from the font's own character map.
 pub fn to_unicode(fonts: &Fonts, face: FaceId, glyphs: &[GlyphId]) -> String {
-    let mut chars: HashMap<GlyphId, char> = HashMap::new();
-    for (id, c) in fonts.face(face).font.codepoint_ids() {
+    let lf = fonts.face(face);
+    let mut chars: HashMap<GlyphId, String> = HashMap::new();
+    for (id, c) in lf.font.codepoint_ids() {
         chars
             .entry(id)
-            .and_modify(|old| *old = (*old).min(c))
-            .or_insert(c);
+            .and_modify(|old| {
+                if old.chars().next().is_some_and(|o| c < o) {
+                    *old = c.to_string();
+                }
+            })
+            .or_insert_with(|| c.to_string());
     }
-    let pairs: Vec<(u16, char)> = glyphs
+    // A ligature reads back as its letters, so copying or searching "office"
+    // finds it. The font's own map would give U+FB03, which most readers
+    // keep as one character.
+    for (letters, id) in lf.standard_ligature_glyphs() {
+        chars.insert(id, letters.to_string());
+    }
+    let pairs: Vec<(u16, &str)> = glyphs
         .iter()
         .enumerate()
-        .filter_map(|(k, id)| chars.get(id).map(|&c| (k as u16 + 1, c)))
+        .filter_map(|(k, id)| chars.get(id).map(|s| (k as u16 + 1, s.as_str())))
         .collect();
     let mut out = String::from(
         "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
@@ -402,13 +413,8 @@ pub fn to_unicode(fonts: &Fonts, face: FaceId, glyphs: &[GlyphId]) -> String {
     );
     for block in pairs.chunks(100) {
         let _ = writeln!(out, "{} beginbfchar", block.len());
-        for &(cid, c) in block {
-            let mut units = [0u16; 2];
-            let hex: String = c
-                .encode_utf16(&mut units)
-                .iter()
-                .map(|u| format!("{u:04X}"))
-                .collect();
+        for &(cid, text) in block {
+            let hex: String = text.encode_utf16().map(|u| format!("{u:04X}")).collect();
             let _ = writeln!(out, "<{cid:04X}> <{hex}>");
         }
         out.push_str("endbfchar\n");

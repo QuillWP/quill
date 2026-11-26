@@ -31,7 +31,7 @@ pub use odt_read::base64_decode;
 use quill_core::Document;
 use quill_core::limits::Size;
 use quill_core::para::Paragraph;
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -45,7 +45,10 @@ static TEMP_NUMBER: AtomicU64 = AtomicU64::new(0);
 #[derive(Default)]
 struct ReadBudget {
     size: Size,
-    pictures: HashSet<String>,
+    /// Package path and retained bytes for each picture file charged so far.
+    /// A map both shares repeated placements and lets a converted image replace
+    /// its source size with the bytes Quill actually keeps.
+    pictures: HashMap<String, usize>,
     full: bool,
 }
 
@@ -75,17 +78,44 @@ impl ReadBudget {
         !self.full
     }
 
-    fn add_picture(&mut self, key: &str) -> bool {
-        if self.pictures.contains(key) {
+    fn add_picture(&mut self, key: &str, bytes: usize) -> bool {
+        if self.pictures.contains_key(key) {
             return true;
         }
         if self.full {
             return false;
         }
-        self.pictures.insert(key.to_string());
-        self.size.pictures = self.pictures.len();
+        self.pictures.insert(key.to_string(), bytes);
+        self.size.pictures = self.size.pictures.saturating_add(1);
+        self.size.picture_bytes = self.size.picture_bytes.saturating_add(bytes);
         self.full = self.size.too_large().is_some();
-        true
+        !self.full
+    }
+
+    /// Replace a package picture's source size with the encoded bytes Quill
+    /// retained after conversion.
+    fn set_picture_bytes(&mut self, key: &str, bytes: usize) -> bool {
+        let Some(old) = self.pictures.get_mut(key) else {
+            return false;
+        };
+        self.size.picture_bytes = self
+            .size
+            .picture_bytes
+            .saturating_sub(*old)
+            .saturating_add(bytes);
+        *old = bytes;
+        self.full = self.size.too_large().is_some();
+        !self.full
+    }
+
+    /// Undo a charge when an entry is missing or does not decode as a picture.
+    fn remove_picture(&mut self, key: &str) {
+        let Some(bytes) = self.pictures.remove(key) else {
+            return;
+        };
+        self.size.pictures = self.size.pictures.saturating_sub(1);
+        self.size.picture_bytes = self.size.picture_bytes.saturating_sub(bytes);
+        self.full = self.size.too_large().is_some();
     }
 
     fn full(&self) -> bool {

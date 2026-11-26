@@ -7,6 +7,13 @@ edition = "2024"
 [package.metadata]
 cargo-fuzz = true
 
+# Both are used, where cargo-machete cannot see: miniz_oxide by the shared
+# test helpers the targets include by path
+# (crates/quill-formats/tests/common/mod.rs), quill-app by the clipboard,
+# images and settings targets.
+[package.metadata.cargo-machete]
+ignored = ["miniz_oxide", "quill-app"]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }

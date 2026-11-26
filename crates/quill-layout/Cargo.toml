@@ -13,8 +13,9 @@ quill-core.workspace = true
 ab_glyph = { version = "0.2.32", default-features = false, features = ["std", "variable-fonts"] }
 fontdb = { version = "0.24", default-features = false, features = ["std", "fs", "memmap"] }
 ab_glyph_rasterizer = "0.1.10"
+unicode-segmentation = { version = "1.13", default-features = false }
 # The font tables ab_glyph does not show, such as a symbol font's codes.
-ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
+ttf-parser = { version = "0.25", default-features = false, features = ["std", "opentype-layout", "apple-layout"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 memmap2 = "0.9"

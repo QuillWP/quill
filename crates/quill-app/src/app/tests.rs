@@ -197,7 +197,7 @@ fn the_style_dialogs_character_style_menu_makes_a_new_style_and_comes_back_to_it
     state.dialogs.push((Which::Style(st), d));
     let mut clip = Clipboard::new();
     let none = state.view.doc.styles.characters.len();
-    let last = none + 1;
+    let last = none;
     // The menu's last choice is the one that makes a style.
     assert_eq!(
         state.dialogs[0]
@@ -221,7 +221,7 @@ fn the_style_dialogs_character_style_menu_makes_a_new_style_and_comes_back_to_it
     assert_eq!(state.dialogs.len(), 1, "back in the Style dialog");
     let id = state.view.doc.styles.find_character("Aside").unwrap();
     let d = &state.dialogs[0].1;
-    assert_eq!(d.selected("character_style"), id as usize);
+    assert_eq!(d.selected("character_style"), id as usize - 1);
     assert!(d.options("character_style").iter().any(|o| o == "Aside"));
     let Which::Style(st) = &state.dialogs[0].0 else {
         panic!("the Style dialog");
@@ -229,14 +229,15 @@ fn the_style_dialogs_character_style_menu_makes_a_new_style_and_comes_back_to_it
     assert_eq!(st.character, id);
     // Cancelling the editor leaves everything as it was.
     let count = state.view.doc.styles.characters.len();
-    state.dialogs[0]
-        .1
-        .set_selected("character_style", count + 1);
+    state.dialogs[0].1.set_selected("character_style", count);
     state.dialog_outcome(Outcome::Changed("character_style"), &mut clip);
     state.dialog_outcome(Outcome::Cancel, &mut clip);
     assert_eq!(state.dialogs.len(), 1);
     assert_eq!(state.view.doc.styles.characters.len(), count);
-    assert_eq!(state.dialogs[0].1.selected("character_style"), id as usize);
+    assert_eq!(
+        state.dialogs[0].1.selected("character_style"),
+        id as usize - 1
+    );
 }
 
 #[test]
@@ -250,7 +251,8 @@ fn character_styles_window_edits_and_adds_styles_through_its_editor() {
     doc.forget_history();
     let original = quill_formats::native::write(&doc, 0);
     let mut state = WinState::new(DocView::new(doc, "Doc".into()));
-    let d = crate::character_style_dialog::dialog(&state.view);
+    let mut d = crate::character_style_dialog::dialog(&state.view);
+    crate::character_style_dialog::refresh(&mut d, &state.view, 2);
     state.dialogs.push((Which::CharacterStyles, d));
     let mut clip = Clipboard::new();
 
@@ -258,7 +260,7 @@ fn character_styles_window_edits_and_adds_styles_through_its_editor() {
     state.dialog_outcome(Outcome::Button("edit"), &mut clip);
     assert!(matches!(
         state.dialogs[1].0,
-        Which::CharacterStyleEdit(Some(1))
+        Which::CharacterStyleEdit(Some(2))
     ));
     state.dialogs[1].1.set_field("size", "18");
     state.dialog_outcome(Outcome::Cancel, &mut clip);
@@ -272,7 +274,7 @@ fn character_styles_window_edits_and_adds_styles_through_its_editor() {
     editor.set_on("bold", true);
     state.dialog_outcome(Outcome::Ok, &mut clip);
     assert_eq!(state.dialogs.len(), 1, "back in Character Styles");
-    let format = state.view.doc.styles.character(1).unwrap().format;
+    let format = state.view.doc.styles.character(2).unwrap().format;
     assert_eq!(format.mask, (1 << 1) | (1 << 2));
     assert_eq!(format.props.size, 36);
     assert_eq!(
@@ -297,10 +299,10 @@ fn character_styles_window_edits_and_adds_styles_through_its_editor() {
     state.dialogs[1].1.set_field("name", "Aside");
     state.dialog_outcome(Outcome::Ok, &mut clip);
     assert_eq!(state.dialogs.len(), 1);
-    assert_eq!(state.view.doc.styles.find_character("Aside"), Some(2));
+    assert_eq!(state.view.doc.styles.find_character("Aside"), Some(3));
     assert_eq!(
         crate::character_style_dialog::selected_style(&state.dialogs[0].1),
-        2
+        3
     );
     state.view.doc.undo();
     state.view.doc.undo();
@@ -385,7 +387,7 @@ fn character_editor_defines_manual_defaults_and_apply_applies_the_defined_style(
 }
 
 #[test]
-fn choosing_a_character_style_in_format_style_links_it_and_no_style_unlinks() {
+fn choosing_a_character_style_in_format_style_links_it_and_normal_restores_paragraph_formatting() {
     let mut doc = quill_core::text::from_plain_text("Body text");
     doc.add_character_style(
         "Emphasis",
@@ -406,7 +408,7 @@ fn choosing_a_character_style_in_format_style_links_it_and_no_style_unlinks() {
     let manual = st.chp;
     assert_eq!(
         d.options("character_style"),
-        &["No Style", "Emphasis", "New Character Style\u{2026}"]
+        &["Normal", "Emphasis", "New Character Style\u{2026}"]
     );
     d.set_selected("character_style", 1);
     state.dialogs.push((Which::Style(st), d));
@@ -440,23 +442,23 @@ fn choosing_a_character_style_in_format_style_links_it_and_no_style_unlinks() {
     // Define saves the link; the text in that style takes Italic.
     define_in_editor(&mut state);
     let normal = state.view.doc.styles.get(0);
-    assert_eq!(normal.character, 1);
+    assert_eq!(normal.character, 2);
     assert_eq!(normal.own(), manual);
     assert!(state.view.doc.main.paras[0].chp_of_char(0).italic);
     // Choosing the style again shows its link.
     let Which::Style(st) = &state.dialogs[0].0 else {
         unreachable!()
     };
-    assert_eq!(st.character, 1);
+    assert_eq!(st.character, 2);
     assert_eq!(state.dialogs[0].1.selected("character_style"), 1);
 
-    // No Style brings the manual formatting back.
+    // Normal brings the paragraph style's own formatting back.
     state.dialogs[0].1.set_selected("character_style", 0);
     state.dialog_outcome(Outcome::Changed("character_style"), &mut clip);
     assert!(!struck(&state));
     state.dialog_outcome(Outcome::Ok, &mut clip);
     assert!(state.dialogs.is_empty());
-    assert_eq!(state.view.doc.styles.get(0).character, 0);
+    assert_eq!(state.view.doc.styles.get(0).character, 1);
     assert!(!state.view.doc.main.paras[0].chp_of_char(0).italic);
     state.view.doc.undo();
     state.view.doc.undo();
@@ -528,6 +530,7 @@ fn defining_paragraph_format_changes_the_chosen_style_and_undo_restores_it() {
         editor.set_field(id, value);
     }
     editor.set_selected("line", 2);
+    editor.set_selected("alignment", 1);
     state.dialog_outcome(Outcome::Ok, &mut clip);
     assert_eq!(state.view.doc.main.paras[0], body);
     assert!(!state.view.doc.is_modified());
@@ -547,6 +550,7 @@ fn defining_paragraph_format_changes_the_chosen_style_and_undo_restores_it() {
         (360, 120, 720, 360, 180)
     );
     assert_eq!(style.pap.line, quill_core::LineSpacing::Exactly(360));
+    assert_eq!(style.pap.align, quill_core::Align::Center);
     for para in &state.view.doc.main.paras[1..] {
         assert_eq!(para.pap, style.pap);
     }

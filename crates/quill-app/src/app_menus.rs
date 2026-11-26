@@ -399,6 +399,14 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             sep(),
             b.cmd("Find…", Cmd::Find),
             b.cmd("Replace…", Cmd::Replace),
+            b.item("Missing Fonts", Action::None).submenu(Menu {
+                title: "Missing Fonts".into(),
+                items: vec![
+                    b.item("Highlight Missing Fonts", Action::ToggleMissingFonts)
+                        .checked(crate::settings::with(|s| s.highlight_missing_fonts)),
+                    b.cmd("Replace Missing Fonts…", Cmd::ReplaceFonts),
+                ],
+            }),
             b.item("Advanced", Action::None).submenu(Menu {
                 title: "Advanced".into(),
                 items: vec![
@@ -465,8 +473,8 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
                 .checked(cx.show_formatting_toolbar),
             b.item("Paragraph Toolbar", Action::ToggleParagraphToolbar)
                 .checked(cx.show_paragraph_toolbar),
-            b.item("Highlight Missing Fonts", Action::ToggleMissingFonts)
-                .checked(crate::settings::with(|s| s.highlight_missing_fonts)),
+            b.item("Stylesheets", Action::ToggleStylesPalette)
+                .checked(crate::settings::with(|s| s.show_styles_palette)),
             b.item("Ruler", Action::ToggleRuler)
                 .key("⌘R")
                 .checked(cx.show_ruler),
@@ -530,8 +538,8 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
         ],
     };
 
-    let plain =
-        !chp.bold && !chp.italic && chp.underline == Underline::None && !chp.outline && !chp.shadow;
+    let mut plain = chp;
+    plain.clear_styles();
     let style = |bold, italic, underline| ItemStyle {
         bold,
         italic,
@@ -542,11 +550,39 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
         title: "Format".into(),
         items: vec![
             b.cmd("Character…", Cmd::CharacterDialog),
+            b.item("Font Size", Action::None).submenu(Menu {
+                title: "Font Size".into(),
+                items: vec![
+                    b.cmd("Increase", Cmd::LargerFontSize),
+                    b.cmd("Decrease", Cmd::SmallerFontSize),
+                    b.cmd("Other…", Cmd::FontSizeDialog),
+                ],
+            }),
+            b.item("Font Style", Action::None).submenu(Menu {
+                title: "Font Style".into(),
+                items: vec![
+                    b.cmd("Plain Text", Cmd::PlainText).checked(chp == plain),
+                    b.cmd("Bold", Cmd::Bold)
+                        .checked(chp.bold)
+                        .style(style(true, false, false)),
+                    b.cmd("Italic", Cmd::Italic)
+                        .checked(chp.italic)
+                        .style(style(false, true, false)),
+                    b.cmd("Underline", Cmd::Underline)
+                        .checked(chp.underline == Underline::Single)
+                        .style(style(false, false, true)),
+                    sep(),
+                    b.cmd("All Caps", Cmd::AllCaps).checked(chp.all_caps),
+                    b.cmd("Small Caps", Cmd::SmallCaps).checked(chp.small_caps),
+                    b.cmd("Title Case", Cmd::TitleCase).enabled(has_sel),
+                    b.cmd("Lower Case", Cmd::Lowercase).enabled(has_sel),
+                ],
+            }),
             b.cmd("Paragraph…", Cmd::ParagraphDialog),
+            b.cmd("Stylesheets…", Cmd::StyleDialog),
             b.cmd("Section…", Cmd::SectionDialog),
             b.cmd("Document Setup…", Cmd::DocumentDialog),
             b.cmd("Border…", Cmd::BorderDialog),
-            b.cmd("Replace Missing Fonts…", Cmd::ReplaceFonts),
             sep(),
             b.cmd("Table Cells…", Cmd::TableCells).enabled(in_table),
             b.cmd("Table Layout…", Cmd::TableLayout).enabled(in_table),
@@ -564,43 +600,13 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
             b.cmd("Clear Formatting", Cmd::ClearFormatting),
             sep(),
             b.cmd("Change Case…", Cmd::ChangeCase).enabled(has_sel),
-            b.cmd("Plain Text", Cmd::PlainText).checked(plain),
-            b.cmd("Bold", Cmd::Bold)
-                .checked(chp.bold)
-                .style(style(true, false, false)),
-            b.cmd("Italic", Cmd::Italic)
-                .checked(chp.italic)
-                .style(style(false, true, false)),
-            b.cmd("Underline", Cmd::Underline)
-                .checked(chp.underline == Underline::Single)
-                .style(style(false, false, true)),
         ],
     };
 
     let font_name = v.doc.font_name(chp.font).to_string();
-    let mut font_items = Vec::new();
-    for pt in [9u16, 10, 12, 14, 18, 24] {
-        let item = b
-            .item(format!("{pt} Point"), Action::Size(pt * 2))
-            .checked(chp.size == pt * 2)
-            // The classic Mac outlines sizes the font draws well; elsewhere
-            // that convention means nothing, so the sizes are plain.
-            .style(ItemStyle {
-                outline: cfg!(target_os = "macos"),
-                ..Default::default()
-            });
-        font_items.push(item);
-    }
-    font_items.push(b.cmd("Other…", Cmd::FontSizeDialog));
-    font_items.push(sep());
-    font_items.push(b.cmd("Increase Font Size", Cmd::LargerFontSize));
-    font_items.push(b.cmd("Decrease Font Size", Cmd::SmallerFontSize));
-    font_items.push(b.cmd("Default Font…", Cmd::DefaultFont));
-    font_items.push(sep());
-    font_items.extend(grouped_fonts(&mut b, cx.font_families, &font_name, chp));
     let font = Menu {
         title: "Font".into(),
-        items: font_items,
+        items: grouped_fonts(&mut b, cx.font_families, &font_name, chp),
     };
 
     let tools = Menu {
@@ -635,8 +641,6 @@ fn build_menus(cx: &MenuContext) -> (Vec<Menu>, Vec<Action>) {
 
     let mut window_items = vec![
         b.cmd("Show Clipboard", Cmd::ShowClipboard),
-        b.item("Style Sheets", Action::ToggleStylesPalette)
-            .checked(crate::settings::with(|s| s.show_styles_palette)),
         #[cfg(target_os = "macos")]
         b.item("Size To…", Action::SizeWindow),
         #[cfg(target_os = "macos")]
@@ -1470,21 +1474,25 @@ mod tests {
             };
             let (menus, _) = build(&cx);
             let menu = menus.iter().find(|m| m.title == title).unwrap();
-            menu.items
-                .iter()
-                .find(|i| i.label == label)
-                .unwrap()
-                .enabled
+            let mut items = menu.items.as_slice();
+            let mut item = None;
+            for label in label.split(" > ") {
+                let found = items.iter().find(|i| i.label == label).unwrap();
+                item = Some(found);
+                items = found.submenu.as_ref().map_or(&[], |m| m.items.as_slice());
+            }
+            item.unwrap().enabled
         }
-        assert!(enabled(&view, "Format", "Bold"));
-        assert!(enabled(&view, "Font", "12 Point"));
+        assert!(enabled(&view, "Format", "Font Style > Bold"));
+        assert!(enabled(&view, "Format", "Font Size > Increase"));
+        assert!(enabled(&view, "Format", "Font Size > Other…"));
         view.show_markdown_source();
-        assert!(!enabled(&view, "Format", "Bold"));
+        assert!(!enabled(&view, "Format", "Font Style > Bold"));
         assert!(!enabled(&view, "Format", "Character…"));
-        assert!(!enabled(&view, "Font", "12 Point"));
+        assert!(!enabled(&view, "Format", "Font Size > Increase"));
+        assert!(!enabled(&view, "Format", "Font Size > Other…"));
         // Editing and the switch back are still there.
         assert!(enabled(&view, "Edit", "Select All"));
-        assert!(enabled(&view, "Font", "Default Font…"));
     }
 
     #[test]
@@ -1530,7 +1538,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_font_and_help_entries_are_not_dead_ends() {
+    fn format_groups_font_commands_and_window_omits_legacy_help() {
         let view = DocView::new(quill_core::Document::new(), String::new());
         let cx = MenuContext {
             view: &view,
@@ -1544,31 +1552,44 @@ mod tests {
         };
         let (menus, actions) = build_menus(&cx);
         let font = menus.iter().find(|menu| menu.title == "Font").unwrap();
-        let default_font = font
+        let format = menus.iter().find(|menu| menu.title == "Format").unwrap();
+        assert_eq!(format.items[0].label, "Character…");
+        assert_eq!(format.items[1].label, "Font Size");
+        assert_eq!(format.items[2].label, "Font Style");
+        assert!(font.items.is_empty());
+        let sizes = format.items[1].submenu.as_ref().unwrap();
+        let styles = format.items[2].submenu.as_ref().unwrap();
+        let style_commands: Vec<_> = styles
             .items
             .iter()
-            .find(|item| item.label == "Default Font…")
-            .unwrap();
-
+            .filter_map(|item| match actions[item.id as usize] {
+                Action::Cmd(cmd) => Some(cmd),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            actions[default_font.id as usize],
-            Action::Cmd(Cmd::DefaultFont)
+            style_commands,
+            [
+                Cmd::PlainText,
+                Cmd::Bold,
+                Cmd::Italic,
+                Cmd::Underline,
+                Cmd::AllCaps,
+                Cmd::SmallCaps,
+                Cmd::TitleCase,
+                Cmd::Lowercase,
+            ]
         );
-        let point_24 = font
-            .items
-            .iter()
-            .position(|item| item.label == "24 Point")
-            .unwrap();
-        let other = font
-            .items
-            .iter()
-            .position(|item| item.label == "Other…")
-            .unwrap();
-        assert_eq!(other, point_24 + 1);
-        assert_eq!(
-            actions[font.items[other].id as usize],
-            Action::Cmd(Cmd::FontSizeDialog)
-        );
+        assert_eq!(sizes.items.len(), 3);
+        for (item, (label, cmd, key)) in sizes.items.iter().zip([
+            ("Increase", Cmd::LargerFontSize, "⌘⇧>"),
+            ("Decrease", Cmd::SmallerFontSize, "⌘⇧<"),
+            ("Other…", Cmd::FontSizeDialog, "⌘⌥F"),
+        ]) {
+            assert_eq!(item.label, label);
+            assert_eq!(actions[item.id as usize], Action::Cmd(cmd));
+            assert_eq!(item.key, key);
+        }
 
         let window = menus.iter().find(|menu| menu.title == "Window").unwrap();
         assert!(!window.items.iter().any(|item| item.label == "Help…"));
@@ -1598,7 +1619,7 @@ mod tests {
     }
 
     #[test]
-    fn styles_are_managed_from_format_and_the_palette_is_in_window() {
+    fn format_opens_the_style_chooser_and_view_toggles_the_palette() {
         let view = DocView::new(quill_core::Document::new(), String::new());
         let cx = MenuContext {
             view: &view,
@@ -1622,11 +1643,16 @@ mod tests {
         assert!(!menus.iter().any(|m| m.title == "Character Styles"));
         assert_eq!(action("Format", "Paragraph Styles…"), None);
         assert_eq!(action("Format", "Character Styles…"), None);
-        assert_eq!(action("View", "Style Sheets"), None);
         assert_eq!(
-            action("Window", "Style Sheets"),
+            action("Format", "Stylesheets…"),
+            Some(Action::Cmd(Cmd::StyleDialog))
+        );
+        assert_eq!(
+            action("View", "Stylesheets"),
             Some(Action::ToggleStylesPalette)
         );
+        assert_eq!(action("Window", "Style Sheets"), None);
+        assert_eq!(action("Window", "Stylesheets"), None);
         #[cfg(target_os = "macos")]
         {
             assert_eq!(action("Window", "Size To…"), Some(Action::SizeWindow));

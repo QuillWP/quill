@@ -279,7 +279,8 @@ on Linux. If that font is not installed, the system font is used instead. Fonts 
 Mac's system font) are left out of the font menus unless Preferences > Fonts > Show Private System
 Fonts is on. Text copied from a Mac app in one of them pastes in that font, after a warning that
 the font will not be available on other computers. A font that is not installed shows in the default font, is marked by
-View > Highlight Missing Fonts and stays in the document, so Replace Missing Fonts can still replace it.
+Edit > Missing Fonts > Highlight Missing Fonts and stays in the document, so
+Replace Missing Fonts can still replace it.
 
 ## Facing pages
 
@@ -303,6 +304,21 @@ them, so the text keeps its width and does not reflow.
 text also prints and saves into a PDF. Turn it off to hide the text again and
 leave it out of the printout. The choice belongs to the program, not to a
 document.
+
+## Ligatures
+
+When a font has them, Quill joins ff, fi, fl, ffi and ffl, and also fj, fb,
+fh, fk, ft and their ff forms, into single ligature glyphs on screen, in print
+and in a saved PDF. Only the drawing changes. The document still holds the
+separate letters, so the insertion point, Backspace, selection, copy and
+paste, spelling and Find all work letter by letter. Copying or searching a
+PDF finds the letters too. Ligatures are left out when character spacing is
+not 0, in all caps and small caps, and where the letters differ in font or
+formatting.
+
+To draw every letter on its own, turn off **Ligatures** in **Preferences →
+Fonts**. The choice belongs to the program, not to a document, and applies to
+the screen, printing and PDF.
 
 ## Platform interface
 
@@ -351,7 +367,7 @@ the table keeps its borders, and Format > Border changes them. Gridlines are a s
 guide for cells with no border, as in tables from other programs, and have their own
 `table_gridline_color` and `table_gridline_dotted`.
 
-The **Window > Style Sheets** palette lists paragraph and character styles. Its
+**Format > Stylesheets...** opens the Paragraph Styles chooser. Its
 **This Document** option
 shows Normal, the styles the document uses and the styles it defines; **All Styles** adds
 the automatic ones. Under the list are the chosen style's description and how many
@@ -384,38 +400,50 @@ editor open. None of these writes the document file: use **Save**. Cancel discar
 not yet saved. Page margins are document settings in **Format > Document Setup...**.
 **Use As Default** remains unavailable.
 
-**View > Stylesheets Palette** shows the Style Sheets palette: one list of the document's
+**View > Stylesheets** shows the Style Sheets palette: one list of the document's
 paragraph styles (marked with a paragraph sign) and character styles (marked with an A),
-with **All**, **Paragraph** and **Character** tabs (shortened to Para and Char in a narrow
-palette) that choose what the list shows. Clicking a style applies it to the selected
-paragraphs or text. **No Style** at the top of the paragraph styles puts the selected
-paragraphs back to Normal and takes their character styles off, so styles can be applied
-afresh (manual formatting stays); **No Style** at the top of the character styles takes only
-the character style off. The row for the style at
-the insertion point is highlighted. **New** and **Edit** open the style's editor, **Copy**
-makes a copy named "... copy", and **Delete** removes a style the document defines (Normal,
-the automatic styles and No Style cannot be deleted), asking first what the paragraphs of a
-paragraph style in use become; each of these can be undone. The
-palette starts docked at the right of the document window, taking its width from the text.
-The button at the right of its title bar (or in the tab row) moves it into a small window of
-its own, which can be dragged anywhere on the screen, outside the document window too, and
-back again. That window has the system's title bar and close button, and follows whichever
-document window is in front: it lists that document's styles, and the row chosen for Edit,
-Copy and Delete is cleared when another document comes in front. It stays above Quill's
-document windows and hides while another program is in front. Whether it
-shows, its tab and whether it is docked are saved in the settings (`show_styles_palette`,
-`styles_palette_tab`, `styles_palette_docked`).
+with **All**, **Paragraph** and **Character** filters. The inspector button at the right
+end of the formatting toolbar also toggles the palette. Clicking a style applies it
+to the selection. **No Style** removes style assignments while keeping manual
+formatting. **Clear Formatting** also removes manual formatting. The style at the
+insertion point is highlighted.
+
+The footer's **+** creates a style and **−** deletes a style the document defines.
+Double-click a style to edit it, or use **⋯** or a right-click for **Edit Style...**
+and **Duplicate**. Deleting a paragraph style in use asks what its paragraphs become.
+Drag the **Style Sheets** header or click the outward arrows at the right
+end of the formatting toolbar to tear the palette out of the sidebar.
+Click the inward arrows in the floating palette's title bar on Mac to dock it
+again. Drag the docked sidebar's left edge or a floating window edge to resize
+it. The sidebar
+has an **×** close button, and the floating palette has a system close button.
+The floating palette follows the front document. Its visibility,
+filter and docked state are saved in settings.
+
+The palette shows Title, Subtitle, and Heading 1 through Heading 3 by default.
+It also shows up to two levels beyond the deepest heading used. Header and Footer
+appear when their respective stories have content. Footnote Text and Footnote
+Reference appear after a footnote is inserted. A table of contents or an index
+adds the styles it uses. Turn on **Show All Styles** at the bottom of the
+palette to see every style in the selected tab. Applying a hidden style
+makes it visible with the checkbox off. Custom styles always appear.
 
 The bottom **Character Style** menu ends with **New Character Style...**, which opens the
 character style editor. Saving it closes the editor and returns to the style editor with the
 new style listed and chosen; Cancel leaves the menu as it was.
 
-The **Character Style** menu links the paragraph style to a character style. **No Style**
-uses the manual character formatting. Choosing a named style strikes the manual summary
-through, and saving makes the style's text take the character style; going back to **No
-Style** brings the manual values back.
+Every document has a built-in **Normal** character style. New paragraph styles
+use it by default and can set their own font, size and emphasis. Choosing a
+different character style in the **Character Style** menu layers it over the
+paragraph style's character formatting. Choose **Normal** again to use the
+paragraph style's own formatting.
 
-The **Character** tab of **Window > Style Sheets** lists the document's character styles. To make one,
+**Default Font** in **Preferences > Fonts** sets the font for the Normal
+character style in newly created documents. Open and saved documents keep
+their own fonts. To change Normal in the current document, edit it from
+the **Character** tab of the Stylesheets palette.
+
+The **Character** tab of **View > Stylesheets** lists the document's character styles. To make one,
 format and select some text, press **+**, name it and save it. Select other text and
 press **Apply**, or click the style in the Style Sheets palette, or choose it at the
 caret before typing. The style stores differences from the paragraph's
@@ -425,7 +453,8 @@ Bold, italic and similar flags follow DOCX character-style toggle rules.
 To change a style, format an example, select it, choose the style in the list and
 press **Update to Selection**, or press **Edit...** to change what it sets. Direct
 overrides on other text stay in place. **Remove Style** takes off the named layer; **-**
-deletes the definition and leaves its text looking as it does now. These changes support Undo.
+deletes the definition and leaves its text looking as it does now. Normal is built in
+and cannot be deleted. These changes support Undo.
 Manage definitions in the main document; existing styles can be applied in editing panes.
 Redefinition updates notes, comments and section headers as well as the main text.
 
@@ -452,9 +481,9 @@ fields and lose those colors if they save the document.
 
 
 When a document uses fonts that are not installed, the message on opening it can keep them,
-which stops the message for that document, or replace them, ten fonts to a page. Format >
-Replace Missing Fonts does the same at any time, and View > Highlight Missing Fonts marks the
-text they affect on screen. Text typed into a table of contents made editable goes to its
+which stops the message for that document, or replace them, ten fonts to a page. Edit > Missing Fonts > Replace Missing Fonts does
+the same at any time. Highlight Missing Fonts in that submenu marks the affected text
+on screen. Text typed into a table of contents made editable goes to its
 headings when you choose Update Table of Contents, unless lines were added or removed.
 To rename headings through six levels, right-click the contents and choose Make Editable,
 edit the entry names, then choose Update Table of Contents to make it live again.

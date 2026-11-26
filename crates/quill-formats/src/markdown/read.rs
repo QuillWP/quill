@@ -10,6 +10,7 @@
 
 use super::MONO;
 use crate::report::{self as notes, ImportReport};
+use quill_core::limits::MAX_PICTURE_DATA_BYTES;
 use quill_core::para::{Mark, Paragraph, chars};
 use quill_core::props::{
     Align, BorderLine, BorderStyle, Borders, CellProps, CharProps, ParaProps, RowHeight, RowProps,
@@ -25,9 +26,6 @@ const MAX_DEPTH: usize = 24;
 const MAX_COLUMNS: usize = 255;
 /// The largest picture file read from beside the Markdown file.
 const MAX_PICTURE: u64 = 64 << 20;
-/// The most picture bytes one document takes in all, however many
-/// pictures it names.
-const MAX_PICTURES_TOTAL: u64 = 256 << 20;
 /// The most outside pictures listed in the report (all are still counted
 /// as skipped).
 const MAX_OUTSIDE_LISTED: usize = 1000;
@@ -988,7 +986,7 @@ pub(super) struct Reader {
     /// Read pictures from outside the document's folder too. Off unless the
     /// person said so for this document.
     trust_outside: bool,
-    /// Picture bytes taken so far, against `MAX_PICTURES_TOTAL`.
+    /// Picture bytes taken so far, against `MAX_PICTURE_DATA_BYTES`.
     picture_bytes: u64,
 }
 
@@ -1445,7 +1443,7 @@ impl Reader {
             }
         };
         self.picture_bytes = self.picture_bytes.saturating_add(bytes.len() as u64);
-        if self.picture_bytes > MAX_PICTURES_TOTAL {
+        if self.picture_bytes > MAX_PICTURE_DATA_BYTES as u64 {
             self.report.note(notes::MARKDOWN_PICTURES);
             return None;
         }
@@ -1908,7 +1906,7 @@ mod tests {
         let src = format!("data:image/png;base64,{png}");
         let mut r = Reader::new(None);
         assert!(r.load_picture(&src).is_some());
-        r.picture_bytes = MAX_PICTURES_TOTAL;
+        r.picture_bytes = MAX_PICTURE_DATA_BYTES as u64;
         assert!(r.load_picture(&src).is_none());
         assert!(r.report.notes().contains(&notes::MARKDOWN_PICTURES));
     }

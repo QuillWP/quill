@@ -1645,7 +1645,7 @@ fn build(html: &str, limits: &Limits, file: bool) -> Result<(Document, ImportRep
     let normalized = html.replace("\r\n", "\n").replace('\r', "\n");
     let root = parse(&normalized, limits)?;
     let mut r = Reader {
-        doc: Document::new(),
+        doc: Document::for_import(),
         report: ImportReport::default(),
         rules: Vec::new(),
         rule_tests: 0,
@@ -1740,6 +1740,7 @@ fn build(html: &str, limits: &Limits, file: bool) -> Result<(Document, ImportRep
         paras.push(Paragraph::new(normal.pap, normal.chp));
     }
     r.doc.main.paras = paras;
+    r.doc.styles.ensure_normal_character();
     r.doc.forget_history();
     Ok((r.doc, r.report))
 }

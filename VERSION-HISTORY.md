@@ -6,6 +6,101 @@ I add a new release version, just to keep things readable.
 Versions 0.1.0 to 0.14.0 all share the same commit date, 2026-11-05, because
 that is when the public repository was created.
 
+## 0.31.0 - 2026-11-25
+
+A beta release with a redesigned Stylesheets palette, on/off switches in
+Preferences, better typography (GPOS kerning, joined emoji and experimental
+ligatures) and experimental VoiceOver support. It also has fixes from two
+code reviews: memory limits for hostile files, and a much faster DOCX save
+for long documents.
+
+**Note:** Windows and Linux builds are still not being created or tested. The
+Mac Intel builds are built but not tested, since I do not have an Intel Mac.
+
+### Styles and the Stylesheets palette
+
+- The Stylesheets palette has been redesigned, with compact filters, inset
+  selection and actions in its footer. Toggle it from the formatting toolbar
+  or View > Stylesheets, and double-click a style to edit it. Drag its header
+  or click the toolbar's outward arrows to tear it out, and use the inward
+  arrows in the floating palette's title bar to dock it again. Drag the
+  docked palette's left edge to resize it.
+- The palette lists only the built-in styles a document uses or needs:
+  Heading 1 through Heading 3, Title and Subtitle to start, up to two heading
+  levels beyond the deepest one used, and Header, Footer, footnote, TOC and
+  Index styles once the document has them. Custom styles are always listed.
+  Show All Styles shows the full list and is remembered between launches.
+- New built-in Title (28 pt bold) and Subtitle (16 pt italic) paragraph
+  styles. Quill documents that lack them gain them when opened.
+- New documents keep the Preferences > Fonts defaults in the built-in Normal
+  character style, which cannot be deleted. Changing the default font
+  affects only documents created after the change.
+- Format > Stylesheets opens the Paragraph Styles chooser.
+- The palette's Edit, Copy and Delete buttons act on the style it shows when
+  a header or footer is being edited. Before, they could act on the main
+  text's style instead.
+
+### Menus, dialogs and Preferences
+
+- Preferences uses on/off switches in place of checkboxes on every panel,
+  with the label at the left and the switch at the right. The window is a
+  little taller to fit them. On the Mac they are native switches; Windows
+  still shows checkboxes.
+- Format > Paragraph and the paragraph style editor offer Left, Center,
+  Right and Justify alignment. The disabled Suppress Line Numbers checkbox is
+  gone from both.
+- Format groups Font Size and Font Style below Character. The Font menu
+  lists font families, and Default Font is in Preferences > Fonts.
+- Edit > Missing Fonts holds Highlight Missing Fonts and Replace Missing
+  Fonts, and the reminder after opening a document with missing fonts names
+  that menu.
+- Quill opts out of automatic macOS window tabbing, so View no longer shows
+  Show Tab Bar.
+- Quill Debug has a red app icon, so it is easy to tell from the release
+  build in the Finder and the Dock.
+
+### Typography
+
+- Fonts that keep their kerning in GPOS, such as New York, SF, Rockwell and
+  the Hiragino fonts, are now kerned.
+- Flags, joined families, skin tones and keycaps draw as one emoji instead
+  of as separate characters.
+- EXPERIMENTAL ligatures: ff, fi, fl, ffi and ffl, and fj, fb, fh, fk, ft
+  and their ff forms where the font has them, on screen, in print and in
+  PDF. Copied or searched PDF text reads as the separate letters, and
+  editing still works letter by letter. Preferences > Fonts > Ligatures turns
+  them off.
+- In Normal view the first lines of a paragraph with a drop cap wrap beside
+  it, as they do in Page Layout.
+
+### Editing fixes
+
+- After a page break at the end of a paragraph, Page Layout shows the
+  insertion point on the new page.
+- In Normal view, Down Arrow moves across a continuous section break.
+
+### Accessibility
+
+- EXPERIMENTAL VoiceOver support on the Mac. VoiceOver sees the document as
+  a text area, and its highlight follows the text as Quill draws it. To read
+  from the insertion point, press Control-Option-Shift-Down Arrow to enter
+  the text, then Control-Option-A. Only the main document text is exposed,
+  and hidden text and hidden tracked deletions are left out, as on screen.
+- It has not been tested by people who use VoiceOver every day, and it will
+  improve only with their reports. Quill keeps a copy of the text only while
+  VoiceOver is running, so it costs nothing for anyone else. Voice Control
+  and other accessibility tools see the text only while VoiceOver runs.
+
+### Reliability and speed
+
+- Opening a .docx or .odt file with very large compressed XML or pictures
+  stays within fixed memory limits, checked before anything is unpacked.
+  One picture size limit applies to every format.
+- Saving a long document as .docx no longer slows down with the square of
+  its length: a 28-million-character save went from 28 s to 0.33 s.
+- The kerning cache has a fixed size, so a document with many different
+  letter pairs cannot make it grow without limit.
+
 ## 0.30.0 - 2026-11-22
 
 **0.30.0 starts with fresh settings.** The regular Mac build now runs in

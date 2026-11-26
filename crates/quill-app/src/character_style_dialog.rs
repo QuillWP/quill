@@ -75,7 +75,11 @@ pub fn changed(d: &mut Dialog, view: &DocView) {
         None => "No character styles yet. Press + to make one.".into(),
     };
     d.set_label("description", &description);
-    for id in ["edit", "delete", "duplicate", "apply", "update"] {
+    d.enable(
+        "delete",
+        view.doc.styles.can_delete_character(selected_style(d)),
+    );
+    for id in ["edit", "duplicate", "apply", "update"] {
         d.enable(id, style.is_some());
     }
 }
@@ -191,8 +195,9 @@ pub fn spec_of(f: CharacterFormat) -> CharSpec {
 }
 
 /// The style the dialog's settings describe. An on/off property is set only
-/// when it is on: switched off in a style, it would change nothing.
-pub fn format_of(s: &CharSpec) -> CharacterFormat {
+/// when it is on in a custom style. Normal also stores the off state
+/// so it can supply the paragraph styles' baseline.
+fn format_of(s: &CharSpec, normal: bool) -> CharacterFormat {
     let mut props = CharProps::default();
     let mut mask = 0;
     macro_rules! put {
@@ -206,8 +211,10 @@ pub fn format_of(s: &CharSpec) -> CharacterFormat {
     fields!(put);
     macro_rules! on {
         ($field:ident, $bit:expr) => {
-            if s.$field == Some(true) {
-                props.$field = true;
+            if let Some(value) = s.$field
+                && (normal || value)
+            {
+                props.$field = value;
                 mask |= 1 << $bit;
             }
         };
@@ -261,11 +268,15 @@ pub fn editor(view: &DocView, fonts: &[quill_layout::FontFamilyInfo], id: Option
         8.0,
         214.0,
     );
-    for id in SWITCHES {
-        let on = d.check3_state(id) == Some(true);
-        d.set_two_state(id, on);
+    if style.is_some_and(|style| style.is_normal()) {
+        d.enable("name", false);
+    } else {
+        for id in SWITCHES {
+            let on = d.check3_state(id) == Some(true);
+            d.set_two_state(id, on);
+        }
+        d.focus("name");
     }
-    d.focus("name");
     d
 }
 
@@ -289,7 +300,8 @@ pub fn finish_editor(
     let Some(spec) = crate::find_dialog::read_character_spec(editor, view) else {
         return Err("Type a size, position or spacing as a number of points.");
     };
-    let format = format_of(&spec);
+    let normal = id.is_some_and(|id| id == view.doc.styles.normal_character());
+    let format = format_of(&spec, normal);
     view.doc.begin("Character Style", view.sel);
     let saved = match id {
         None => view.doc.add_character_style(&name, format),
@@ -334,7 +346,7 @@ pub fn duplicate(view: &mut DocView, id: u16) -> Option<u16> {
 /// move down a number, so typing at the caret keeps its look: it loses the
 /// style if that was the one deleted, and follows its style down otherwise.
 pub fn delete(view: &mut DocView, id: u16) -> bool {
-    if id == 0 {
+    if !view.doc.styles.can_delete_character(id) {
         return false;
     }
     let props = view.current_chp();
@@ -363,8 +375,15 @@ pub fn delete(view: &mut DocView, id: u16) -> bool {
 fn update(view: &mut DocView, id: u16) -> Option<u16> {
     let old = view.doc.styles.character(id).cloned()?;
     let base = view.doc.styles.get(view.current_pap().style).chp;
-    let mut format = CharacterFormat::from_selection(view.current_chp(), base);
-    format.mask |= old.format.mask;
+    let props = view.current_chp();
+    let format = if old.is_normal() {
+        let mask = CharacterFormat::difference(props, base) | old.format.mask;
+        CharacterFormat::new(props, mask)
+    } else {
+        let mut format = CharacterFormat::from_selection(props, base);
+        format.mask |= old.format.mask;
+        format
+    };
     view.doc.begin("Character Style", view.sel);
     let changed = view.doc.redefine_character_style(id, format);
     view.doc.commit(view.sel);
@@ -447,14 +466,14 @@ mod tests {
             },
             (1 << 0) | (1 << 1) | (1 << 3) | (1 << 4) | (1 << 11) | (1 << 12),
         );
-        assert_eq!(format_of(&spec_of(f)), f);
-        assert_eq!(format_of(&CharSpec::default()).mask, 0);
+        assert_eq!(format_of(&spec_of(f), false), f);
+        assert_eq!(format_of(&CharSpec::default(), false).mask, 0);
         // Bold switched off would change nothing, so it is not kept.
         let off = CharSpec {
             bold: Some(false),
             ..Default::default()
         };
-        assert_eq!(format_of(&off).mask, 0);
+        assert_eq!(format_of(&off, false).mask, 0);
     }
 
     #[test]
@@ -464,11 +483,8 @@ mod tests {
             "Test".into(),
         );
         let mut list = dialog(&view);
-        assert_eq!(list.list_selected("list"), None);
-        assert!(
-            list.item_label("description")
-                .starts_with("No character styles")
-        );
+        assert_eq!(list.list_selected("list"), Some(0));
+        assert_eq!(selected_style(&list), view.doc.styles.normal_character());
 
         let mut ed = editor(&view, &[], None);
         assert_eq!(ed.title, "New Character Style");
@@ -515,10 +531,10 @@ mod tests {
         ed.set_field("name", "Fresh");
         ed.set_field("size", "big");
         assert!(finish_editor(&ed, &mut list, &mut view, None).is_err());
-        assert_eq!(view.doc.styles.characters.len(), 1);
+        assert_eq!(view.doc.styles.characters.len(), 2);
         // Keeping its own name is fine.
-        let ed = editor(&view, &[], Some(1));
-        assert!(finish_editor(&ed, &mut list, &mut view, Some(1)).is_ok());
+        let ed = editor(&view, &[], Some(2));
+        assert!(finish_editor(&ed, &mut list, &mut view, Some(2)).is_ok());
     }
 
     #[test]
@@ -543,26 +559,28 @@ mod tests {
     #[test]
     fn apply_update_duplicate_and_delete_from_the_list() {
         let mut view = DocView::new(quill_core::text::from_plain_text("One two"), "Test".into());
-        view.doc
+        let id = view
+            .doc
             .add_character_style("Emphasis", bold_format())
             .unwrap();
         let mut d = dialog(&view);
+        refresh(&mut d, &view, id);
         view.set_selection(Selection::new(Position::new(0, 0), Position::new(0, 3)));
         button(&mut d, &mut view, "apply");
-        assert_eq!(view.doc.main.paras[0].chp_of_char(0).character_style, 1);
+        assert_eq!(view.doc.main.paras[0].chp_of_char(0).character_style, id);
         assert!(view.doc.main.paras[0].chp_of_char(0).bold);
         view.format_chars("Italic", |c| c.italic = true);
         button(&mut d, &mut view, "update");
-        let format = view.doc.styles.character(1).unwrap().format;
+        let format = view.doc.styles.character(id).unwrap().format;
         assert_eq!(format.mask, (1 << 1) | (1 << 2) | (1 << 3));
         button(&mut d, &mut view, "duplicate");
-        assert_eq!(view.doc.styles.characters[1].name, "Emphasis copy");
-        assert_eq!(selected_style(&d), 2);
+        assert_eq!(view.doc.styles.characters[2].name, "Emphasis copy");
+        assert_eq!(selected_style(&d), 3);
         button(&mut d, &mut view, "duplicate");
-        assert_eq!(view.doc.styles.characters[2].name, "Emphasis copy 2");
-        d.select_row("list", 0);
+        assert_eq!(view.doc.styles.characters[3].name, "Emphasis copy 2");
+        refresh(&mut d, &view, id);
         button(&mut d, &mut view, "delete");
-        assert_eq!(view.doc.styles.characters.len(), 2);
+        assert_eq!(view.doc.styles.characters.len(), 3);
         assert_eq!(view.doc.main.paras[0].chp_of_char(0).character_style, 0);
         assert!(
             view.doc.main.paras[0].chp_of_char(0).italic,

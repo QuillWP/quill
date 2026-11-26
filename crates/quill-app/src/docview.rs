@@ -90,7 +90,7 @@ pub enum Effect {
     About,
     /// Help > Licenses…: every license Quill carries.
     Licenses,
-    /// Format > Replace Missing Fonts…, which needs the installed fonts.
+    /// Edit > Missing Fonts > Replace Missing Fonts…, which needs the installed fonts.
     ReplaceFonts,
     OpenRecent(usize),
     RemoveRecent(usize),
@@ -234,6 +234,20 @@ enum Repeatable {
     Text(String),
 }
 
+/// One laid-out line as the Mac accessibility mirror sees it, in view
+/// coordinates before the UI scale and before scrolling: add
+/// `mirror_shift` for window coordinates.
+#[cfg(target_os = "macos")]
+pub(crate) struct LineBox {
+    /// Byte range of the line in its paragraph's text.
+    pub start: usize,
+    pub end: usize,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
 pub struct DocView {
     pub(crate) doc: Document,
     /// Whole-document counts for the status bar, refreshed with main-text
@@ -348,6 +362,10 @@ pub struct DocView {
     /// A copy laid out for paper: hidden text only if the document says
     /// to print it, and no Show ¶ marks.
     printing: bool,
+    /// Whether a printing copy draws ligatures. Settings belong to the
+    /// window's thread, so the print job copies the choice in before it
+    /// hands the copy to its own thread.
+    pub print_ligatures: bool,
     /// Header and footer layouts for Page Layout view, by story and page
     /// number (0 when the story has no page number field, so one layout
     /// serves every page).
@@ -407,6 +425,19 @@ pub struct DocView {
     /// The view the paragraphs were last placed for: Normal view leaves
     /// room for section marks, Page Layout does not.
     placed_page_view: bool,
+    /// Changes whenever the main text, or which of it is hidden, may have
+    /// changed. Taken from `next_generation`, so two views never share one.
+    pub(crate) text_generation: u64,
+    /// The same for where the main text's lines are.
+    pub(crate) geometry_generation: u64,
+}
+
+/// A number no view has had before, for `text_generation` and
+/// `geometry_generation`. The Mac accessibility mirror keeps what it built
+/// until these change, and a split window's two panes must not look alike.
+pub(crate) fn next_generation() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl DocView {
@@ -468,6 +499,7 @@ impl DocView {
             md_warned: Vec::new(),
             headers_wanted: false,
             printing: false,
+            print_ligatures: true,
             hf: std::collections::HashMap::new(),
             hf_dirty: true,
             hf_basis: None,
@@ -496,12 +528,24 @@ impl DocView {
             section_pads: Vec::new(),
             break_menu: false,
             placed_page_view: false,
+            text_generation: next_generation(),
+            geometry_generation: next_generation(),
         }
     }
 
     /// Turn an owned view into a print view without cloning its document.
     /// Call `update_layout` before drawing it. Background PDF jobs already
     /// own a stable document snapshot.
+    /// Whether text draws with ligatures: Preferences on screen, the copied
+    /// choice when printing.
+    pub(crate) fn ligatures(&self) -> bool {
+        if self.printing {
+            self.print_ligatures
+        } else {
+            crate::settings::with(|s| s.ligatures)
+        }
+    }
+
     pub fn into_print(mut self) -> DocView {
         self.printing = true;
         self.headers_wanted = true;
@@ -799,11 +843,99 @@ impl DocView {
         let l = self.layout(pos.para);
         let (li, x) = l.caret(pos.offset, upstream);
         let line = &l.lines[li];
+        let mut top = self.tops[pos.para] + line.top;
+        // Pagination omits the empty line after a trailing page break
+        // when another paragraph follows. Its spacing can leave the
+        // caret on the old page, so put it at the next block's start.
+        if self.page_view
+            && pos.para + 1 < self.layouts.len()
+            && li + 1 == l.lines.len()
+            && line.start == line.end
+            && li > 0
+            && l.lines[li - 1].hard_break
+        {
+            top = self.tops[pos.para + 1];
+        }
+        (self.xs[pos.para] + x, top, line.height)
+    }
+
+    /// What turns the mirror's unscrolled view coordinates into window
+    /// coordinates: the text area's corner less the scroll.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn mirror_shift(&self) -> (f32, f32) {
+        (self.area.x - self.scroll_x, self.area.y - self.scroll_y)
+    }
+
+    /// What the mirror's line positions depend on besides the layout: the
+    /// view's width (pages are centered in it) and how pages are shown.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn mirror_basis(&self) -> (u64, u32, bool, bool) {
         (
-            self.xs[pos.para] + x,
-            self.tops[pos.para] + line.top,
-            line.height,
+            self.geometry_generation,
+            self.area.w.to_bits(),
+            self.page_view,
+            self.facing_pages(),
         )
+    }
+
+    /// Whether layout leaves out hidden text and tracked deletions just now:
+    /// what the mirror must leave out too.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn mirror_hides(&self) -> (bool, bool) {
+        (!self.laid_out_hidden, !self.laid_out_changes)
+    }
+
+    /// The paragraphs last drawn, for the mirror's glyph positions.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn drawn_paragraphs(&self) -> &[(usize, usize)] {
+        &self.drawn
+    }
+
+    /// Window position of document point (x, y) before scrolling.
+    #[cfg(target_os = "macos")]
+    fn to_unscrolled(&self, x: f32, y: f32) -> (f32, f32) {
+        let (wx, wy) = self.to_window(x, y);
+        let (sx, sy) = self.mirror_shift();
+        (wx - sx, wy - sy)
+    }
+
+    /// The laid-out lines of paragraph `para`, for the Mac accessibility
+    /// mirror. None while the paragraph has no layout.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn line_boxes(&self, para: usize) -> Option<impl Iterator<Item = LineBox> + '_> {
+        let l = self.layouts.get(para)?.as_ref()?;
+        Some(l.lines.iter().map(move |line| {
+            let (x, y) = self.to_unscrolled(self.xs[para] + line.left, self.tops[para] + line.top);
+            let (end_x, _) =
+                self.to_unscrolled(self.xs[para] + line.end_x, self.tops[para] + line.top);
+            LineBox {
+                start: line.start,
+                end: line.end,
+                x,
+                y,
+                width: (end_x - x).max(1.0),
+                height: line.height,
+            }
+        }))
+    }
+
+    /// Each glyph's byte offset and unscrolled x on line `line` of paragraph
+    /// `para`. Empty when the paragraph's glyphs were dropped to save memory.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn line_glyph_xs(&self, para: usize, line: usize) -> Vec<(usize, f32)> {
+        let Some(Some(l)) = self.layouts.get(para) else {
+            return Vec::new();
+        };
+        let Some(ln) = l.lines.get(line) else {
+            return Vec::new();
+        };
+        l.line_glyphs(ln)
+            .iter()
+            .map(|g| {
+                let (gx, _) = self.to_unscrolled(self.xs[para] + g.x, self.tops[para] + ln.top);
+                (g.offset as usize, gx)
+            })
+            .collect()
     }
 
     /// The text position under a point in window coordinates.

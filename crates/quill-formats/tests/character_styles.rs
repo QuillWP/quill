@@ -206,13 +206,52 @@ fn quill_files_keep_a_paragraph_styles_link_to_a_character_style() {
 }
 
 #[test]
+fn older_quill_files_gain_normal_without_renumbering_existing_styles() {
+    let mut old = Document::for_import();
+    old.fonts[0] = "Georgia".into();
+    let props = old.styles.get(0).chp;
+    old.insert_plain(StoryId::Main, Position::new(0, 0), "Text", props);
+    let emphasis = old
+        .add_character_style(
+            "Emphasis",
+            CharacterFormat::new(
+                CharProps {
+                    italic: true,
+                    ..props
+                },
+                1 << 3,
+            ),
+        )
+        .unwrap();
+    old.apply_character_style(
+        StoryId::Main,
+        Position::new(0, 0),
+        Position::new(0, 4),
+        emphasis,
+    );
+    let reopened = native::read(&native::write(&old, 0)).unwrap();
+    let normal = reopened.styles.normal_character();
+    assert_eq!(reopened.styles.find_character("Emphasis"), Some(emphasis));
+    assert_eq!(reopened.main, old.main);
+    assert!(
+        reopened
+            .styles
+            .styles
+            .iter()
+            .all(|style| style.character == normal)
+    );
+    let font = reopened.styles.character(normal).unwrap().format.props.font;
+    assert_eq!(reopened.font_name(font), "Georgia");
+}
+
+#[test]
 fn exchange_formats_keep_the_linked_formatting_without_the_link() {
     let (d, heading) = linked();
     let look = d.styles.get(heading).chp;
     let back = docx::read(&docx::write(&d, 0)).unwrap();
     let id = back.styles.find("heading 1").unwrap();
     let style = back.styles.get(id);
-    assert_eq!(style.character, 0);
+    assert_eq!(style.character, back.styles.normal_character());
     assert_eq!((style.chp.size, style.chp.bold), (look.size, look.bold));
     let text = back.main.paras[0].chp_of_char(0);
     assert_eq!((text.size, text.bold), (look.size, look.bold));
@@ -260,7 +299,8 @@ fn every_property() -> Document {
 #[test]
 fn every_property_a_character_style_sets_survives_docx_rtf_and_odt() {
     let d = every_property();
-    let want = d.styles.character(1).unwrap().clone();
+    let id = d.main.paras[0].chp_of_char(0).character_style;
+    let want = d.styles.character(id).unwrap().clone();
     let look = d.main.paras[0].chp_of_char(0);
     // QUILL_CHARACTER_FIXTURES=dir writes the files for checking in Word and
     // other word processors; QUILL_EVERYTHING_RETURN=a.docx,b.docx checks
@@ -345,7 +385,10 @@ fn linked_paragraph_styles_save_their_look_in_rtf_and_odt_too() {
         let text = back.main.paras[0].chp_of_char(0);
         assert_eq!((text.size, text.bold), (look.size, look.bold), "{name}");
         assert!(
-            back.styles.styles.iter().all(|s| s.character == 0),
+            back.styles
+                .styles
+                .iter()
+                .all(|s| s.character == back.styles.normal_character()),
             "{name}"
         );
     }

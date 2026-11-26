@@ -9,6 +9,10 @@ use quick_xml::events::{BytesStart, Event};
 const MAX_XML_BYTES: usize = 512 * 1024 * 1024;
 const MAX_XML_DEPTH: usize = 256;
 const MAX_XML_NODES: usize = 16_000_000;
+/// Estimated retained storage for all XML trees in one package. The node
+/// count remains as a separate work limit, while this stops small, dense XML
+/// from turning into a much larger forest of Strings and Vecs.
+const MAX_XML_TREE_BYTES: usize = 256 << 20;
 // Bound per-element bookkeeping (including duplicate-name checks), and
 // charge raw attribute bytes before decoding or copying their strings.
 const MAX_ELEMENT_ATTRIBUTES: usize = 256;
@@ -21,6 +25,41 @@ fn add_nodes(nodes: &mut usize, count: usize, max: usize) -> Result<(), String> 
         .filter(|&n| n <= max)
         .ok_or_else(|| "XML document has too many nodes".to_string())?;
     Ok(())
+}
+
+/// Retained XML-tree storage charged across all parts of one package.
+pub struct Budget {
+    bytes: usize,
+    max: usize,
+}
+
+impl Budget {
+    pub fn new() -> Budget {
+        Budget {
+            bytes: 0,
+            max: MAX_XML_TREE_BYTES,
+        }
+    }
+
+    fn add(&mut self, bytes: usize) -> Result<(), String> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .filter(|&n| n <= self.max)
+            .ok_or_else(|| "XML parts need too much memory".to_string())?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn with_limit(max: usize) -> Budget {
+        Budget { bytes: 0, max }
+    }
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -51,6 +90,7 @@ fn start(
     nodes: &mut usize,
     max_nodes: usize,
     attribute_bytes: &mut usize,
+    budget: &mut Budget,
 ) -> Result<Element, String> {
     let bytes = e.attributes_raw().len();
     if bytes > MAX_ELEMENT_ATTRIBUTE_BYTES {
@@ -61,6 +101,10 @@ fn start(
         .filter(|&n| n <= MAX_ATTRIBUTE_BYTES)
         .ok_or_else(|| "XML document has too many attribute bytes".to_string())?;
     add_nodes(nodes, 1, max_nodes)?;
+    // Node storage is held inline in its parent's Vec. Charging twice its
+    // size covers normal Vec spare capacity without depending on its growth
+    // strategy.
+    budget.add(std::mem::size_of::<Node>() * 2 + e.name().as_ref().len())?;
     let mut attrs = Vec::new();
     for (index, attr) in e.attributes().enumerate() {
         if index >= MAX_ELEMENT_ATTRIBUTES {
@@ -68,6 +112,14 @@ fn start(
         }
         add_nodes(nodes, 1, max_nodes)?;
         let attr = attr.map_err(|e| format!("XML attribute error: {e}"))?;
+        // Small attribute Vecs commonly reserve several entries at once.
+        // Four slots per actual attribute is conservative there; larger Vecs
+        // need less spare space per entry.
+        budget.add(
+            std::mem::size_of::<(String, String)>() * 4
+                + attr.key.as_ref().len()
+                + attr.value.len(),
+        )?;
         let value = attr
             .unescape_value()
             .map_err(|e| format!("XML attribute value error: {e}"))?
@@ -83,7 +135,12 @@ fn start(
 
 /// Parse a whole document into a tree. Returns the root element.
 pub fn parse(data: &[u8]) -> Result<Element, String> {
-    parse_with_limits(data, MAX_XML_BYTES, MAX_XML_DEPTH, MAX_XML_NODES)
+    parse_with_budget(data, &mut Budget::new())
+}
+
+/// Parse one part, charging its retained tree to the package's shared budget.
+pub fn parse_with_budget(data: &[u8], budget: &mut Budget) -> Result<Element, String> {
+    parse_with_limits(data, MAX_XML_BYTES, MAX_XML_DEPTH, MAX_XML_NODES, budget)
 }
 
 fn parse_with_limits(
@@ -91,6 +148,7 @@ fn parse_with_limits(
     max_bytes: usize,
     max_depth: usize,
     max_nodes: usize,
+    budget: &mut Budget,
 ) -> Result<Element, String> {
     if data.len() > max_bytes {
         return Err("XML part is too large".into());
@@ -100,17 +158,23 @@ fn parse_with_limits(
     let mut buf = Vec::new();
     let mut nodes = 0usize;
     let mut attribute_bytes = 0usize;
-    // Text, character references and CDATA next to each other are one
-    // text node, counted once: "a &lt; b" is one piece of text, not three.
-    let add_text = |nodes: &mut usize, el: &mut Element, text: &str| -> Result<(), String> {
+    // Text, character references and CDATA next to each other are one text
+    // node, counted once: "a &lt; b" is one piece of text, not three.
+    let add_text = |nodes: &mut usize,
+                    el: &mut Element,
+                    text: &str,
+                    budget: &mut Budget|
+     -> Result<(), String> {
         if text.is_empty() {
             return Ok(());
         }
+        budget.add(text.len())?;
         if let Some(Node::Text(last)) = el.children.last_mut() {
             last.push_str(text);
             return Ok(());
         }
         add_nodes(nodes, 1, max_nodes)?;
+        budget.add(std::mem::size_of::<Node>() * 2)?;
         el.children.push(Node::Text(text.to_string()));
         Ok(())
     };
@@ -120,14 +184,14 @@ fn parse_with_limits(
                 if stack.len() > max_depth {
                     return Err("XML document is nested too deeply".into());
                 }
-                let el = start(&e, &mut nodes, max_nodes, &mut attribute_bytes)?;
+                let el = start(&e, &mut nodes, max_nodes, &mut attribute_bytes, budget)?;
                 stack.push(el);
             }
             Ok(Event::Empty(e)) => {
                 if stack.len() > max_depth {
                     return Err("XML document is nested too deeply".into());
                 }
-                let el = start(&e, &mut nodes, max_nodes, &mut attribute_bytes)?;
+                let el = start(&e, &mut nodes, max_nodes, &mut attribute_bytes, budget)?;
                 stack.last_mut().unwrap().children.push(Node::Element(el));
             }
             Ok(Event::End(_)) => {
@@ -142,7 +206,7 @@ fn parse_with_limits(
                 let text = quick_xml::escape::unescape(raw)
                     .map(|s| s.into_owned())
                     .map_err(|e| format!("XML text error: {e}"))?;
-                add_text(&mut nodes, stack.last_mut().unwrap(), &text)?;
+                add_text(&mut nodes, stack.last_mut().unwrap(), &text, budget)?;
             }
             Ok(Event::GeneralRef(r)) => {
                 // Entity and character references inside text.
@@ -165,11 +229,12 @@ fn parse_with_limits(
                     &mut nodes,
                     stack.last_mut().unwrap(),
                     c.encode_utf8(&mut [0; 4]),
+                    budget,
                 )?;
             }
             Ok(Event::CData(t)) => {
                 let text: String = t.to_string();
-                add_text(&mut nodes, stack.last_mut().unwrap(), &text)?;
+                add_text(&mut nodes, stack.last_mut().unwrap(), &text, budget)?;
             }
             Ok(Event::Eof) => break,
             Ok(_) => {}
@@ -288,16 +353,16 @@ mod tests {
     fn references_in_text_are_part_of_the_text_not_nodes_of_their_own() {
         // Three hundred escapes, under a limit of ten nodes.
         let xml = format!("<a>{}</a>", "x &lt; y &amp; ".repeat(150));
-        let root = parse_with_limits(xml.as_bytes(), 1 << 20, 10, 10).unwrap();
+        let root = parse_with_limits(xml.as_bytes(), 1 << 20, 10, 10, &mut Budget::new()).unwrap();
         assert_eq!(root.children.len(), 1);
         assert_eq!(root.text(), "x < y & ".repeat(150));
     }
 
     #[test]
     fn rejects_excessive_depth_nodes_and_bytes() {
-        assert!(parse_with_limits(b"<a><b><c/></b></a>", 100, 2, 100).is_err());
-        assert!(parse_with_limits(b"<a><b/><c/></a>", 100, 10, 2).is_err());
-        assert!(parse_with_limits(b"<root/>", 6, 10, 10).is_err());
+        assert!(parse_with_limits(b"<a><b><c/></b></a>", 100, 2, 100, &mut Budget::new()).is_err());
+        assert!(parse_with_limits(b"<a><b/><c/></a>", 100, 10, 2, &mut Budget::new()).is_err());
+        assert!(parse_with_limits(b"<root/>", 6, 10, 10, &mut Budget::new()).is_err());
     }
 
     #[test]
@@ -307,12 +372,30 @@ mod tests {
             br#"<root a="ok" b="&bad;"></root>"#.as_slice(),
         ] {
             assert_eq!(
-                parse_with_limits(xml, 100, 10, 2).unwrap_err(),
+                parse_with_limits(xml, 100, 10, 2, &mut Budget::new()).unwrap_err(),
                 "XML document has too many nodes"
             );
         }
-        assert!(parse_with_limits(b"<r><a x='1'/><b y='2'/></r>", 100, 10, 5).is_ok());
-        assert!(parse_with_limits(b"<r><a x='1'/><b y='2'/></r>", 100, 10, 4).is_err());
+        assert!(
+            parse_with_limits(
+                b"<r><a x='1'/><b y='2'/></r>",
+                100,
+                10,
+                5,
+                &mut Budget::new(),
+            )
+            .is_ok()
+        );
+        assert!(
+            parse_with_limits(
+                b"<r><a x='1'/><b y='2'/></r>",
+                100,
+                10,
+                4,
+                &mut Budget::new(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -336,14 +419,28 @@ mod tests {
         let mut nodes = 0;
         // The last bytes fit, so decoding still reports the malformed value.
         assert!(
-            start(&e, &mut nodes, 10, &mut total)
+            start(&e, &mut nodes, 10, &mut total, &mut Budget::new())
                 .unwrap_err()
                 .contains("value error")
         );
         assert_eq!(total, MAX_ATTRIBUTE_BYTES);
         assert_eq!(
-            start(&e, &mut nodes, 10, &mut total).unwrap_err(),
+            start(&e, &mut nodes, 10, &mut total, &mut Budget::new()).unwrap_err(),
             "XML document has too many attribute bytes"
+        );
+    }
+
+    #[test]
+    fn one_budget_bounds_the_trees_of_all_package_parts() {
+        let xml = b"<root><one/><two/></root>";
+        let mut one = Budget::new();
+        parse_with_budget(xml, &mut one).unwrap();
+        let one_part = one.bytes;
+        let mut both = Budget::with_limit(one_part * 2 - 1);
+        parse_with_budget(xml, &mut both).unwrap();
+        assert_eq!(
+            parse_with_budget(xml, &mut both).unwrap_err(),
+            "XML parts need too much memory"
         );
     }
 

@@ -1,10 +1,10 @@
 //! Reading OpenDocument Text: .odt packages and flat .fodt files.
 //!
 //! Like the .docx reader, it keeps what the original can express and maps the
-//! rest to the nearest 5.1 feature. List numbers and bullets become literal
-//! text and a tab, character styles become direct formatting, and the text
-//! of frames and shapes follows the paragraph they are anchored to. Text is
-//! never dropped on purpose.
+//! rest to the nearest feature of the original. List numbers and bullets become
+//! literal text and a tab, character styles become direct formatting, and the
+//! text of frames and shapes follows the paragraph they are anchored to. Text
+//! is never dropped on purpose.
 
 use crate::report::{self as notes, ImportReport};
 use crate::xml::{self, Element, Node};
@@ -94,9 +94,10 @@ pub fn read(data: &[u8]) -> Result<Document, String> {
 /// Like `read`, with what could not be kept exactly.
 pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
     let zip = Archive::open(data).map_err(|e| e.to_string())?;
-    let part = |name: &str| -> Result<Option<Element>, String> {
+    let mut xml_budget = xml::Budget::new();
+    let mut part = |name: &str| -> Result<Option<Element>, String> {
         match zip.read(name).map_err(|e| e.to_string())? {
-            Some(bytes) => xml::parse(&bytes).map(Some),
+            Some(bytes) => xml::parse_with_budget(&bytes, &mut xml_budget).map(Some),
             None => Ok(None),
         }
     };
@@ -116,12 +117,14 @@ pub fn read_reported(data: &[u8]) -> Result<(Document, ImportReport), String> {
         let path = href.trim_start_matches("./");
         zip.read(path).ok().flatten().map(Into::into)
     };
+    let picture_size = |href: &str| zip.entry_size(href.trim_start_matches("./"));
     build(
         &content,
         styles.as_ref(),
         meta.as_ref(),
         settings.as_ref(),
         &pictures,
+        &picture_size,
     )
 }
 
@@ -141,7 +144,14 @@ pub fn read_flat_reported(data: &[u8]) -> Result<(Document, ImportReport), Strin
     if root.name != "document" {
         return Err("the file is not an OpenDocument document".into());
     }
-    build(&root, Some(&root), Some(&root), Some(&root), &|_| None)
+    build(
+        &root,
+        Some(&root),
+        Some(&root),
+        Some(&root),
+        &|_| None,
+        &|_| None,
+    )
 }
 
 /// The styles a document defines, by family and name, and its fonts.
@@ -337,6 +347,7 @@ struct Reader<'a> {
     doc: Document,
     st: Styles<'a>,
     pictures: &'a dyn Fn(&str) -> Option<Arc<[u8]>>,
+    picture_size: &'a dyn Fn(&str) -> Option<usize>,
     picture_cache: HashMap<String, Option<Picture>>,
     /// Named paragraph style -> our style.
     styles: HashMap<&'a str, StyleId>,
@@ -381,6 +392,7 @@ fn build<'a>(
     meta: Option<&'a Element>,
     settings: Option<&'a Element>,
     pictures: &'a dyn Fn(&str) -> Option<Arc<[u8]>>,
+    picture_size: &'a dyn Fn(&str) -> Option<usize>,
 ) -> Result<(Document, ImportReport), String> {
     let mut st = Styles::default();
     st.add_fonts(content);
@@ -406,9 +418,10 @@ fn build<'a>(
     let mut r = Reader {
         budget: crate::ReadBudget::default(),
         repeated_spaces: 0,
-        doc: Document::new(),
+        doc: Document::for_import(),
         st,
         pictures,
+        picture_size,
         picture_cache: HashMap::new(),
         styles: HashMap::new(),
         characters: HashMap::new(),
@@ -486,6 +499,7 @@ fn build<'a>(
         }
         r.doc.reconcile(NoteKind::Annotation);
     }
+    r.doc.styles.ensure_normal_character();
     r.doc.forget_history();
     // Headers, footers and notes are read after the body.
     if let Some(why) = r.budget.too_large() {
@@ -1711,21 +1725,51 @@ impl<'a> Reader<'a> {
                 Some(h) if !h.is_empty() => {
                     if let Some(cached) = self.picture_cache.get(h) {
                         cached.clone()
-                    } else if !self.budget.add_picture(h) {
-                        // Past the picture limit; the file is refused when
-                        // reading ends.
-                        return None;
                     } else {
+                        let Some(bytes) = (self.picture_size)(h) else {
+                            continue;
+                        };
+                        if !self.budget.add_picture(h, bytes) {
+                            // Past the picture limit; the file is refused when
+                            // reading ends.
+                            return None;
+                        }
                         let picture = (self.pictures)(h).and_then(crate::images::picture);
+                        if let Some(pic) = &picture {
+                            if !self.budget.set_picture_bytes(h, pic.data.len()) {
+                                self.picture_cache.insert(h.to_string(), None);
+                                return None;
+                            }
+                        } else {
+                            self.budget.remove_picture(h);
+                        }
                         self.picture_cache.insert(h.to_string(), picture.clone());
                         picture
                     }
                 }
-                _ => img
-                    .child("binary-data")
-                    .and_then(|b| base64_decode(&b.text()))
-                    .map(Arc::<[u8]>::from)
-                    .and_then(crate::images::picture),
+                _ => {
+                    let Some(data) = img.child("binary-data") else {
+                        continue;
+                    };
+                    let text = data.text();
+                    let encoded = text.bytes().filter(|b| !b.is_ascii_whitespace()).count();
+                    let estimated = encoded.saturating_add(3) / 4 * 3;
+                    let key = format!("inline picture {:p}", data);
+                    if !self.budget.add_picture(&key, estimated) {
+                        return None;
+                    }
+                    let picture = base64_decode(&text)
+                        .map(Arc::<[u8]>::from)
+                        .and_then(crate::images::picture);
+                    if let Some(pic) = &picture {
+                        if !self.budget.set_picture_bytes(&key, pic.data.len()) {
+                            return None;
+                        }
+                    } else {
+                        self.budget.remove_picture(&key);
+                    }
+                    picture
+                }
             };
             if let Some(mut pic) = picture {
                 let w = f.attr("width").and_then(length);
@@ -2585,7 +2629,7 @@ mod tests {
 
     fn read_content(body: &str, auto: &str) -> Document {
         let c = xml::parse(content(body, auto).as_bytes()).unwrap();
-        build(&c, None, None, None, &|_| None).unwrap().0
+        build(&c, None, None, None, &|_| None, &|_| None).unwrap().0
     }
 
     #[test]
@@ -2622,7 +2666,9 @@ mod tests {
             .as_bytes(),
         )
         .unwrap();
-        let doc = build(&c, Some(&styles), None, None, &|_| None).unwrap().0;
+        let doc = build(&c, Some(&styles), None, None, &|_| None, &|_| None)
+            .unwrap()
+            .0;
         let emphasis = doc
             .styles
             .find_character("My Emphasis")
@@ -2655,7 +2701,9 @@ mod tests {
         // Nine bytes each in the file, and they compress to almost nothing.
         let body = "<text:p/>".repeat(quill_core::limits::MAX_PARAGRAPHS * 2);
         let c = xml::parse(content(&body, "").as_bytes()).unwrap();
-        let err = build(&c, None, None, None, &|_| None).err().unwrap();
+        let err = build(&c, None, None, None, &|_| None, &|_| None)
+            .err()
+            .unwrap();
         // The count in the message shows where building stopped.
         let stopped = format!("{}", quill_core::limits::MAX_PARAGRAPHS + 1);
         assert!(err.contains("too large") && err.contains(&stopped), "{err}");
@@ -2666,7 +2714,9 @@ mod tests {
         // Each element is a thousand spaces: far more than Quill holds.
         let spaces = r#"<text:s text:c="1000"/>"#.repeat(200_000);
         let c = xml::parse(content(&format!("<text:p>{spaces}</text:p>"), "").as_bytes()).unwrap();
-        let err = build(&c, None, None, None, &|_| None).err().unwrap();
+        let err = build(&c, None, None, None, &|_| None, &|_| None)
+            .err()
+            .unwrap();
         assert!(err.contains("too large"), "{err}");
         // It stopped just past the limit, not at all two hundred million.
         assert!(err.contains("33555000 characters"), "{err}");
@@ -2678,7 +2728,9 @@ mod tests {
         // paragraphs; many of them must not all be built.
         let table = r#"<table:table><table:table-column/><table:table-row table:number-rows-repeated="1000"><table:table-cell table:number-columns-repeated="255"><text:p/></table:table-cell></table:table-row></table:table>"#;
         let c = xml::parse(content(&table.repeat(40), "").as_bytes()).unwrap();
-        let err = build(&c, None, None, None, &|_| None).err().unwrap();
+        let err = build(&c, None, None, None, &|_| None, &|_| None)
+            .err()
+            .unwrap();
         assert!(err.contains("too large"), "{err}");
     }
 
@@ -2785,7 +2837,7 @@ mod tests {
             "",
         );
         let c = xml::parse(c.as_bytes()).unwrap();
-        let (doc, report) = build(&c, None, None, None, &|_| None).unwrap();
+        let (doc, report) = build(&c, None, None, None, &|_| None, &|_| None).unwrap();
         assert_eq!(doc.main.paras[0].text, "See\u{E003}\u{E004} on.");
         assert_eq!(doc.notes.paras[0].text, "\u{E003}Note");
         assert_eq!(doc.annotations.paras[0].text, "\u{E004}Odd.");
@@ -2831,7 +2883,7 @@ mod tests {
             "",
         );
         let c = xml::parse(c.as_bytes()).unwrap();
-        let (doc, report) = build(&c, None, None, None, &|_| None).unwrap();
+        let (doc, report) = build(&c, None, None, None, &|_| None, &|_| None).unwrap();
         assert_eq!(doc.main.paras[0].text, "Saved copy");
         assert_eq!(report.notes(), [notes::LINKED_SECTIONS]);
     }
@@ -2901,7 +2953,10 @@ mod tests {
             .as_bytes(),
         )
         .unwrap();
-        let (doc, _) = build(&c, None, None, None, &|_| Some(gif.clone().into())).unwrap();
+        let (doc, _) = build(&c, None, None, None, &|_| Some(gif.clone().into()), &|_| {
+            Some(gif.len())
+        })
+        .unwrap();
         let Object::Picture(picture) = &doc.objects[0] else {
             panic!("pictures were not read")
         };

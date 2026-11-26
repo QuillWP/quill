@@ -1083,7 +1083,9 @@ impl NativeDialog {
                             let _: () = msg_send![editor, setSelectedRange: range];
                         }
                     }
-                    Kind::Check { on, mixed, .. } => {
+                    Kind::Check {
+                        on, mixed, switch, ..
+                    } => {
                         let state: isize = if *mixed {
                             -1
                         } else if *on {
@@ -1092,8 +1094,12 @@ impl NativeDialog {
                             0
                         };
                         let _: () = msg_send![ptr, setState: state];
-                        let value = NSString::from_str(&item.label);
-                        let _: () = msg_send![ptr, setTitle: &*value];
+                        // An NSSwitch has no title; its label is a
+                        // separate field in the container.
+                        if !*switch {
+                            let value = NSString::from_str(&item.label);
+                            let _: () = msg_send![ptr, setTitle: &*value];
+                        }
                     }
                     Kind::Radio { on, .. } => {
                         let state: isize = if *on { 1 } else { 0 };
@@ -1431,6 +1437,73 @@ unsafe fn set_static_label(field: *mut AnyObject, text: &str, struck: bool) {
     }
 }
 
+/// An on/off switch row: a container the size of the row, holding the
+/// label at the left and an NSSwitch against the right edge. The switch is
+/// the control, so its state is read like a checkbox's.
+unsafe fn make_switch(
+    item: &crate::dialog::Item,
+    frame: NSRect,
+    panel: *mut AnyObject,
+    delegate: *mut AnyObject,
+    content: *mut AnyObject,
+) -> Option<(
+    Retained<AnyObject>,
+    Option<Retained<AnyObject>>,
+    ControlKind,
+)> {
+    unsafe {
+        let raw: *mut AnyObject = msg_send![class!(NSView), alloc];
+        let raw: *mut AnyObject = msg_send![raw, initWithFrame: frame];
+        let container = Retained::from_raw(raw)?;
+        let view = Retained::as_ptr(&container) as *mut AnyObject;
+        let local = NSRect::new(NSPoint::ZERO, frame.size);
+
+        let raw: *mut AnyObject = msg_send![class!(NSSwitch), alloc];
+        let raw: *mut AnyObject = msg_send![raw, initWithFrame: local];
+        let object = Retained::from_raw(raw)?;
+        let ptr = Retained::as_ptr(&object) as *mut AnyObject;
+        let _: () = msg_send![ptr, setControlSize: 1isize];
+        let fit: NSSize = msg_send![ptr, fittingSize];
+        let (w, h) = if fit.width > 0.0 && fit.height > 0.0 {
+            (fit.width, fit.height)
+        } else {
+            (38.0, 22.0)
+        };
+        let at = NSRect::new(
+            NSPoint::new(frame.size.width - w, (frame.size.height - h) / 2.0),
+            NSSize::new(w, h),
+        );
+        let _: () = msg_send![ptr, setFrame: at];
+
+        let raw: *mut AnyObject = msg_send![class!(NSTextField), alloc];
+        let raw: *mut AnyObject = msg_send![raw, initWithFrame: NSRect::new(
+            NSPoint::ZERO,
+            NSSize::new((frame.size.width - w - 8.0).max(0.0), frame.size.height),
+        )];
+        let text = Retained::from_raw(raw)?;
+        let field = Retained::as_ptr(&text) as *mut AnyObject;
+        let _: () = msg_send![field, setEditable: false];
+        let _: () = msg_send![field, setSelectable: false];
+        let _: () = msg_send![field, setBezeled: false];
+        let _: () = msg_send![field, setDrawsBackground: false];
+        set_static_label(field, &item.label, false);
+
+        let _: () = msg_send![view, addSubview: field];
+        let _: () = msg_send![view, addSubview: ptr];
+        let _: () = msg_send![ptr, setTarget: delegate];
+        let _: () = msg_send![ptr, setAction: sel!(quillDialogAction:)];
+        actions().lock().ok()?.push(ActionTarget {
+            control: ptr as usize,
+            panel: panel as usize,
+            id: item.id,
+            choice: None,
+            default: false,
+        });
+        let _: () = msg_send![content, addSubview: view];
+        Some((object, Some(container), ControlKind::Check))
+    }
+}
+
 unsafe fn make_control(
     item: &crate::dialog::Item,
     frame: NSRect,
@@ -1457,6 +1530,9 @@ unsafe fn make_control(
                 double.is_some(),
             )
         };
+    }
+    if matches!(item.kind, Kind::Check { switch: true, .. }) {
+        return unsafe { make_switch(item, frame, panel, delegate, content) };
     }
     let (class, kind, button_type): (&AnyClass, ControlKind, Option<usize>) = match item.kind {
         Kind::Button { .. } => (class!(NSButton), ControlKind::Button, Some(0)),

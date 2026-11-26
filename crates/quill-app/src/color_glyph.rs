@@ -53,7 +53,12 @@ pub fn get(fonts: &Fonts, face: FaceKey, glyph: GlyphId, pixels: f32) -> Option<
             return value.clone();
         }
         let result = (|| {
-            let image = face.font.glyph_raster_image2(glyph, ppem)?;
+            // The font has several sizes of bitmap, and the smaller ones leave
+            // out some pictures (the joined family emoji): take the largest.
+            let image = face
+                .font
+                .glyph_raster_image2(glyph, ppem)
+                .or_else(|| face.font.glyph_raster_image2(glyph, 256))?;
             if image.pixels_per_em == 0
                 || u64::from(image.width) * u64::from(image.height) > 1_048_576
             {
@@ -176,5 +181,20 @@ mod tests {
         let r = g.rect(10.0, 60.0, 48.0);
         assert!(r.y < 60.0 && r.bottom() > 10.0 && r.w > 0.0);
         assert!(Arc::ptr_eq(&g, &get(&fonts, face, glyph, 48.0).unwrap()));
+    }
+
+    #[test]
+    fn a_joined_emoji_is_one_picture_even_at_a_small_size() {
+        let mut fonts = Fonts::new(quill_layout::Catalog::scan_system());
+        if !fonts.has_family("Apple Color Emoji") {
+            return;
+        }
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let found = fonts.emoji_sequences(&format!("x{family}"));
+        assert_eq!(found.len(), 1);
+        let one = found[0];
+        assert_eq!((one.start, one.end), (1, 1 + family.len()));
+        // The font's small bitmaps leave the family out; the large one has it.
+        assert!(get(&fonts, one.face, one.glyph, 24.0).is_some());
     }
 }

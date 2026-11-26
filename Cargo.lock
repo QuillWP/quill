@@ -1668,7 +1668,7 @@ dependencies = [
 
 [[package]]
 name = "quill-app"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "ab_glyph_rasterizer",
  "arboard",
@@ -1698,14 +1698,14 @@ dependencies = [
 
 [[package]]
 name = "quill-core"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "unicode-segmentation",
 ]
 
 [[package]]
 name = "quill-formats"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "gif",
  "image-webp",
@@ -1718,7 +1718,7 @@ dependencies = [
 
 [[package]]
 name = "quill-layout"
-version = "0.30.0"
+version = "0.31.0"
 dependencies = [
  "ab_glyph",
  "ab_glyph_rasterizer",
@@ -1726,6 +1726,7 @@ dependencies = [
  "memmap2",
  "quill-core",
  "ttf-parser",
+ "unicode-segmentation",
 ]
 
 [[package]]

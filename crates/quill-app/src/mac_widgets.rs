@@ -39,6 +39,14 @@ extern "C" fn scroll_action(_this: *mut AnyObject, _cmd: Sel, sender: *mut AnyOb
     }
 }
 
+extern "C" fn dock_styles_action(_this: *mut AnyObject, _cmd: Sel, _sender: *mut AnyObject) {
+    if let Some(proxy) = PROXY.get()
+        && let Ok(proxy) = proxy.lock()
+    {
+        let _ = proxy.send_event(UserEvent::DockStylesPalette);
+    }
+}
+
 /// Add the scrollbar action to winit's application delegate. This is done
 /// after the event loop has registered its Objective-C class.
 pub fn install(proxy: EventLoopProxy<UserEvent>) {
@@ -46,18 +54,23 @@ pub fn install(proxy: EventLoopProxy<UserEvent>) {
     let Some(class) = AnyClass::get("WinitApplicationDelegate") else {
         return;
     };
-    let f: extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) = scroll_action;
+    let actions: [(Sel, extern "C" fn(*mut AnyObject, Sel, *mut AnyObject)); 2] = [
+        (sel!(quillScroll:), scroll_action),
+        (sel!(quillDockStyles:), dock_styles_action),
+    ];
     // SAFETY: `f` is an Objective-C action method: void return, self, command,
     // and one object argument. Adding methods to a registered class is the
     // purpose of `class_addMethod`.
     unsafe {
-        let imp: unsafe extern "C" fn() = std::mem::transmute(f);
-        objc2::ffi::class_addMethod(
-            class as *const AnyClass as *mut _,
-            sel!(quillScroll:).as_ptr(),
-            Some(imp),
-            c"v@:@".as_ptr(),
-        );
+        for (selector, action) in actions {
+            let imp: unsafe extern "C" fn() = std::mem::transmute(action);
+            objc2::ffi::class_addMethod(
+                class as *const AnyClass as *mut _,
+                selector.as_ptr(),
+                Some(imp),
+                c"v@:@".as_ptr(),
+            );
+        }
     }
 }
 
@@ -229,6 +242,11 @@ fn make_scroller(mtm: MainThreadMarker, vertical: bool) -> MacScrollbar {
         container.setScrollerStyle(NSScrollerStyle::Overlay);
         container.setScrollerKnobStyle(NSScrollerKnobStyle::Dark);
         scroller.setKnobStyle(NSScrollerKnobStyle::Dark);
+        // The text view is the accessibility element. These overlay bars
+        // only mirror its scroll position, and VoiceOver would otherwise
+        // stop on them as an empty "scroll area" instead of the text.
+        let _: () = msg_send![&*container, setAccessibilityElement: false];
+        let _: () = msg_send![&*scroller, setAccessibilityElement: false];
         MacScrollbar {
             vertical,
             container,

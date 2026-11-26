@@ -684,6 +684,29 @@ mod tests {
     }
 
     #[test]
+    fn a_drop_cap_wraps_the_text_beside_it_in_normal_view() {
+        let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
+            return;
+        };
+        let doc = quill_formats::rtf::read(
+            br#"{\rtf1\ansi\pard\fs52\dropcapli3\dropcapt1\absw2000 T\par
+                \pard\fs23\qj\sa150\sl288\slmult1 he lighthouse at Harrow Bay has never been
+                the tallest on the coast, nor the brightest, nor the most photographed, but it
+                has stood through every storm since the harbor was cut.\par}"#,
+        )
+        .unwrap();
+        let mut view = DocView::new(doc, "Drop cap".into());
+        assert!(!view.page_view);
+        view.area = Rect::new(0.0, 0.0, 900.0, 700.0);
+        view.update_layout(&mut fonts);
+        // The body starts beside the cap, not below it, and its first line
+        // is pushed in past the cap.
+        assert!(view.layout(1).lines[0].left > 0.0);
+        let cap_bottom = view.tops[0] + view.layout(0).height;
+        assert!(view.tops[1] < cap_bottom, "text starts below the cap");
+    }
+
+    #[test]
     fn framed_paragraphs_wrap_at_the_frame_width() {
         let Some(mut fonts) = crate::pdf::tests::test_fonts() else {
             return;

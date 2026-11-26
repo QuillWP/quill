@@ -144,7 +144,7 @@ impl WinState {
     /// it is, for a toolbar docked at the side.
     pub(super) fn side_toolbar(&self) -> (f32, f32) {
         let (x, narrower) = self.toolbar_side();
-        (x, narrower + Self::palette_dock_width())
+        (x, narrower + self.palette_dock_width())
     }
 
     /// The same for the toolbar alone, without the docked Style Sheets
@@ -172,13 +172,44 @@ impl WinState {
         toolbar::button_at(at, len, x, y)
     }
 
+    pub(super) fn formatting_controls_width(&self) -> f32 {
+        self.width
+            - if self.styles_undock_rect().is_some() {
+                58.0
+            } else {
+                32.0
+            }
+    }
+
+    pub(super) fn styles_toggle_rect(&self) -> Rect {
+        let top = self.formatting_toolbar_top();
+        Rect::new(
+            self.width - 29.0,
+            top + 3.0,
+            24.0,
+            self.paragraph_toolbar_top() - top - 6.0,
+        )
+    }
+
+    pub(super) fn styles_undock_rect(&self) -> Option<Rect> {
+        (self.palette_dock_width() > 0.0).then(|| {
+            let toggle = self.styles_toggle_rect();
+            Rect::new(toggle.x - 26.0, toggle.y, toggle.w, toggle.h)
+        })
+    }
+
     /// The formatting or paragraph toolbar control under a point.
     pub(super) fn bar_hit(&self, x: f32, y: f32) -> Option<Hit> {
         if y < self.formatting_toolbar_top() {
             return None;
         }
         if self.show_formatting_toolbar && y < self.paragraph_toolbar_top() {
-            return bars::formatting_toolbar_hit(self.formatting_toolbar_top(), self.width, x, y);
+            return bars::formatting_toolbar_hit(
+                self.formatting_toolbar_top(),
+                self.formatting_controls_width(),
+                x,
+                y,
+            );
         }
         if self.show_paragraph_toolbar && y < self.ruler_top() {
             return bars::paragraph_toolbar_hit(self.paragraph_toolbar_top(), self.width, x, y);
@@ -618,10 +649,34 @@ impl WinState {
                 c,
                 &mut label,
                 self.formatting_toolbar_top(),
-                w,
+                self.formatting_controls_width(),
                 &rs,
                 self.bar_hover,
             );
+            let toggle = self.styles_toggle_rect();
+            c.fill(
+                Rect::new(
+                    self.formatting_controls_width(),
+                    self.formatting_toolbar_top(),
+                    self.width - self.formatting_controls_width(),
+                    bars::formatting_toolbar_height(),
+                ),
+                bars::background(),
+            );
+            if let Some(undock) = self.styles_undock_rect() {
+                crate::styles_palette::draw_docking_icon(c, &mut label, undock, false);
+            }
+            if Self::palette_shown() {
+                crate::canvas::round_rect(c, toggle, 4.0, 0xD8E8FA);
+            }
+            let icon = Rect::new(
+                toggle.x + 5.0,
+                toggle.y + (toggle.h - 11.0) / 2.0,
+                14.0,
+                11.0,
+            );
+            c.frame(icon, 0x505058);
+            c.vline(icon.right() - 5.0, icon.y, icon.bottom(), 0x505058);
         }
         if self.show_paragraph_toolbar {
             let v = &self.view;
@@ -785,13 +840,18 @@ impl WinState {
         } else {
             self.formatting_toolbar_top()
         };
-        let Some(anchor) = bars::overflow_rect(paragraph, top, self.width) else {
+        let width = if paragraph {
+            self.width
+        } else {
+            self.formatting_controls_width()
+        };
+        let Some(anchor) = bars::overflow_rect(paragraph, top, width) else {
             return;
         };
         let hits = if paragraph {
             bars::hidden_paragraph(self.width)
         } else {
-            bars::hidden_formatting(self.width)
+            bars::hidden_formatting(width)
         };
         let (menu, actions) = app_menus::bar_overflow(&self.context(env), &hits, self.tab_type);
         let bounds = Rect::new(0.0, 0.0, self.width, self.height);

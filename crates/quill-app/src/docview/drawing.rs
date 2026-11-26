@@ -32,6 +32,37 @@ const MISSING_FONT: u32 = 0xFFD6C8;
 /// How far left of the text a change bar is drawn, in points.
 const CHANGE_BAR: f32 = 9.0;
 
+/// Find a drawable ligature without changing the line's character positions.
+fn standard_ligature(
+    fonts: &Fonts,
+    text: &str,
+    glyphs: &[quill_layout::layout::Glyph],
+    size: f32,
+) -> Option<(usize, quill_layout::GlyphId)> {
+    let first = glyphs.first()?;
+    let start = first.offset as usize;
+    let text = text.get(start..)?;
+    if !text.starts_with('f') {
+        return None;
+    }
+    fonts
+        .face(first.face.face)
+        .standard_ligatures(text)
+        .find(|&(count, id)| {
+            let Some(cluster) = glyphs.get(..count) else {
+                return false;
+            };
+            cluster.iter().enumerate().all(|(i, g)| {
+                g.offset as usize == start + i
+                    && g.face == first.face
+                    && g.style == first.style
+                    && g.kind == Kind::Text
+                    && g.advance > 0.0
+            }) && fonts.advance(first.face, id, size)
+                <= cluster.iter().map(|g| g.advance).sum::<f32>() + 0.25
+        })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn paint_paragraph(
     c: &mut dyn Surface,
@@ -44,6 +75,7 @@ pub fn paint_paragraph(
     marks: bool,
     _width: f32,
     objects: &[quill_core::Object],
+    ligatures: bool,
 ) {
     for (li, line) in l.lines.iter().enumerate() {
         let base = py + line.top + line.baseline;
@@ -58,7 +90,9 @@ pub fn paint_paragraph(
                 }
             }
         }
-        for g in l.line_glyphs(line) {
+        let glyphs = l.line_glyphs(line);
+        let mut ligature_end = 0;
+        for (i, g) in glyphs.iter().enumerate() {
             let st = &l.styles[g.style as usize];
             let chp = &st.chp;
             let col = chp.color.0;
@@ -66,7 +100,47 @@ pub fn paint_paragraph(
             match g.kind {
                 Kind::Text | Kind::SoftHyphen if g.advance > 0.0 => {
                     let size = glyph_size(chp, &p.text, g.offset as usize, st.size);
-                    draw_styled_glyph(c, fonts, cache, g.face, g.id, size, ox + g.x, y, chp, col);
+                    if i < ligature_end {
+                        continue;
+                    }
+                    if ligatures
+                        && g.kind == Kind::Text
+                        && chp.spacing == 0
+                        && !chp.all_caps
+                        && !chp.small_caps
+                        && let Some((count, ligature)) =
+                            standard_ligature(fonts, &p.text, &glyphs[i..], size)
+                    {
+                        ligature_end = i + count;
+                        let start = g.offset as usize;
+                        c.begin_actual_text(&p.text[start..start + count]);
+                        draw_styled_glyph(
+                            c,
+                            fonts,
+                            cache,
+                            g.face,
+                            ligature,
+                            size,
+                            ox + g.x,
+                            y,
+                            chp,
+                            col,
+                        );
+                        c.end_actual_text();
+                    } else {
+                        draw_styled_glyph(
+                            c,
+                            fonts,
+                            cache,
+                            g.face,
+                            g.id,
+                            size,
+                            ox + g.x,
+                            y,
+                            chp,
+                            col,
+                        );
+                    }
                 }
                 Kind::Field => {
                     // An annotation mark: the balloon, the initials in it.
@@ -962,8 +1036,8 @@ impl DocView {
         Self::fill_chars(c, l, ox, py, from, to, text_len, self.para_width(para), hl);
     }
 
-    /// The font ids to mark on screen: those not installed, when View >
-    /// Highlight Missing Fonts is on.
+    /// The font ids to mark on screen: those not installed, when Highlight
+    /// Missing Fonts is on.
     fn missing_font_ids(&self, fonts: &Fonts) -> Vec<u16> {
         if !crate::settings::with(|s| s.highlight_missing_fonts) {
             return Vec::new();
@@ -1072,6 +1146,7 @@ impl DocView {
             self.show_marks,
             self.laid_out_width,
             &self.doc.objects,
+            self.ligatures(),
         );
         self.draw_spelling(c, para, l, ox, py);
         if !self.page_view && c.screen() {
@@ -1402,4 +1477,48 @@ mod page_cut_tests {
             .collect();
         assert_eq!(rows.len(), lines);
     }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn latin_ligature_keeps_character_carets_and_stays_on_its_line() {
+    use quill_core::{Document, Paragraph};
+    use quill_layout::{Catalog, LayoutOptions, layout_paragraph};
+
+    let path = std::path::PathBuf::from(
+        "/Applications/LibreOffice.app/Contents/Resources/fonts/truetype/DejaVuSerif.ttf",
+    );
+    if !path.is_file() {
+        return;
+    }
+    let mut fonts = Fonts::new(Catalog::from_files(&[(
+        "DejaVu Serif",
+        path,
+        0,
+        400,
+        false,
+    )]));
+    let doc = Document::with_default_font("DejaVu Serif", 48);
+    let normal = doc.styles.get(0);
+    let para = Paragraph::with_text("file", normal.chp, normal.pap.clone());
+    let layout = layout_paragraph(
+        &para,
+        &|_| "DejaVu Serif".into(),
+        &mut fonts,
+        &LayoutOptions::default(),
+    );
+    let glyphs = layout.line_glyphs(&layout.lines[0]);
+    let (count, glyph) = standard_ligature(&fonts, &para.text, glyphs, 24.0).unwrap();
+    assert_eq!(count, 2);
+    assert_ne!(glyph, glyphs[0].id);
+    assert!(standard_ligature(&fonts, &para.text, &glyphs[..1], 24.0).is_none());
+    let (_, start) = layout.caret(0, false);
+    let (line, inside) = layout.caret(1, false);
+    let (_, end) = layout.caret(2, false);
+    assert!(start < inside && inside < end);
+    assert_eq!(layout.hit(line, inside).0, 1);
+
+    let mut split = glyphs[..2].to_vec();
+    split[1].style += 1;
+    assert!(standard_ligature(&fonts, &para.text, &split, 24.0).is_none());
 }

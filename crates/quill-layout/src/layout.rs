@@ -4,7 +4,7 @@
 //! kerning. All positions are in points, measured from the left edge of
 //! the text column (the left margin) and the top of the paragraph.
 
-use crate::fonts::{FaceKey, Fonts};
+use crate::fonts::{EmojiSequence, FaceKey, Fonts};
 use ab_glyph::GlyphId;
 use quill_core::para::{Paragraph, chars};
 use quill_core::props::{
@@ -857,8 +857,25 @@ fn measure(
         let hidden = (chp.hidden && !opts.show_hidden)
             || (!opts.show_changes && quill_core::revision::is_deleted(chp.rev));
         let mut prev: Option<(FaceKey, GlyphId)> = None;
+        // Emoji the color font draws as one picture. The first character
+        // of each takes the picture and its width, the rest take no room.
+        let sequences = if hidden {
+            Vec::new()
+        } else {
+            fonts.emoji_sequences(&para.text[start..end])
+        };
+        let mut next_sequence = sequences.iter().peekable();
+        let mut current: Option<EmojiSequence> = None;
         for (i, c) in para.text[start..end].char_indices() {
             let offset = (start + i) as u32;
+            if current.is_some_and(|s| i >= s.end) {
+                current = None;
+            }
+            let starts = next_sequence.next_if(|s| s.start == i).copied();
+            if starts.is_some() {
+                current = starts;
+            }
+            let inside = current.filter(|_| starts.is_none());
             let kind = if hidden {
                 Kind::Hidden
             } else {
@@ -897,21 +914,26 @@ fn measure(
                 _ if c == chars::NONBREAKING_HYPHEN => '-',
                 _ => shown,
             };
-            let (gface, id) = fonts.glyph(face, shown);
+            let (gface, id) = match current {
+                Some(s) => (s.face, s.glyph),
+                None => fonts.glyph(face, shown),
+            };
             let mut advance = match kind {
                 Kind::Hidden | Kind::LineBreak | Kind::PageBreak => 0.0,
                 Kind::Tab(_) => 0.0,
+                _ if inside.is_some() => 0.0,
                 _ => fonts.advance(gface, id, glyph_size) + spacing,
             };
             if let Some((pf, pid)) = prev
                 && pf == gface
                 && kind == Kind::Text
+                && current.is_none()
                 && let Some(last) = items.last_mut()
             {
                 let last: &mut Item = last;
                 last.advance += fonts.kern(gface, pid, id, glyph_size);
             }
-            prev = (kind == Kind::Text).then_some((gface, id));
+            prev = (kind == Kind::Text && current.is_none()).then_some((gface, id));
             let mut ascent = vm.ascent;
             if kind == Kind::Object {
                 // A picture sits on the baseline and the line grows to hold
@@ -1212,6 +1234,11 @@ impl ParaLayout {
             if matches!(g.kind, Kind::LineBreak | Kind::PageBreak) {
                 return (g.offset as usize, false);
             }
+            // The characters after the first of an emoji sequence, or of an
+            // accented letter, take no room: a click is never between them.
+            if g.kind == Kind::Text && g.advance == 0.0 {
+                continue;
+            }
             if x < g.x + g.advance / 2.0 {
                 return (g.offset as usize, false);
             }
@@ -1250,5 +1277,66 @@ mod tests {
         assert_eq!(style_for(&mut styles, look(past - 1)), past as u32 - 1);
         // A glyph is no bigger for it.
         assert_eq!(std::mem::size_of::<Glyph>(), 24);
+    }
+
+    /// The glyphs of the first line of `text`, in Helvetica.
+    fn first_line(fonts: &mut Fonts, text: &str) -> Vec<Glyph> {
+        let doc = quill_core::text::from_plain_text(text);
+        let l = layout_paragraph(
+            &doc.main.paras[0],
+            &|_| "Helvetica".into(),
+            fonts,
+            &LayoutOptions::default(),
+        );
+        l.line_glyphs(&l.lines[0]).to_vec()
+    }
+
+    #[test]
+    fn an_emoji_sequence_is_one_picture_wide_and_its_other_characters_take_no_room() {
+        let mut fonts = Fonts::new(crate::fonts::Catalog::scan_system());
+        if !fonts.has_family("Apple Color Emoji") {
+            return;
+        }
+        let single = first_line(&mut fonts, "a\u{1F600}b");
+        for text in [
+            "a\u{1F1EB}\u{1F1F7}b",
+            "a\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}b",
+            "a\u{1F44D}\u{1F3FD}b",
+            "a\u{2764}\u{FE0F}b",
+        ] {
+            let g = first_line(&mut fonts, text);
+            assert_eq!(g.len(), text.chars().count(), "{text}");
+            // The first character holds the picture, as wide as any emoji.
+            assert!((g[1].advance - single[1].advance).abs() < 0.01, "{text}");
+            assert_eq!(g[1].face, single[1].face, "{text}");
+            // The rest of the sequence takes no room, and "b" follows the picture.
+            assert!(g[2..g.len() - 1].iter().all(|x| x.advance == 0.0), "{text}");
+            let b = g.last().unwrap();
+            assert!((b.x - (g[1].x + g[1].advance)).abs() < 0.01, "{text}");
+        }
+        // Without the selector a heart is the text symbol, a single character.
+        let text_heart = first_line(&mut fonts, "a\u{2764}b");
+        assert_ne!(text_heart[1].face, single[1].face);
+    }
+
+    #[test]
+    fn a_click_lands_before_or_after_an_emoji_sequence_never_inside_it() {
+        let mut fonts = Fonts::new(crate::fonts::Catalog::scan_system());
+        if !fonts.has_family("Apple Color Emoji") {
+            return;
+        }
+        let text = "a\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}b";
+        let doc = quill_core::text::from_plain_text(text);
+        let l = layout_paragraph(
+            &doc.main.paras[0],
+            &|_| "Helvetica".into(),
+            &mut fonts,
+            &LayoutOptions::default(),
+        );
+        let g = l.line_glyphs(&l.lines[0]);
+        let (before, after) = (g[1].offset as usize, g[g.len() - 1].offset as usize);
+        let width = g[1].advance;
+        assert_eq!(l.hit(0, g[1].x + width * 0.25).0, before);
+        assert_eq!(l.hit(0, g[1].x + width * 0.75).0, after);
     }
 }
